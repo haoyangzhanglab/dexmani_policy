@@ -26,11 +26,9 @@ class R3DObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        pc_encoder_config = dict(pc_encoder_config or {})
-        if fps_random_config:
-            pc_encoder_config.setdefault("fps_random_config", fps_random_config)
-
-        self.pc_encoder = Uni3DEncoder(**pc_encoder_config)
+        self.pc_encoder = Uni3DEncoder(
+            fps_random_config=fps_random_config, **(pc_encoder_config or {}),
+        )
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
 
@@ -54,18 +52,6 @@ class R3DObservationEncoder(nn.Module):
 
 class R3DPolicy(BasePolicy):
     supported_execution_modes = ("sync", "async", "rtc")
-
-    @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        pc = dict(config.get("pc_encoder_config") or {})
-        pc.update(use_pretrained_weights=False, pretrained_weights_path=None)
-        config.pc_encoder_config = pc
-
-    @classmethod
-    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
-        if spec["point_cloud"] != "limits":
-            raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")
-        super().validate_normalization_recipe(spec, action_key=action_key)
 
     def __init__(
         self,
@@ -142,9 +128,6 @@ class R3DPolicy(BasePolicy):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
-    def initialize_training(self, data_description) -> None:
-        self.obs_encoder.pc_encoder.initialize_training()
 
     def loss_groups(self) -> dict[str, tuple[int, int, float]] | None:
         if not self.use_aux_ee:

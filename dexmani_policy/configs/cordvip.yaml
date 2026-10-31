@@ -3,11 +3,12 @@ defaults:
   - _self_
 
 policy_name: cordvip
+initialization:
+  encoder: null
 zarr_path: robot_data/${task_name}.cordvip.zarr
 horizon: 12
 n_obs_steps: 4
 n_action_steps: 6
-action_dim: 19
 normalization:
   joint_state: limits
   action: auto
@@ -18,15 +19,12 @@ dataloader:
   drop_last: false
 dataset:
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  pc_dim: ${agent.pc_dim}
-  pad_after: ${eval:'${n_action_steps} - 1'}
   sensor_modalities: [hand_pointcloud, object_pointcloud, joint_state]
   augmentation_cfg: null
 agent:
   _target_: dexmani_policy.agents.policies.cordvip.CordViPPolicy
   state_dim: 19
   pc_dim: 3
-  pretrained_path: null
   down_dims: [512, 1024, 2048]
   diffusion_step_embed_dim: 64
   kernel_size: 5
@@ -54,14 +52,12 @@ training:
   use_bfloat16: false
   use_compile: false
   use_ema: true
-  lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 0
   loop:
     total_train_steps: 100000
 env_runner:
   env_kwargs:
-    control_mode: joint
 eval:
   inference_steps: 10
   use_ema: true

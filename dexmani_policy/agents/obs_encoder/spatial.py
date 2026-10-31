@@ -21,21 +21,6 @@ class SpatialObservationEncoder(nn.Module):
     )
     out_dim = 256
 
-    @staticmethod
-    def prepare_rgb_restore_config(rgb):
-        if rgb is None or rgb.get("architecture") is None:
-            raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
-        return {**rgb, "load_pretrained": False}
-
-    @staticmethod
-    def validate_normalization(spec: dict[str, str]) -> None:
-        Sparse3DEncoder.validate_normalization(spec)
-        if spec.get("joint_state") != "limits":
-            raise ValueError("Spatial observations require normalization.joint_state: limits")
-        for key in ("rgb", "camera_intrinsic", "camera_extrinsic"):
-            if spec.get(key) != "identity":
-                raise ValueError(f"Spatial observations require normalization.{key}: identity")
-
     def __init__(
         self,
         pc_dim: int = 3,
@@ -67,7 +52,7 @@ class SpatialObservationEncoder(nn.Module):
         }
         pc_config = {"channels": 192, "depth": 2, "num_heads": 8, **(pc_encoder_config or {})}
         rgb_config = {
-            "model_name": "facebook/dinov2-small", "tune_mode": "freeze",
+            "tune_mode": "freeze",
             **(rgb_backbone_config or {}),
         }
 
@@ -97,18 +82,18 @@ class SpatialObservationEncoder(nn.Module):
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         points = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points, self.pc_encoder.input_channels == 3,
+            obs["point_cloud"], self.num_points,
             self.pc_encoder.fps_random_config, training=self.training,
         )
         patches = self.pc_encoder.encode_patches(points)
 
         rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
         patch_grid = tuple(size // self.rgb_encoder.patch_size for size in rgb.shape[-2:])
-        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)[:, None]
+        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
         projection = project_points(
-            points[..., :3], obs["camera_intrinsic"].reshape(-1, 1, 3, 3),
-            obs["camera_extrinsic"].reshape(-1, 1, 3, 4),
-            image_transform[:, None], (rgb.shape[-2], rgb.shape[-1]),
+            points[..., :3], obs["camera_intrinsic"].reshape(-1, 3, 3),
+            obs["camera_extrinsic"].reshape(-1, 3, 4),
+            image_transform, (rgb.shape[-2], rgb.shape[-1]),
         )
 
         member_weight = None
@@ -122,7 +107,7 @@ class SpatialObservationEncoder(nn.Module):
             tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
         tokens = self.alignment(
             tokens, image_grid, projection, patches["neighbor_indices"], member_weight=member_weight,
-        )["tokens"]
+        )
         if self.fusion_stage == "pre_global":
             tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
 
@@ -132,7 +117,3 @@ class SpatialObservationEncoder(nn.Module):
         state = state + self.modality_embedding[:, 1:].to(state.dtype)
         frames = self.output_norm(torch.cat((spatial, state), dim=1))
         return frames.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return self.n_obs_steps * (self.pc_encoder.num_patches + 1), self.out_dim

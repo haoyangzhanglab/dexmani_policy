@@ -42,12 +42,13 @@ def resize_image_transform(input_hw, output_hw, *, device=None) -> torch.Tensor:
 def convert_rgb_output(value: torch.Tensor, *, keep_uint8: bool) -> torch.Tensor:
     import torch
 
-    if not value.dtype.is_floating_point:
-        return value.contiguous()
-    value = value.clamp_(0, 1)
-    if keep_uint8:
-        value = value.mul_(255).round_().to(torch.uint8)
-    return value
+    if value.dtype.is_floating_point:
+        value = value.clamp_(0, 1)
+        if keep_uint8:
+            value = value.mul_(255).round_().to(torch.uint8)
+    if value.dtype == torch.uint8:
+        value = value.to(torch.float32).div_(255.0)
+    return value.contiguous()
 
 
 def preprocess_rgb_train(
@@ -89,14 +90,12 @@ def preprocess_rgb_eval(
     import torchvision.transforms.functional as TVF
 
     value = torch.as_tensor(rgb)
-    if resize_hw is None:
-        return value.contiguous()
-
     leading_shape = value.shape[:-3]
     value = value.reshape(-1, *value.shape[-3:]).permute(0, 3, 1, 2)
     if not keep_uint8 or float_spatial_before_uint8:
         value = value.to(dtype=torch.float32, memory_format=torch.contiguous_format).div_(255.0)
-    value = TVF.resize(value.contiguous(), list(resize_hw), antialias=True)
+    if resize_hw is not None:
+        value = TVF.resize(value.contiguous(), list(resize_hw), antialias=True)
 
     if center_crop_hw is not None:
         value = TVF.center_crop(value, list(center_crop_hw))

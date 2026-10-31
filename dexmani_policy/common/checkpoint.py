@@ -1,22 +1,16 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from dexmani_policy.common.io_util import atomic_path
 
-if TYPE_CHECKING:
-    from dexmani_policy.agents.policies.base import BasePolicy
-
-
 @dataclass
 class Checkpoint:
-    epoch: int
     global_step: int
     model_state: dict[str, Any]
     ema_model_state: dict[str, Any] | None
     optimizer_state: dict[str, Any]
     scheduler_state: dict[str, Any]
-    ema_updater_step: int | None
     rng_state: dict[str, Any]
     effective_config: dict[str, Any]
 
@@ -44,18 +38,6 @@ def policy_state_dict(model) -> dict:
     return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
 
 
-def prepare_restore_config(agent_cfg):
-    import hydra
-    from omegaconf import OmegaConf
-
-    if OmegaConf.is_config(agent_cfg):
-        agent_cfg = OmegaConf.to_container(agent_cfg, resolve=True)
-    agent_cfg = OmegaConf.create(agent_cfg)
-    agent_class: type[BasePolicy] = hydra.utils.get_class(agent_cfg._target_)
-    agent_class.prepare_restore_config(agent_cfg)
-    return agent_cfg
-
-
 def restore_policy(checkpoint_path, *, use_ema, device):
     import hydra
 
@@ -72,14 +54,12 @@ def restore_policy(checkpoint_path, *, use_ema, device):
 
     rng_state = get_rng_state()
     try:
-        agent = hydra.utils.instantiate(prepare_restore_config(cfg["agent"]))
+        agent = hydra.utils.instantiate(cfg["agent"])
     finally:
         set_rng_state(rng_state)
 
     agent.checkpoint_step = global_step
-    agent.set_normalization_spec(
-        cfg["normalization"], cfg["normalization_dims"], action_key=cfg["action_key"],
-    )
+    agent.configure_normalizer(cfg["normalization_dims"], cfg["normalizer_shapes"])
     agent.load_state_dict(state, strict=True, assign=True)
     del state
     agent.to(device)

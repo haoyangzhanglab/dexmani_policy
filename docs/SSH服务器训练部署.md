@@ -1,112 +1,92 @@
 # DexMani Policy · SSH 服务器训练部署
 
-命令从**本地仓库根目录**执行；常规训练与验证见 [README](../README.md#快速开始)，预训练见 [手部动作表示](手部动作表示.md)。远端训练使用独立源码副本，数据和实验产物通过共享目录访问。
+所有脚本从本地仓库执行，显式传入 SSH host 和绝对远端路径，不修改脚本中的机器配置。本地需要 Bash、SSH、rsync；远端需要 Bash、rsync、tmux 和完整训练环境。
 
-## 准备环境
-
-默认 SSH host 为 `dexserver`，先配置 `~/.ssh/config` 并确认 `ssh dexserver` 可用；其他主机用 `export DEX_SERVER=<ssh_host>` 指定。
-
-本地需要 Bash、SSH、rsync、Python 3；远端需要 Bash、rsync、tmux、训练依赖。远端解释器**不必**叫 `policy`。首次使用或更换服务器时，核对脚本中的源码目录、Conda Python、数据与实验目录：
-
-| 脚本 | 需核对的配置 |
-| --- | --- |
-| `train_remote.sh` | `SERVER_PROJ`、`CONDA_PYTHON` |
-| `sync_code.sh` | `REMOTE_CODE` |
-| `sync_data.sh` | `REMOTE_DATA` |
-| `sync_down.sh` / `tail_log.sh` | `REMOTE_EXP` / `SERVER_EXP` |
-
-提前创建持久存储，将远端源码目录的 `data/`、`robot_data/`、`experiments/` 接到相应位置；launcher 不会准备存储。Uni3D 权重可随 `data/pretrained/uni3d/` 同步；SAT/DQ-RISE 的 `facebook/dinov2-small` 位于 HF 缓存，须在远端单独准备，其他 pretrained_models/HF 缓存同理。下载与缓存位置见 [数据目录说明](../data/README.md)。迁移机器时统一调整相关路径，避免只改一处。
-
-## 启动与源码副本
-
-launcher 选项位于 config/task **之前**，Hydra overrides 位于其后：
+## 数据与来源准备
 
 ```bash
-bash scripts/remote/train_remote.sh --dry-run dp3 <task>
-bash scripts/remote/train_remote.sh --gpus 0 dp3 <task> 'training.seed=42'
-bash scripts/remote/train_remote.sh --fg --gpus 0 dp3 <task> '+max_updates=4'
+HOST=dexserver
+REPO=/home/user/dexmani_policy
+DATA_ROOT=/data/project
+RUN=/data/project/experiments/dp3/pick_apple/run01
+PYTHON=/home/user/miniconda3/envs/policy/bin/python
+
+ssh "$HOST" 'mkdir -p /data/project/robot_data /data/project/data'
+bash scripts/remote/sync_data.sh --host "$HOST" \
+  --local robot_data --remote "$DATA_ROOT/robot_data" --dry-run
+bash scripts/remote/sync_data.sh --host "$HOST" \
+  --local robot_data --remote "$DATA_ROOT/robot_data"
+bash scripts/remote/sync_data.sh --host "$HOST" \
+  --local data --remote "$DATA_ROOT/data" --checksum
 ```
 
-流程：SSH 检查 → 创建唯一 `outputs/remote_sources/<id>/` → 同步源码（可选 `--sync-data`）→ 链接共享目录 → 检查 Dataset 路径 → 查询 GPU/磁盘 → 启动训练。`--gpus` 只接受一个非负整数 ID，必须在查询得到的 GPU index 内；多 ID 输入在连接 SSH 前报错，查询失败中止。该选项通过 `CUDA_VISIBLE_DEVICES` 选卡，所选 GPU 在训练进程内编号为 `cuda:0`；不传时使用 `training.device`。**目录与资源检查通过，不代表权重、显存或剩余空间足够。**
+每次同步一个明确目录，默认上传；`--pull` 反转方向，`--checksum` 改用内容比较，`--dry-run` 预览。同步不删除目标独有文件。数据版本完成 `check_data` 后不就地修改；重新导出或修改加工配方时使用新路径。
 
-远端使用副本中的 Python module 入口训练；副本共享 `robot_data/`、`data/`、`experiments/`、`pretrained_models/` 和 `logs/`。主源码后续同步**不会改变**运行中的副本，但修改共享数据会影响实验；副本不自动清理，失败后也保留。`--dry-run` 仍连接 SSH 并预览 rsync，但不创建副本、不验证数据/GPU。`--fg` 为前台 SSH，适合排查启动错误。
+Uni3D 初始权重随 `data/pretrained/uni3d/` 上传；HF 初始模型缓存须在远端单独准备，来源设置见 [数据说明](../data/README.md)。从完整 checkpoint 续训或推理不需要初始来源文件。
 
-### 配置与并行运行
-
-每次启动单卡训练，有效 batch = `dataloader.batch_size` × `training.loop.gradient_accumulation_steps`，epoch 尾组以实际样本数为准。可分别选卡启动独立实验；实验、W&B group、评测和同步路径按方法名（例如 `sat`）命名：
+## 启动与原目录续训
 
 ```bash
-bash scripts/remote/tail_log.sh sat <task> <run>
-bash scripts/remote/sync_down.sh sat/<task>/<run>
+REMOTE=(--host "$HOST" --repo "$REPO" --data-root "$DATA_ROOT" \
+  --run "$RUN" --python "$PYTHON" --gpu 0)
+bash scripts/remote/train_remote.sh "${REMOTE[@]}" --dry-run -- \
+  dp3 task_name=pick_apple
+bash scripts/remote/train_remote.sh "${REMOTE[@]}" -- \
+  dp3 task_name=pick_apple training.seed=42
+
+# 中断后从同一 RUN/checkpoints/latest.pt 直接恢复保存配方。
+bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
+  --num-workers 4 --max-updates 100
 ```
 
-后台使用 `tmux -L dexmani_policy`，每次创建唯一 session 和 `logs/<session>.log`；任务退出后 session 消失但日志保留。每次启动指定一个任务，复杂 overrides 应整体引用。
+每次启动保留一个新的 `$REPO/outputs/remote_sources/<session>/` 源码副本，代码同步不覆盖已有副本。副本中的 `robot_data/`、`data/`、`pretrained_models/` 指向显式 `DATA_ROOT`，run 单独由绝对路径指定。预训练 encoder 等其他初始来源使用对应远端绝对路径。
 
-### 续训
+`--gpu` 指定一个物理 GPU，通过 `CUDA_VISIBLE_DEVICES` 映射为进程内 `cuda:0`；脚本不查询或自动选择设备。默认后台 `tmux -L dexmani_policy`，输出 Host、Source、Run、Session 和 Log；`--fg` 前台执行。`--dry-run` 只打印已构造命令，不连接远端、不复制源码。训练返回错误可在控制台或 Log 中查看，不以 session 消失推断 checkpoint 完整。
+
+fresh 的方法名和 Hydra overrides 放在 `--` 后；resume 只接受正式恢复 CLI 的运行参数，不再指定方法配方或新输出目录。参数含空格、引号或特殊字符时整体引用。源码和实验产物不自动删除。
+
+需要单独上传代码时，为明确的新空目录执行：
 
 ```bash
-bash scripts/remote/train_remote.sh --gpus 0 dp3 <task> \
-  '+resume_from=experiments/dp3/<task>/<run>'
+bash scripts/remote/sync_code.sh --host "$HOST" --dest /home/user/source_snapshot --dry-run
+bash scripts/remote/sync_code.sh --host "$HOST" --dest /home/user/source_snapshot
 ```
 
-相对路径经共享 `experiments/` 解析；恢复到**新 run**，任务身份须匹配，允许更改的字段见 [Epoch 级恢复](项目架构.md#epoch-级恢复)。
-
-## 同步边界
-
-### 源码
-
-```bash
-bash scripts/remote/sync_code.sh --dry-run
-bash scripts/remote/sync_code.sh
-```
-
-主源码同步使用 `--delete`，但排除 Git/工具配置、缓存、数据、实验、权重和运行产物，并保护数据/实验根目录。`--dest <absolute_directory>` 只接受空目录，用于独立副本；launcher 已自行同步副本，通常无需先同步主源码。
-
-### 数据
-
-```bash
-bash scripts/remote/sync_data.sh --dry-run robot_data
-bash scripts/remote/sync_data.sh robot_data
-bash scripts/remote/sync_data.sh --checksum data
-bash scripts/remote/sync_data.sh --pull --dry-run robot_data
-```
-
-目标为 `all`、`data` 或 `robot_data`；默认 push，按大小/mtime 更新，不删目标独有文件。`--checksum` 按内容比较，`--pull` 反转方向。**`--prune` 会删除目标独有文件、不可撤销**，使用前必须以相同方向/参数先执行 `--dry-run`。已用于实验的数据不应原地重建，须使用新路径。
-
-### 实验结果
-
-```bash
-bash scripts/remote/sync_down.sh --list
-bash scripts/remote/sync_down.sh <policy>/<task>/<run> --dry-run
-bash scripts/remote/sync_down.sh <policy>/<task>/<run>
-```
-
-只从远端拉取，**不删除本地结果**；不带子路径时拉取全部实验。`--list`/`--dry-run` 也会连接 SSH。双方已有 `config.yaml` 必须 checksum 完全一致，否则中止；同名大权重不做完整内容身份校验。
-
-同步分阶段完成：① 新文件及不可变产物；② 按 size/mtime 更新可变的 `metrics.jsonl`、`latest.pt` 与 VQ best/codebook，再一起无条件传输 `result_details.json` 和 `selection_result.json`；③ 无条件更新 `best_ckpt.json`。**先同步权重及运行记录，再更新 best 指针**。
-
-同步排除 `.dexmani-publish-*` 临时文件；任一 rsync 非零返回（包括 24）都中止后续阶段。整个目录不是事务快照，发布过程中可能需要重试；普通 best 评测需要对应权重，冻结测试还需要已完成的选点记录。预训练权重在 `experiments/` 时由此下载，在 `data/` 时用数据同步。
-
-### W&B
-
-实验结果默认不拉取 W&B；上传 offline run 须先用 `sync_down.sh --with-wandb` 拉取，再运行：
-
-```bash
-bash scripts/utils/wandb_sync.sh --dry-run --all
-bash scripts/utils/wandb_sync.sh --all
-```
-
-上传需要本地凭据和网络；拉取并不代表已经上传。
+源同步排除数据、实验、缓存和运行产物，无删除传播；目标父目录须存在。
 
 ## 监控与停止
 
+使用 launcher 打印的确切 session 和 Log 路径：
+
 ```bash
-bash scripts/remote/tail_log.sh <policy> <task> <run>
-bash scripts/remote/stop_remote.sh --list
-bash scripts/remote/stop_remote.sh <session>
-bash scripts/remote/stop_remote.sh --all
+ssh "$HOST" 'tmux -L dexmani_policy list-sessions'
+ssh -t "$HOST" 'tmux -L dexmani_policy attach -t <session>'
+ssh "$HOST" 'tail -F -- "/absolute/repo/logs/<session>.log"'
+ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 ```
 
-`tail_log.sh` 跟随 `metrics.jsonl`，省略 run 时按 `config.yaml` 修改时间选择；只有 SSH 不通时回退本地。启动异常查看 launcher 的控制台日志或 tmux Attach 命令。
+收到一次 SIGINT 后，Trainer 在 update 边界保存并退出；重复中断或强杀可能使最近更新未保存。恢复前确认目标 run 与日志状态。
 
-停止只作用于项目 tmux socket：先发一次 SIGINT，约 30 秒仍存活则报告错误并保留进程，只有显式 `--force` 才强制结束。Trainer 尝试在 update 边界保存，重复中断/强杀可能导致未保存；**session 消失不等于 Checkpoint 完整**。清理脚本 `scripts/utils/clean_experiments.sh` 仅做只读盘点。后续按 [仿真评测机制](仿真评测机制.md) 选点与评测。
+## 下载完成的 run
+
+```bash
+bash scripts/remote/sync_down.sh --host "$HOST" \
+  --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01 --dry-run
+bash scripts/remote/sync_down.sh --host "$HOST" \
+  --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01
+```
+
+默认同步停止或已完成的单个 run，单向 rsync，不删除本地结果。已有 `config.yaml` 不同则在传输前失败。保留现有 best 发布链所需顺序：先传新权重与不可变记录，再更新训练状态、观测预训练的 `resume.pt/encoder.pt` 和选点结果，最后更新 `best_ckpt.json`；任一阶段失败即停止后续发布。临时 `.dexmani-publish-*` 文件不传输。同名大权重不做完整内容身份验证，整个目录不是事务快照；运行中查看日志用 tail。
+
+部署公开字段和 best/lock 消费者仍待实际 Real 源码迁移，因此这里继续保留分阶段同步。下载后直接评测或显式选模：
+
+```bash
+python -m dexmani_policy.evaluate --checkpoint <run>/checkpoints/latest.pt \
+  --weights ema --inference-steps 10 --episodes 100 --seed 1024
+python -m dexmani_policy.eval_pipeline \
+  --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
+  --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
+  --output-dir <run>/eval_ckpt_selector/<new-evaluation>
+```
+
+实验默认不拉取 W&B；需要 offline run 时加 `--with-wandb`，再执行 `bash scripts/utils/wandb_sync.sh --all`，上传凭据与网络由本地环境提供。

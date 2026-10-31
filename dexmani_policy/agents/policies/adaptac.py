@@ -32,12 +32,6 @@ class AdapTacObservationEncoder(nn.Module):
     def consumed_observation_fields(self):
         return ("joint_state", "point_cloud", *self.tactile_encoder.consumed_observation_fields)
 
-    def validate_normalization(self, spec):
-        Sparse3DEncoder.validate_normalization(spec)
-        validate = getattr(self.tactile_encoder, "validate_normalization", None)
-        if validate is not None:
-            validate(spec)
-
     def __init__(
         self,
         tactile_encoder: nn.Module,
@@ -51,7 +45,6 @@ class AdapTacObservationEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.num_points = num_points
-        self.use_coord_only = pc_dim == 3
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
@@ -79,7 +72,6 @@ class AdapTacObservationEncoder(nn.Module):
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
-            self.use_coord_only,
             self.pc_encoder.fps_random_config,
             training=self.training,
         )

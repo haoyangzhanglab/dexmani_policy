@@ -1,0 +1,136 @@
+"""Selection orchestration tests; these do not claim simulation backend coverage."""
+
+import fcntl
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+from omegaconf import open_dict
+
+from dexmani_policy.common.checkpoint import load_checkpoint, save_checkpoint
+from dexmani_policy.deployment.metadata import inspect_policy
+from dexmani_policy.evaluation.artifacts import write_json
+from dexmani_policy.evaluation.selection import candidate_score, run_pipeline
+from dexmani_policy.evaluation.rollout import evaluate_policy
+from dexmani_policy.test_tools import test_training_resume
+from dexmani_policy.train import run_training
+
+
+class EvaluationChecks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+
+    @classmethod
+    def tearDownClass(cls):
+        torch.set_num_threads(cls.threads)
+
+    def test_explicit_subset_budget_ranking_record_and_test_separation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / 'run'
+            cfg = test_training_resume.TrainingResumeChecks().make_config(root, run)
+            with open_dict(cfg):
+                cfg.env_runner.eval_seeds = list(range(20))
+                cfg.eval.use_ema = False
+            run_training(cfg, max_updates=1)
+            state = load_checkpoint(run / 'checkpoints/latest.pt')
+            candidates = [save_checkpoint(run / f'checkpoints/candidate-{step}.pt',
+                                         replace(state, global_step=step)) for step in (2, 6, 4)]
+            calls = []
+
+            def score(checkpoint, **settings):
+                calls.append((Path(checkpoint), settings))
+                step = load_checkpoint(checkpoint).global_step
+                stats = {'success_rate': 0.5, 'avg_steps': 10 if step == 2 else 8}
+                path = settings['output_dir'] / 'result_details.json'
+                path.parent.mkdir(parents=True)
+                write_json(path, {'statistics': stats})
+                return {'statistics': stats}, path
+
+            with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=score):
+                path = run_pipeline(candidates, weights='ema', inference_steps=3, action_steps=2,
+                                    selection_episodes=2, test_episodes=3, device='cpu',
+                                    output_dir=run / 'comparison')
+            record = json.loads(path.read_text())
+            self.assertEqual(record['global_step'], 6)
+            self.assertNotIn('test_request', record)
+            self.assertEqual(len(record['candidates']), 3)
+            self.assertEqual(len(calls), 4)
+            for _, settings in calls[:3]:
+                self.assertEqual(settings['seeds'], record['selection_seeds'])
+                self.assertEqual(settings['inference_steps'], 3)
+                self.assertEqual(settings['action_steps'], 2)
+                self.assertEqual(settings['weights'], 'ema')
+                self.assertFalse(settings['video'])
+            self.assertEqual(calls[-1][0], candidates[1])
+            self.assertEqual(calls[-1][1]['weights'], 'ema')
+            self.assertEqual(calls[-1][1]['seeds'], record['test_seeds'])
+            self.assertFalse(set(record['selection_seeds']) & set(record['test_seeds']))
+            with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=score):
+                with self.assertRaises(FileExistsError):
+                    run_pipeline(candidates, selection_episodes=2, test_episodes=3,
+                                 output_dir=run / 'comparison')
+            with (run / '.pipeline.lock').open('w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(RuntimeError, 'Another eval pipeline'):
+                    run_pipeline(candidates, output_dir=run / 'locked')
+                self.assertFalse((run / 'locked').exists())
+
+            def fail_test(checkpoint, **settings):
+                if settings['output_dir'].name == 'test':
+                    raise RuntimeError('held-out failure')
+                return score(checkpoint, **settings)
+
+            with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=fail_test):
+                with self.assertRaisesRegex(RuntimeError, 'held-out failure'):
+                    run_pipeline(candidates, weights='ema', inference_steps=3, action_steps=2,
+                                 selection_episodes=2, test_episodes=3,
+                                 output_dir=run / 'failed-test')
+            failed = json.loads((run / 'failed-test/selection_result.json').read_text())
+            self.assertEqual(failed['status'], 'failed')
+            self.assertIn('held-out failure', failed['error'])
+            self.assertEqual(failed['global_step'], 6)
+            published = (run / 'best_ckpt.json').read_bytes()
+
+            def fail_best(path, record, **kwargs):
+                if Path(path).name == 'best_ckpt.json':
+                    raise RuntimeError('best publication failure')
+                return write_json(path, record, **kwargs)
+
+            with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=score), \
+                 patch('dexmani_policy.evaluation.selection.write_json', side_effect=fail_best):
+                with self.assertRaisesRegex(RuntimeError, 'best publication failure'):
+                    run_pipeline(candidates, selection_episodes=2, test_episodes=3,
+                                 output_dir=run / 'failed-publication')
+            failed = json.loads((run / 'failed-publication/selection_result.json').read_text())
+            self.assertEqual(failed['status'], 'failed')
+            self.assertIn('best publication failure', failed['error'])
+            self.assertEqual((run / 'best_ckpt.json').read_bytes(), published)
+            (run / 'config.yaml').unlink()
+            info = inspect_policy(run, weights='raw')
+            self.assertEqual(info.checkpoint_path, candidates[1])
+            self.assertEqual(info.inference_steps, 3)
+            self.assertEqual(info.future_steps, 3)
+            with patch('dexmani_policy.evaluation.rollout.restore_policy', side_effect=RuntimeError('load failure')):
+                with self.assertRaisesRegex(RuntimeError, 'load failure'):
+                    evaluate_policy(candidates[0], weights='raw', seeds=[1], device='cpu',
+                                    output_dir=run / 'failure')
+            failure = json.loads((run / 'failure/result_details.json').read_text())
+            self.assertEqual(failure['status'], 'failed')
+            self.assertIn('load failure', failure['error'])
+
+    def test_none_steps_loses_tie_and_later_global_step_wins(self):
+        def candidate(rate, steps, step):
+            return {'statistics': {'success_rate': rate, 'avg_steps': steps}, 'global_step': step}
+        values = [candidate(0.5, None, 9), candidate(0.5, 8, 4), candidate(0.5, 8, 6)]
+        self.assertIs(max(values, key=candidate_score), values[2])
+
+
+if __name__ == '__main__':
+    unittest.main()

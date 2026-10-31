@@ -35,11 +35,11 @@ class PointNet(nn.Module):
             nn.LayerNorm(output_channels),
         )
 
-    def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        point_feature = self.mlp(pointcloud[..., : self.input_channels])
+    def forward(self, pointcloud: torch.Tensor) -> torch.Tensor:
+        point_feature = self.mlp(pointcloud)
         global_token = point_feature.max(dim=1).values if self.pooling == "max" else point_feature.amax(dim=1)
         global_token = self.output_projection(global_token)
-        return {"global_token": global_token}
+        return global_token
 
     @property
     def out_dim(self) -> int:
@@ -65,7 +65,7 @@ class PointNetDense(nn.Module):
         )
 
     def forward(self, pointcloud: torch.Tensor) -> torch.Tensor:
-        point_feature = self.mlp(pointcloud[..., : self.input_channels])
+        point_feature = self.mlp(pointcloud)
         return self.final_proj(point_feature)
 
     @property
@@ -110,8 +110,8 @@ class MultiStagePointNet(nn.Module):
             ]
         )
 
-    def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        point_feature = pointcloud[..., : self.input_channels].transpose(1, 2)
+    def forward(self, pointcloud: torch.Tensor) -> torch.Tensor:
+        point_feature = pointcloud.transpose(1, 2)
         point_feature = self.activation(self.input_projection(point_feature))
 
         stage_feature_list = []
@@ -127,7 +127,7 @@ class MultiStagePointNet(nn.Module):
         point_feature = torch.cat(stage_feature_list, dim=1)
         point_feature = self.output_projection(point_feature)
         global_token = point_feature.amax(dim=-1)
-        return {"global_token": global_token}
+        return global_token
 
     @property
     def out_dim(self) -> int:

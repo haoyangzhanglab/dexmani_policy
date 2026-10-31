@@ -6,7 +6,7 @@ import torch
 
 
 class PointProjection(NamedTuple):
-    """align_corners=False grids [BT,V,N,2] and FP32 confidence [BT,V,N]."""
+    """align_corners=False grids [BT,N,2] and FP32 confidence [BT,N]."""
 
     grid_xy: torch.Tensor
     confidence: torch.Tensor
@@ -44,15 +44,13 @@ def project_points(
     T_camera_from_source: torch.Tensor,
     image_transform: torch.Tensor,
     image_hw: tuple[int, int],
-    *,
-    confidence: torch.Tensor | None = None,
 ) -> PointProjection:
-    """Project source-frame XYZ [BT,N,3] through cameras [BT,V,...] into FP32 grids."""
+    """Project source-frame XYZ [BT,N,3] through cameras [BT,...] into FP32 grids."""
     with torch.autocast(device_type=points_source.device.type, enabled=False):
         points = points_source.float()
         transform = T_camera_from_source.float()
         # Explicit FP32 products avoid TF32 rounding at image boundaries.
-        camera = (points[:, None, :, None, :] * transform[..., None, :3, :3]).sum(-1)
+        camera = (points[:, :, None, :] * transform[..., None, :3, :3]).sum(-1)
         camera.add_(transform[..., None, :3, 3])
 
         homogeneous = (camera[..., None, :] * intrinsics.float()[..., None, :, :]).sum(-1)
@@ -74,5 +72,5 @@ def project_points(
             & (depth > 0)
             & (denominator[..., 0] != 0)
         )
-        weight = valid.float() if confidence is None else torch.where(valid, confidence.float(), 0.0)
+        weight = valid.float()
         return projection_from_pixels(pixels, weight, image_hw)

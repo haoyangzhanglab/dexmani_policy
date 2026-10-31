@@ -71,13 +71,10 @@ def farthest_point_sample(
 def preprocess_point_cloud(
     pc: torch.Tensor,
     num_points: int,
-    use_coord_only: bool,
     fps_random_config: dict | None = None,
     training: bool = True,
 ) -> torch.Tensor:
-    """Select channels and sample FP32 points, with deterministic FPS at evaluation."""
-    if use_coord_only:
-        pc = pc[..., :3]
+    """Sample FP32 points, with deterministic FPS at evaluation."""
     if pc.dtype != torch.float32:
         pc = pc.float()
     if pc.shape[1] > num_points:

@@ -26,7 +26,7 @@ class AFROPretrainDataset(ObservationPretrainDataset):
         )
 
     def build_sampler(self, mask):
-        return SequenceSampler(self.episode_store, self.horizon, self.pad_before, self.pad_after, mask)
+        return SequenceSampler(self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask=mask)
 
     def __getitem__(self, index):
         rows = self.sampler.sample_source_rows(index)[::self.frame_stride]

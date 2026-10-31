@@ -9,7 +9,6 @@ policy_name: dp3
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 normalization:
   joint_state: limits
@@ -21,9 +20,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud"]
 
   # 点 dropout 在 Dataset 中执行。
@@ -61,9 +58,6 @@ agent:
   num_inference_steps: 10
   prediction_type: sample
 
-  modality_dropout_probs:
-    joint_state: 0.0
-
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
@@ -71,27 +65,14 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-ema:
-  _target_: dexmani_policy.training.common.optimization.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
-
 training:
   use_bfloat16: true
   use_compile: true
   use_ema: true
-  lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-
-env_runner:
-  env_kwargs:
-    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
 eval:
   inference_steps: 10

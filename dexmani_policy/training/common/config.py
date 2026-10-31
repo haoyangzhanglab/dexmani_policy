@@ -3,54 +3,30 @@ import copy
 import json
 from pathlib import Path
 
-from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
     load_policy_config,
     positive_int,
+    require_tactile_source,
     validate_action_mode,
     validate_normalization_config,
-    validate_tactile_config,
 )
-from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_resume_source
 
 
 def prepare_training(cfg):
-    source = resolve_resume_source(cfg.get("resume_from"))
-    checkpoint = load_checkpoint(source, mmap=True) if source is not None else None
-    overrides = HydraConfig.get().overrides.task if source is not None else []
-    effective_config = resolve_input_recipe(
-        cfg, overrides=overrides, saved_config=None if checkpoint is None else checkpoint.effective_config,
-    )
-    with open_dict(effective_config):
-        effective_config.resume_from = source
-        # Resume writes into this invocation's directory, never the source run.
-        effective_config.workspace.output_dir = cfg.workspace.output_dir
-    validate_config(effective_config)
-    return effective_config, checkpoint
+    if cfg.get("resume_from") is not None:
+        raise ValueError("Use python -m dexmani_policy.training.common.resume --run <run>")
+    validate_config(cfg)
+    from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
+    prepare_initialization(cfg)
+    return cfg
 
 
 def validate_config(cfg):
-    for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
-        if cfg.agent[name] != cfg[name]:
-            raise ValueError(f"agent.{name} must match {name}")
-    dataset = cfg.dataset
-    if "n_action_steps" in dataset and dataset.n_action_steps != cfg.n_action_steps:
-        raise ValueError("dataset.n_action_steps must match n_action_steps")
-    if "future_force_offsets" in cfg.agent and dataset.get("future_force_offsets") != cfg.agent.future_force_offsets:
-        raise ValueError("Dataset/policy future_force_offsets must match")
-    if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
-        raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
-    if dataset.get("sensor_modalities") is None:
-        raise ValueError("dataset.sensor_modalities must be explicit")
-    for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
-        if dataset[field] != cfg[name]:
-            raise ValueError(f"dataset.{field} must match {name}")
     validate_normalization_config(cfg)
-    validate_tactile_config(cfg)
+    require_tactile_source(cfg.dataset.sensor_modalities, cfg.get("tactile_source"))
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
@@ -79,6 +55,7 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
         effective.normalization_dims = data_description["normalization_dims"]
+        effective.normalizer_shapes = {key: list(field.scale.shape) for key, field in model.normalizer.fields.items()}
         effective.dataset.split_manifest = data_description["split_manifest"]
         effective.policy_metadata = metadata
         effective.deployment_metadata = data_description["deployment_metadata"]
@@ -90,11 +67,8 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
 
 
 def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
-    """Resolve fresh or saved dataset paths without opening data or importing models."""
+    """Resolve the fresh recipe's dataset path without opening data or importing models."""
     cfg = load_policy_config(config_name, overrides)
-    source = resolve_resume_source(cfg.get("resume_from"))
-    saved = load_checkpoint(source, mmap=True).effective_config if source is not None else None
-    cfg = resolve_input_recipe(cfg, overrides=overrides, saved_config=saved)
     return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
 
 

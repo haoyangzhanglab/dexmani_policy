@@ -9,7 +9,6 @@ from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordi
     ContactCoordinationEncoder,
 )
 from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS
 
 
 class CordViPObservationEncoder(nn.Module):
@@ -26,7 +25,7 @@ class CordViPObservationEncoder(nn.Module):
 
     def forward(self, obs):
         sequence = {
-            key: (value[..., :3] if key in POINT_CLOUD_FIELDS else value).unflatten(0, (-1, self.n_obs_steps))
+            key: value.unflatten(0, (-1, self.n_obs_steps))
             for key, value in obs.items()
         }
         return torch.cat(self.encoder(sequence), dim=-1).flatten(1)
@@ -36,7 +35,7 @@ class CordViPPolicy(BasePolicy):
     supported_action_keys = ("action",)
 
     def __init__(self, horizon=12, n_obs_steps=4, n_action_steps=6, action_dim=19,
-                 state_dim=19, pc_dim=3, pretrained_path=None,
+                 state_dim=19, pc_dim=3,
                  down_dims=(512, 1024, 2048), diffusion_step_embed_dim=64,
                  kernel_size=5, n_groups=8, cond_predict_scale=True,
                  num_training_steps=100, num_inference_steps=10,
@@ -51,17 +50,12 @@ class CordViPPolicy(BasePolicy):
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-        self.pretrained_path = pretrained_path
 
-    @classmethod
-    def prepare_restore_config(cls, config):
-        config.pretrained_path = None
-
-    def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
-        if self.pretrained_path is None:
+    def initialize_training(self, data_description, pretrained_path) -> dict[str, torch.Tensor] | None:
+        if pretrained_path is None:
             print("[CordViP] Scratch training; all observation encoder parameters are trainable")
             return None
-        payload = torch.load(Path(self.pretrained_path).expanduser(), map_location="cpu", weights_only=True)
+        payload = torch.load(Path(pretrained_path).expanduser(), map_location="cpu", weights_only=True)
         self.obs_encoder.encoder.load_state_dict(payload["encoder_state"], strict=True)
         return payload["normalizer_state"]
 

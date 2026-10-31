@@ -74,9 +74,3 @@ class SATPolicy(BasePolicy):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
-    @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        config["rgb_backbone_config"] = SpatialObservationEncoder.prepare_rgb_restore_config(
-            config.get("rgb_backbone_config")
-        )

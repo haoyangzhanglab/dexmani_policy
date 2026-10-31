@@ -41,6 +41,5 @@ vq_vae:
   max_grad_norm: 0.0
   warmup_steps: 150
   save_epochs: 100
-  codebook_report_epochs: 200
   seed: 42
   device: cuda

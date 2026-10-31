@@ -1,29 +1,24 @@
-"""Select a checkpoint and execute its frozen test protocol."""
+"""Select explicit checkpoint candidates, then test the winner on independent seeds."""
 
-from dexmani_policy.common.config import (
-    load_experiment_config,
-    register_resolvers,
-    set_project_root,
-)
-from dexmani_policy.common.experiments import resolve_experiment
-from dexmani_policy.evaluation.protocol import (
-    build_parser,
-    parse_overrides,
-)
+import argparse
+
 from dexmani_policy.evaluation.selection import run_pipeline
 
 
 def main(argv=None):
-    parser = build_parser(__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoints", nargs="+", required=True)
+    parser.add_argument("--weights", choices=("raw", "ema"))
+    parser.add_argument("--inference-steps", type=int)
+    parser.add_argument("--action-steps", type=int)
+    parser.add_argument("--selection-episodes", type=int, default=25)
+    parser.add_argument("--test-episodes", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=1024)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--output-dir")
     args = parser.parse_args(argv)
-    set_project_root()
-    register_resolvers()
-    exp_dir = resolve_experiment(args.experiment)
-    run_pipeline(
-        exp_dir,
-        load_experiment_config(exp_dir),
-        overrides=parse_overrides(args.overrides),
-    )
+    run_pipeline(**vars(args))
 
 
 if __name__ == "__main__":

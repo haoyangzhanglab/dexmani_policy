@@ -120,21 +120,11 @@ class Uni3DEncoder(nn.Module):
         embed_dim=256,
         num_group=512,
         group_size=32,
-        pc_in_channels=6,
         patch_dropout=0.0,
         drop_path_rate=0.0,
-        use_pretrained_weights=False,
-        pretrained_weights_path=None,
         fps_random_config=None,
     ):
         super().__init__()
-        if type(pc_in_channels) is not int or pc_in_channels != 6:
-            raise ValueError(
-                f"Uni3D pc_in_channels must be the integer 6, got {pc_in_channels!r}; "
-                "it is the internal patch feature width. XYZ input is padded with "
-                "zero RGB and does not require pc_in_channels=3."
-            )
-
         import timm
 
         self.transformer = timm.create_model(
@@ -144,7 +134,7 @@ class Uni3DEncoder(nn.Module):
         self.embed_dim = embed_dim
 
         self.patch_embed = PointNetPatchEmbedding(
-            in_channels=pc_in_channels,
+            in_channels=6,
             out_channels=512,
             num_patches=num_group,
             patch_size=group_size,
@@ -166,25 +156,12 @@ class Uni3DEncoder(nn.Module):
             if name in ("cls_token", "pos_embed") or name.startswith("patch_embed."):
                 p.requires_grad_(False)
 
-        self.use_pretrained_weights = use_pretrained_weights
-        self.pretrained_weights_path = pretrained_weights_path
-
-    def initialize_training(self):
-        if self.use_pretrained_weights:
-            self.load_pretrained_weights(self.pretrained_weights_path)
-        else:
+    def initialize_weights(self, source: str | None):
+        """Load the local R3D trunk only for fresh training."""
+        if source is None:
             logger.info("[Uni3DEncoder] Random initialization (training from scratch)")
-
-    def load_pretrained_weights(self, pretrained_weights_path):
-        """Load local R3D weights; fresh random initialization is an explicit training choice."""
-        if pretrained_weights_path is None:
-            raise ValueError(
-                "[Uni3DEncoder] use_pretrained_weights=True but "
-                "pretrained_weights_path is None. Provide the path or set "
-                "use_pretrained_weights=False to train from scratch."
-            )
-
-        weights_dir = Path(pretrained_weights_path)
+            return
+        weights_dir = Path(source).expanduser()
         if not weights_dir.is_absolute():
             weights_dir = Path(__file__).resolve().parents[4] / weights_dir
         safetensors_path = weights_dir / "model.safetensors"
@@ -211,17 +188,14 @@ class Uni3DEncoder(nn.Module):
         return self.embed_dim
 
     def forward(self, pcd):
-        if pcd.ndim != 3 or (pcd.shape[-1] != 3 and pcd.shape[-1] < 6):
+        if pcd.ndim != 3 or pcd.shape[-1] not in (3, 6):
             raise ValueError(
                 "Uni3D point cloud must have shape [B,N,C] with C=3 (XYZ) or "
-                "C>=6 (first six channels are XYZRGB); keep pc_in_channels=6 "
-                "even for XYZ input, which is padded with zero RGB."
+                "C=6 (XYZRGB); XYZ input is padded with zero RGB."
             )
         if pcd.shape[-1] == 3:
             colors = torch.zeros_like(pcd)
             pcd = torch.cat([pcd, colors], dim=-1)
-        elif pcd.shape[-1] > 6:
-            pcd = pcd[..., :6]
 
         if self.training:
             pcd = random_point_dropout(pcd, max_dropout_ratio=0.8)

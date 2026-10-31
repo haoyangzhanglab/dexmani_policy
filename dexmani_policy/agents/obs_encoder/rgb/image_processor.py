@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -31,30 +30,8 @@ IMAGE_PROCESSOR_PRESETS: dict[str, dict] = {
 }
 
 
-def to_rgb_tensor(images: np.ndarray | torch.Tensor) -> torch.Tensor:
-    """Convert integer [0, 255] or floating-point [0, 1] RGB to contiguous CHW float32."""
-    if isinstance(images, np.ndarray):
-        images = torch.from_numpy(images)
-    elif not isinstance(images, torch.Tensor):
-        raise TypeError(f"Unsupported input type: {type(images)}")
-    if images.ndim < 3:
-        raise ValueError("images should have at least 3 dims.")
-
-    if images.shape[-3] != 3:
-        if images.shape[-1] != 3:
-            raise ValueError("Cannot infer RGB channel dimension.")
-        images = images.movedim(-1, -3)
-
-    if images.dtype in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
-        images = images.to(torch.float32).div_(255.0)
-    else:
-        images = images.to(torch.float32)
-
-    return images.contiguous()
-
-
 class ImageProcessor(torch.nn.Module):
-    """Resize and normalize uint8 or floating-point RGB for policy inputs."""
+    """Resize and normalize CHW float32 [0,1] RGB batches."""
 
     def __init__(
         self,
@@ -110,28 +87,26 @@ class ImageProcessor(torch.nn.Module):
 
     def process_images(
         self,
-        images: np.ndarray | torch.Tensor,
+        images: torch.Tensor,
         *,
         return_transform: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Normalize uint8/[0,1] RGB; optional raw-to-final transforms use half-pixel resizing."""
-        images = to_rgb_tensor(images)
-        leading_shape = images.shape[:-3]
-        flat_images = images.reshape(-1, *images.shape[-3:])
+        """Consume [BT,3,H,W]; transforms use half-pixel resizing."""
+        if images.ndim != 4 or images.shape[1] != 3 or images.dtype != torch.float32:
+            raise ValueError("RGB processor requires float32 [BT,3,H,W] in [0,1]")
         if return_transform:
             output_hw = self.image_size or images.shape[-2:]
             if self.interpolation == "nearest" and tuple(output_hw) != images.shape[-2:]:
                 raise ValueError("tracked nearest resize does not use the half-pixel convention")
             transform = resize_image_transform(images.shape[-2:], output_hw, device=images.device)
-            transform = torch.broadcast_to(transform, (*leading_shape, 3, 3))
+            transform = torch.broadcast_to(transform, (images.shape[0], 3, 3))
 
         if self.image_size is not None and self.image_size != images.shape[-2:]:
-            flat_images = F.interpolate(
-                flat_images,
+            images = F.interpolate(
+                images,
                 size=self.image_size,
                 mode=self.interpolation,
                 align_corners=None if self.interpolation == "nearest" else False,
             )
-        flat_images = self.normalize(flat_images)
-        images = flat_images.reshape(*leading_shape, *flat_images.shape[1:])
+        images = self.normalize(images)
         return (images, transform) if return_transform else images

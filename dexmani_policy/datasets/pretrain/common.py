@@ -2,7 +2,6 @@ import copy
 
 from torch.utils.data import Dataset
 
-from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.split import split_episodes
 
 
@@ -18,8 +17,7 @@ class ObservationPretrainDataset(Dataset):
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError(f"No {type(self).__name__} training windows")
-        self._normalizer: LinearNormalizer | None = None
-        self.training_dataset: ObservationPretrainDataset | None = None
+        self.training = True
 
     def __len__(self):
         return len(self.sampler)
@@ -27,29 +25,18 @@ class ObservationPretrainDataset(Dataset):
     def build_sampler(self, mask):
         raise NotImplementedError
 
-    def get_normalizer(self, spec):
-        if self.training_dataset is not None:
-            return self.training_dataset.get_normalizer(spec)
-        if self._normalizer is None:
-            if set(spec) != self.normalization_fields.keys():
-                raise ValueError(f"Normalization must declare {tuple(self.normalization_fields)}")
-            normalizer = LinearNormalizer()
-            for key, mode in spec.items():
-                if mode == "identity":
-                    continue
-                chunks = (values for _, values in self.episode_store.iter_chunks(
-                    key, columns=self.normalization_fields[key], episode_mask=self.train_mask,
-                ))
-                normalizer.fit_field(key, chunks, mode=mode)
-            self._normalizer = normalizer
-        return self._normalizer
+    def iter_normalization_data(self, key):
+        for _, values in self.episode_store.iter_chunks(
+            key, columns=self.normalization_fields[key], episode_mask=self.train_mask,
+        ):
+            yield values
 
     def get_validation_dataset(self):
-        if self.training_dataset is not None:
+        if not self.training:
             return self
         if not self.val_mask.any():
             return None
         result = copy.copy(self)
-        result.training_dataset = self
+        result.training = False
         result.sampler = self.build_sampler(self.val_mask)
         return result if len(result) else None

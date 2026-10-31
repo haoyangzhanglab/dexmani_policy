@@ -5,7 +5,43 @@ import hydra
 import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, read_split_manifest
+from dexmani_policy.common.config import (
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, normalization_feature_shapes, read_split_manifest,
+)
+from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
+from dexmani_policy.datasets.pretrain.common import ObservationPretrainDataset
+
+
+def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
+    """Assemble the train affine once, inheriting complete fields before fitting the rest."""
+    if not dataset.training:
+        raise ValueError("Normalizer fitting requires the training dataset")
+    if isinstance(dataset, ObservationPretrainDataset):
+        if set(spec) != dataset.normalization_fields.keys():
+            raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
+    expected_shapes = normalization_feature_shapes(feature_dims)
+    initial_state = {} if initial_state is None else initial_state
+    normalizer = LinearNormalizer({
+        key: expected_shapes[key] for key, mode in spec.items()
+        if mode != "identity" and f"fields.{key}.scale" in initial_state
+    })
+    normalizer.load_state_dict(initial_state, strict=True)
+    validate_normalizer_state(normalizer)
+    for key, mode in spec.items():
+        if mode == "identity" or key in normalizer.fields:
+            continue
+        normalizer.fit_field(
+            key, dataset.iter_normalization_data(key),
+            mode="limits" if mode == "auto" else mode,
+            last_n_dims=len(FIELD_FEATURE_SHAPES.get(key, (0,))),
+        )
+        if key == "action" and mode == "auto" and dataset.action_key == "action_ee":
+            field = normalizer[key]
+            if field.scale.numel() <= 9:
+                raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
+            field.scale[3:9] = 1
+            field.offset[3:9] = 0
+    return normalizer
 
 
 def build_dataset(cfg):
@@ -24,7 +60,10 @@ def build_dataset(cfg):
         raise ValueError(
             "Canonical checkpoint resume requires source_id in both the dataset and saved split"
         )
-    dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
+    dims = {
+        key: int(buffer[key].shape[-1]) for key, mode in spec.items()
+        if key != "action" and (mode != "identity" or key in POINT_CLOUD_FIELDS)
+    }
     for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
     if dataset.pc_dim is not None:

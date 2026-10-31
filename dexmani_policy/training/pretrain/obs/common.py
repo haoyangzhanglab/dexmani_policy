@@ -1,7 +1,6 @@
 import argparse
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
 
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -12,51 +11,78 @@ from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics
-from dexmani_policy.training.common.resume import RESUME_OPERATIONAL_FIELDS, resolve_input_recipe
 
 
-def load_run(method, *, resume_fields):
+def load_run(method):
     parser = argparse.ArgumentParser(description=f"Pretrain the {method} observation encoder")
-    parser.add_argument("--config", default=f"pretrain/obs/{method}")
+    parser.add_argument("--config")
     parser.add_argument("--output-dir")
     parser.add_argument("--resume-from")
+    parser.add_argument("--device")
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--log-interval", type=int)
+    parser.add_argument("--zarr-path")
+    parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args()
     if args.max_updates is not None:
         positive_int(args.max_updates, "max_updates")
-    cfg = load_policy_config(args.config, args.overrides)
-    output = args.output_dir or cast(dict, OmegaConf.to_container(cfg.workspace, resolve=False))["output_dir"]
     checkpoint = None
     if args.resume_from is not None:
-        checkpoint = torch.load(args.resume_from, map_location="cpu", weights_only=False)
+        if args.config is not None or args.output_dir is not None or args.overrides:
+            parser.error("Resume reads the saved recipe in its original run; --config, --output-dir and overrides are fresh-only")
+        source = Path(args.resume_from).expanduser().resolve(strict=True)
+        if source.is_dir():
+            source = source / "resume.pt"
+        checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+        cfg = OmegaConf.create(checkpoint["effective_config"])
+        if not OmegaConf.is_dict(cfg.dataset.get("split_manifest")):
+            raise ValueError("Resume requires the saved dataset.split_manifest")
+        cfg.workspace.output_dir = str(source.parent)
+    else:
+        cfg = load_policy_config(args.config or f"pretrain/obs/{method}", args.overrides)
+        if args.output_dir is not None:
+            cfg.workspace.output_dir = args.output_dir
     with open_dict(cfg):
         cfg.resume_from = args.resume_from
-    cfg = resolve_input_recipe(
-        cfg, overrides=args.overrides,
-        saved_config=None if checkpoint is None else checkpoint["effective_config"],
-        operational_fields=RESUME_OPERATIONAL_FIELDS | resume_fields,
-    )
-    cfg.workspace.output_dir = output
-    for name in ("encoder.pt", "resume.pt"):
-        path = Path(cfg.workspace.output_dir) / name
-        if path.exists():
-            raise FileExistsError(f"Pretraining output already exists: {path}")
+        cfg.workspace.wandb_enabled = not args.no_wandb
+    if args.device is not None:
+        cfg.training.device = args.device
+    if args.num_workers is not None:
+        if args.num_workers < 0:
+            parser.error("--num-workers must be nonnegative")
+        cfg.dataloader.num_workers = args.num_workers
+    if args.log_interval is not None:
+        positive_int(args.log_interval, "--log-interval")
+        cfg.training.loop.log_interval_steps = args.log_interval
+    if args.zarr_path is not None:
+        cfg.dataset.zarr_path = args.zarr_path
+    if checkpoint is None:
+        for name in ("encoder.pt", "resume.pt"):
+            path = Path(cfg.workspace.output_dir) / name
+            if path.exists():
+                raise FileExistsError(f"Pretraining output already exists: {path}")
     return cfg, checkpoint, args.max_updates
 
 
-def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):
-    output = Path(cfg.workspace.output_dir)
-    config = OmegaConf.to_container(cfg, resolve=True)
+def export_encoder(model, encoder, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "encoder_state": {key: value.detach().cpu() for key, value in encoder.state_dict().items()},
         "normalizer_state": {key: value.detach().cpu() for key, value in model.normalizer.state_dict().items()},
     }
-    with atomic_path(output / "encoder.pt") as temporary:
+    with atomic_path(output_path) as temporary:
         torch.save(payload, temporary)
+
+
+def save_run(model, optimizer, scheduler, cfg, step):
+    output = Path(cfg.workspace.output_dir)
+    config = OmegaConf.to_container(cfg, resolve=True)
     checkpoint = {
         "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict(), "epoch": epoch, "global_step": step,
+        "scheduler_state": scheduler.state_dict(), "global_step": step,
         "rng_state": get_rng_state(cfg.training.device), "effective_config": config,
     }
     with atomic_path(output / "resume.pt") as temporary:
@@ -94,3 +120,30 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
     finally:
         model.train(training)
         set_rng_state(rng_state, device)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Export an observation encoder from a resume checkpoint")
+    parser.add_argument("--method", required=True, choices=("afro", "cordvip"))
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    cfg = OmegaConf.create(checkpoint["effective_config"])
+    if args.method == "afro":
+        from dexmani_policy.training.pretrain.obs.afro import AFROPretrain
+
+        model = AFROPretrain(cfg.normalization)
+        encoder = model.visual
+    else:
+        from dexmani_policy.training.pretrain.obs.cordvip import CordViPPretrain
+
+        model = CordViPPretrain(cfg.normalization, **cfg.model)
+        encoder = model.obs_encoder
+    model.load_state_dict(checkpoint["model_state"], strict=True)
+    validate_normalizer_state(model.normalizer)
+    export_encoder(model, encoder, args.output)
+
+
+if __name__ == "__main__":
+    main()

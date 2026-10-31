@@ -13,17 +13,12 @@ def gather_tokens(tokens: Tensor, indices: Tensor) -> Tensor:
 
 
 @torch.no_grad()
-def sample_region_seeds(points: Tensor, count: int, mask: Tensor | None = None) -> Tensor:
-    """Centroid-initialized FPS; masked XYZ are zero, unique indices break ties by input order."""
+def sample_region_seeds(points: Tensor, count: int) -> Tensor:
+    """Centroid-initialized FPS; unique indices break ties by input order."""
     with torch.autocast(device_type=points.device.type, enabled=False):
         points = points.float()
-        excluded = (
-            torch.zeros(points.shape[:2], device=points.device, dtype=torch.bool)
-            if mask is None
-            else ~mask
-        )
-        valid_count = points.shape[1] if mask is None else mask.sum(1)[:, None, None]
-        centroid = points.sum(1, keepdim=True) / valid_count
+        excluded = torch.zeros(points.shape[:2], device=points.device, dtype=torch.bool)
+        centroid = points.sum(1, keepdim=True) / points.shape[1]
         distance = (points - centroid).square().sum(-1)
         farthest = distance.masked_fill(excluded, -torch.inf).argmax(-1)
         batch = torch.arange(points.shape[0], device=points.device)
@@ -66,7 +61,7 @@ class LocalGlobalCrossAttention(nn.Module):
         self.out = nn.Linear(attention_dim, channels)
 
     def attention_bias(
-        self, geometry_bias: Tensor, pool_weight: Tensor, patch_mask: Tensor | None
+        self, geometry_bias: Tensor, pool_weight: Tensor
     ) -> Tensor:
         if self.mode == "hard":
             bias = pool_weight.clamp_min(1e-30).log().masked_fill(pool_weight <= 0, -torch.inf)
@@ -77,8 +72,6 @@ class LocalGlobalCrossAttention(nn.Module):
                 -1, self.global_heads, -1, -1
             )
             bias = torch.cat((local, global_bias), dim=1)
-        if patch_mask is not None:
-            bias = bias.masked_fill(~patch_mask[:, None, None], -torch.inf)
         return bias
 
     def forward(self, query: Tensor, memory: Tensor, bias: Tensor) -> Tensor:
@@ -97,7 +90,7 @@ class LocalGlobalCrossAttention(nn.Module):
 
 
 class SceneAggregator(nn.Module):
-    """Pool at least K finite patches into metric regions; masked entries may be nonfinite."""
+    """Pool at least K finite patches into metric regions."""
 
     def __init__(
         self,
@@ -166,12 +159,7 @@ class SceneAggregator(nn.Module):
         self,
         patch_token: Tensor,
         patch_center: Tensor,
-        return_intermediate: bool = False,
-        *,
-        patch_mask: Tensor | None = None,
-        query_context: Tensor | None = None,
-    ) -> dict[str, Tensor]:
-        """query_context [B,D] is caller-encoded current information, used only in Q."""
+    ) -> Tensor:
         if patch_token.ndim != 3 or patch_token.shape[-1] != self.token_channels:
             raise ValueError("patch_token must be [B,M,token_channels]")
         if not patch_token.shape[0] or patch_token.shape[1] < self.num_scene_tokens:
@@ -180,26 +168,9 @@ class SceneAggregator(nn.Module):
             raise ValueError("patch_center must be [B,M,3]")
         if not patch_token.is_floating_point() or not patch_center.is_floating_point():
             raise TypeError("tokens and XYZ must be floating point")
-        if query_context is not None:
-            if query_context.shape != (patch_token.shape[0], self.token_channels):
-                raise ValueError("query_context must be [B,token_channels]")
-            if not query_context.is_floating_point():
-                raise TypeError("query_context must be floating point")
-
         tokens, points = patch_token, patch_center.float()
-        valid = None
-        if patch_mask is not None:
-            if patch_mask.shape != tokens.shape[:2] or patch_mask.dtype != torch.bool:
-                raise ValueError("patch_mask must be bool [B,M]")
-            # Torch 2.4 Inductor drops _assert_async, so masked calls keep this Python boundary.
-            if not (patch_mask.sum(-1) >= self.num_scene_tokens).all():
-                raise ValueError("each sample needs at least K valid patches")
-            valid = patch_mask[:, None]
-            tokens = torch.where(patch_mask[..., None], tokens, 0.0)
-            points = torch.where(patch_mask[..., None], points, 0.0)
-
         regions = self.num_scene_tokens
-        seed_indices = sample_region_seeds(points, regions, patch_mask)
+        seed_indices = sample_region_seeds(points, regions)
         anchors = gather_tokens(points, seed_indices)
         with torch.autocast(device_type=tokens.device.type, enabled=False):
             distance2 = (anchors[:, :, None] - points[:, None]).square().sum(-1)
@@ -211,16 +182,10 @@ class SceneAggregator(nn.Module):
             # Each unique seed index owns itself, even for coincident coordinates.
             ownership = torch.zeros_like(allowed).scatter_(2, seed_indices[..., None], True)
             allowed = torch.where(ownership.any(dim=1, keepdim=True), ownership, allowed)
-            if valid is not None:
-                allowed = allowed & valid
 
         with torch.autocast(device_type=tokens.device.type, enabled=False):
             logits = geometry_bias.masked_fill(~allowed, -torch.inf)
-            if valid is not None:
-                logits = torch.where(valid, logits, 0.0)
             assignment = logits.softmax(dim=1)
-            if valid is not None:
-                assignment = assignment * valid
             mass = assignment.sum(-1)
             weight = assignment / mass[..., None]  # Seed ownership guarantees nonempty regions.
             pooled = weight @ tokens.float()
@@ -242,46 +207,19 @@ class SceneAggregator(nn.Module):
         # Keep pooled features and small learned residuals in FP32 under autocast.
         base_tokens = pooled + geometry.float()
         scene_tokens = base_tokens
-        refinement_update = attention_bias = None
         if self.cross_refinement is not None:
             query = (
                 base_tokens if self.learned_query is None
                 else self.learned_query.float().expand_as(base_tokens)
             )
-            if query_context is not None:
-                query = query + query_context[:, None].float()
-            attention_bias = self.cross_refinement.attention_bias(geometry_bias, weight, patch_mask)
+            attention_bias = self.cross_refinement.attention_bias(geometry_bias, weight)
             refinement_update = self.cross_refinement(query, tokens, attention_bias)
             scene_tokens = scene_tokens + cast(Tensor, self.refinement_gain).float() * refinement_update.float()
         normalized = self.ffn_norm(scene_tokens.to(self.ffn_norm.weight.dtype))
         scene_tokens = scene_tokens + self.ffn_gain.float() * self.ffn(normalized).float()
 
-        output = {
-            "scene_token": self.norm(scene_tokens.to(self.norm.weight.dtype)),
-            "scene_center": centers,
-            "scene_covariance": covariance,
-            "scene_mass": mass,
-            "scene_mask": torch.ones_like(mass, dtype=torch.bool),
-        }
-        if return_intermediate:
-            output.update(
-                assignment=assignment,
-                pool_weight=weight,
-                anchor_indices=seed_indices,
-                region_anchors=anchors,
-                pool_support=allowed,
-                pooled_token=pooled,
-                base_scene_token=base_tokens,
-            )
-            if refinement_update is not None:
-                output["refinement_update"] = refinement_update
-                output["attention_bias"] = attention_bias
-        return output
+        return self.norm(scene_tokens.to(self.norm.weight.dtype))
 
     @property
     def out_dim(self) -> int:
         return self.token_channels
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return self.num_scene_tokens, self.token_channels

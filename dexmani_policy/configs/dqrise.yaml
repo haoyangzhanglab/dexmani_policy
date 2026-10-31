@@ -9,7 +9,6 @@ policy_name: dqrise
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_dim: 19
 
 normalization:
   joint_state: limits
@@ -20,16 +19,17 @@ normalization:
   camera_extrinsic: identity
 
 tcp_dim: 7
-codebook_path: null  # 新训练须提供与数据配方和归一化匹配的码本。
+
+initialization:
+  rgb: facebook/dinov2-small
+  codebook: null  # 新训练须提供与实际 train split 匹配的码本。
 
 dataloader:
   batch_size: 128
   drop_last: true
 
 dataset:
-  pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"]
   rgb_keep_uint8: true
 
@@ -40,7 +40,6 @@ dataset:
 agent:
   _target_: dexmani_policy.agents.policies.dqrise.DQRISEPolicy
   tcp_dim: ${tcp_dim}
-  codebook_path: ${codebook_path}
   codebook_num_groups: 2
   codebook_size: 4
 
@@ -66,7 +65,6 @@ agent:
     rope_base: 100.0
 
   rgb_backbone_config:
-    model_name: facebook/dinov2-small
     tune_mode: freeze
     image_size: [224, 224]
 
@@ -83,9 +81,6 @@ agent:
 
   num_inference_steps: 10
 
-  modality_dropout_probs:
-    joint_state: 0.0
-
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
@@ -93,27 +88,14 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-ema:
-  _target_: dexmani_policy.training.common.optimization.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
-
 training:
   use_bfloat16: true
   use_compile: true
   use_ema: true
-  lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-
-env_runner:
-  env_kwargs:
-    control_mode: joint
 
 eval:
   inference_steps: ${agent.num_inference_steps}

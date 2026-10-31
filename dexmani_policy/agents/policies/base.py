@@ -5,7 +5,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int, validate_action_window, normalization_feature_shapes
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int, validate_action_window
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 
@@ -73,10 +73,6 @@ class BasePolicy(nn.Module):
         self.normalizer = LinearNormalizer()
         self.normalization_dims: dict[str, int] = {}
 
-    @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        """Adjust only external initialization options on a private constructor config."""
-
     @property
     def effective_config(self) -> dict:
         return dict(getattr(self.obs_encoder, "effective_config", {}))
@@ -95,36 +91,9 @@ class BasePolicy(nn.Module):
 
     supported_execution_modes: tuple[str, ...] = ("sync", "async")
 
-    @classmethod
-    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
-        if action_key not in cls.supported_action_keys:
-            raise ValueError(f"{cls.__name__} does not support action_key={action_key!r}")
-        allowed = ("auto", "limits") if action_key == "action" else ("auto",)
-        if spec["action"] not in allowed:
-            raise ValueError(
-                f"{cls.__name__} with {action_key} requires normalization.action "
-                f"in {allowed}; the action recipe is fixed"
-            )
-
-    def set_normalization_spec(
-        self, spec: dict[str, str], feature_dims: dict[str, int], *, action_key: str
-    ) -> None:
-        self.validate_normalization_recipe(spec, action_key=action_key)
-        validate = getattr(self.obs_encoder, "validate_normalization", None)
-        if validate is not None:
-            validate(spec)
+    def configure_normalizer(self, feature_dims, feature_shapes) -> None:
         self.normalization_dims = dict(feature_dims)
-        if self.normalization_dims["action"] != self.action_dim:
-            raise ValueError("Normalizer action width must match the full prediction layout")
-        self.normalizer = LinearNormalizer(normalization_feature_shapes({
-            key: feature_dims[key] for key, mode in spec.items() if mode != "identity"
-        }))
-
-    def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
-        """Initialize fresh weights and optionally return inherited normalization state."""
-
-    def load_normalizer(self, normalizer: LinearNormalizer) -> None:
-        self.normalizer.load_state_dict(normalizer.state_dict())
+        self.normalizer = LinearNormalizer(feature_shapes)
 
     @property
     def requires_ema_for_loss(self) -> bool:
@@ -138,18 +107,15 @@ class BasePolicy(nn.Module):
     def preprocess(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
-            if torch.is_tensor(value):
-                # Runners may supply XYZRGB even when the policy consumes only XYZ.
-                if key in POINT_CLOUD_FIELDS and self.normalization_dims.get(key) == 3:
-                    value = value[..., :3]
-                if key in self.normalizer.fields:
-                    value = self.normalizer[key].normalize(value)
-                probability = self.modality_dropout_probs.get(key, 0.0)
-                if self.training and probability > 0:
-                    mask = torch.rand(value.shape[0], device=value.device) > probability
-                    value = value * mask.view(-1, *([1] * (value.ndim - 1)))
-                value = value.flatten(0, 1)
-            result[key] = value
+            if key in POINT_CLOUD_FIELDS:
+                value = value[..., : self.normalization_dims[key]]
+            if key in self.normalizer.fields:
+                value = self.normalizer[key].normalize(value)
+            probability = self.modality_dropout_probs.get(key, 0.0)
+            if self.training and probability > 0:
+                mask = torch.rand(value.shape[0], device=value.device) > probability
+                value = value * mask.view(-1, *([1] * (value.ndim - 1)))
+            result[key] = value.flatten(0, 1)
         return result
 
     def encode_observation(self, obs_dict: dict) -> torch.Tensor:

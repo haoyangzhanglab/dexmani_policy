@@ -3,6 +3,7 @@
 # Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
 
 import time
+from pathlib import Path
 
 import hydra
 import torch
@@ -15,12 +16,16 @@ from dexmani_policy.common.config import positive_int, read_split_manifest
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
+from dexmani_policy.training.common.data import (
+    build_train_loader, close_data_loader, epoch_position, fit_normalizer,
+)
 from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.common.signals import training_signal_handlers
 from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
-from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
+from dexmani_policy.training.pretrain.obs.common import (
+    evaluate, export_encoder, load_run, restore_run, save_run,
+)
 
 
 def vicreg_loss(prediction, target):
@@ -60,9 +65,9 @@ class AFROPretrain(nn.Module):
             points = self.normalizer["point_cloud"].normalize(points)
         batch_size, frames = points.shape[:2]
         points = points.flatten(0, 1)
-        online = self.visual(points)["global_token"].reshape(batch_size, frames, 64)
+        online = self.visual(points).reshape(batch_size, frames, 64)
         with torch.no_grad():
-            teacher = self.teacher(points)["global_token"].reshape(batch_size, frames, 64)
+            teacher = self.teacher(points).reshape(batch_size, frames, 64)
         losses, metrics = [], {}
         for name, current, following, target in (
             ("forward", online[:, :-1], online[:, 1:], teacher[:, 1:]),
@@ -107,7 +112,9 @@ def train(cfg, checkpoint=None, max_updates=None):
     cfg.training.loop.total_train_steps = total
     model = AFROPretrain(cfg.normalization)
     if checkpoint is None:
-        model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
+        model.normalizer = fit_normalizer(
+            dataset, cfg.normalization, feature_dims={"point_cloud": 3},
+        )
     validation = dataset.get_validation_dataset()
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
@@ -119,7 +126,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace)
+    logger = ExperimentLogger(**cfg.workspace, resume_step=step if checkpoint is not None else None)
     print(f"[AFRO] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, total_updates={total}")
     stop_requested = False
@@ -173,15 +180,16 @@ def train(cfg, checkpoint=None, max_updates=None):
                         if metrics is not None:
                             logger.log(to_log_scalars(metrics), step)
                     if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
-                        save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
-            save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
+                        save_run(model, optimizer, scheduler, cfg, step)
+            save_run(model, optimizer, scheduler, cfg, step)
+            export_encoder(model, model.visual, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
         finally:
             close_resources(lambda: close_data_loader(loader), logger.close)
 
 
 def main():
-    train(*load_run("afro", resume_fields={"training.save_every_epochs", "training.val_every_epochs"}))
+    train(*load_run("afro"))
 
 
 if __name__ == "__main__":

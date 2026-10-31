@@ -14,14 +14,27 @@ class CrossAttentionTransformer(nn.Module):
         super().__init__()
         attention = MultiHeadedAttention(4, emb_dim)
         feed_forward = PositionwiseFeedForward(emb_dim, 1024)
-        self.model = EncoderDecoder(
-            Encoder(EncoderLayer(emb_dim, copy.deepcopy(attention), copy.deepcopy(feed_forward))),
-            Decoder(DecoderLayer(emb_dim, copy.deepcopy(attention), copy.deepcopy(attention),
-                                 copy.deepcopy(feed_forward))),
-        )
+        self.encoder_attention = copy.deepcopy(attention)
+        self.encoder_ffn = copy.deepcopy(feed_forward)
+        self.decoder_attention = copy.deepcopy(attention)
+        self.cross_attention = copy.deepcopy(attention)
+        self.decoder_ffn = copy.deepcopy(feed_forward)
+        self.encoder_norm1 = LayerNorm(emb_dim)
+        self.encoder_norm2 = LayerNorm(emb_dim)
+        self.encoder_norm = LayerNorm(emb_dim)
+        self.decoder_norm1 = LayerNorm(emb_dim)
+        self.decoder_norm2 = LayerNorm(emb_dim)
+        self.decoder_norm3 = LayerNorm(emb_dim)
+        self.decoder_norm = LayerNorm(emb_dim)
 
     def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        return self.model(context, query)
+        normalized = self.encoder_norm1(context)
+        context = context + self.encoder_attention(normalized, normalized, normalized)
+        context = self.encoder_norm(context + self.encoder_ffn(self.encoder_norm2(context)))
+        normalized = self.decoder_norm1(query)
+        query = query + self.decoder_attention(normalized, normalized, normalized)
+        query = query + self.cross_attention(self.decoder_norm2(query), context, context)
+        return self.decoder_norm(query + self.decoder_ffn(self.decoder_norm3(query)))
 
 
 def clones(module, count):
@@ -40,77 +53,6 @@ class LayerNorm(nn.Module):
         mean = x.mean(-1, keepdim=True)
         std = x.std(-1, keepdim=True)
         return self.a_2 * (x - mean) / (std + self.eps) + self.b_2
-
-
-class EncoderDecoder(nn.Module):
-    def __init__(self, encoder, decoder):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-
-    def forward(self, context, query):
-        return self.decoder(query, self.encoder(context))
-
-
-class Decoder(nn.Module):
-    def __init__(self, layer):
-        super().__init__()
-        self.layers = clones(layer, 1)
-        self.norm = LayerNorm(layer.size)
-
-    def forward(self, x, memory):
-        for layer in self.layers:
-            x = layer(x, memory)
-        return self.norm(x)
-
-
-class DecoderLayer(nn.Module):
-    def __init__(self, size, self_attn, src_attn, feed_forward):
-        super().__init__()
-        self.size = size
-        self.self_attn = self_attn
-        self.src_attn = src_attn
-        self.feed_forward = feed_forward
-        self.sublayer = clones(SublayerConnection(size), 3)
-
-    def forward(self, x, memory):
-        x = self.sublayer[0](x, lambda value: self.self_attn(value, value, value))
-        x = self.sublayer[1](x, lambda value: self.src_attn(value, memory, memory))
-        return self.sublayer[2](x, self.feed_forward)
-
-
-class SublayerConnection(nn.Module):
-    def __init__(self, size):
-        super().__init__()
-        self.norm = LayerNorm(size)
-
-    def forward(self, x, sublayer):
-        return x + sublayer(self.norm(x))
-
-
-class Encoder(nn.Module):
-    def __init__(self, layer):
-        super().__init__()
-        self.layers = clones(layer, 1)
-        self.norm = LayerNorm(layer.size)
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return self.norm(x)
-
-
-class EncoderLayer(nn.Module):
-    def __init__(self, size, self_attn, feed_forward):
-        super().__init__()
-        self.self_attn = self_attn
-        self.feed_forward = feed_forward
-        self.sublayer = clones(SublayerConnection(size), 2)
-        self.size = size
-
-    def forward(self, x):
-        x = self.sublayer[0](x, lambda value: self.self_attn(value, value, value))
-        return self.sublayer[1](x, self.feed_forward)
 
 
 class MultiHeadedAttention(nn.Module):

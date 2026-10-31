@@ -23,7 +23,6 @@ from dexmani_policy.datasets.transforms import (
     PointCoordinateNoise,
     random_sample_points,
 )
-from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler
@@ -97,7 +96,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self.training_dataset: DemonstrationDataset | None = None
+        self.training = True
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -114,8 +113,8 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 raise ValueError("Stored RGB must have shape (T, H, W, 3) and dtype uint8")
         for key in POINT_CLOUD_FIELDS.intersection(sensor_modalities):
             shape = self.episode_store[key].shape
-            if len(shape) != 3:
-                raise ValueError(f"Stored {key} must have shape [T,N,C]")
+            if len(shape) != 3 or shape[1] == 0:
+                raise ValueError(f"Stored {key} must have shape [T,N>0,C]")
             if pc_dim is not None and shape[-1] < pc_dim:
                 raise ValueError(f"Stored {key} does not satisfy configured pc_dim")
         self.augmentation_cfg = augmentation_cfg
@@ -143,8 +142,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError("No training sequence windows: selected episodes are too short")
-        self.validation_dataset: DemonstrationDataset | None = None
-        self._normalizer: LinearNormalizer | None = None
 
     @property
     def data_keys(self):
@@ -175,28 +172,24 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
     def build_sampler(self, episode_mask):
         return SequenceSampler(
-            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask,
+            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask=episode_mask,
             fields=self.consumed_fields, field_horizons={key: self.obs_horizon for key in self.sensor_modalities},
         )
 
     def get_validation_dataset(self):
-        if self.training_dataset is not None:
+        if not self.training:
             return self
-        if self.validation_dataset is not None:
-            return self.validation_dataset
         if not self.val_mask.any():
             return None
 
         val_set = copy.copy(self)
-        val_set.training_dataset = self
-
+        val_set.training = False
         val_set.sampler = self.build_sampler(self.val_mask)
         if not len(val_set.sampler):
             return None
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
         val_set.random_keep_points = None
-        self.validation_dataset = val_set
         return val_set
 
     def __len__(self):
@@ -210,7 +203,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         }
 
     def preprocess_rgb(self, rgb, resize_hw: tuple[int, int]):
-        if self.training_dataset is not None:
+        if not self.training:
             return preprocess_rgb_eval(
                 rgb,
                 resize_hw=resize_hw,
@@ -236,8 +229,13 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 self.random_keep_points,
             )
 
-        if self.rgb_preprocess_size is not None and "rgb" in data["obs"]:
-            data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"], self.rgb_preprocess_size)
+        if "rgb" in data["obs"]:
+            if self.rgb_preprocess_size is not None:
+                data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"], self.rgb_preprocess_size)
+            else:
+                data["obs"]["rgb"] = preprocess_rgb_eval(
+                    data["obs"]["rgb"], resize_hw=None, center_crop_hw=None, keep_uint8=self.rgb_keep_uint8,
+                )
 
         return dict_apply(data, torch.as_tensor)
 
@@ -261,7 +259,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             config = (augmentation.get(section) or {}).get(key)
             if config:
                 if (
-                    section == "pc" and key in {"color", "color_noise"}
+                    section == "pc" and key == "color"
                     and (self.pc_dim or self.episode_store["point_cloud"].shape[-1]) < 6
                 ):
                     if config.get("prob", 1) > 0:
@@ -281,42 +279,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                     aug.augment(x)
 
     def iter_normalization_data(self, key):
-        if self.training_dataset is not None:
-            raise ValueError("Validation must reuse the training normalizer")
         field = self.action_key if key == "action" else key
         columns = self.consumed_fields[field]
         for _, values in self.episode_store.iter_chunks(field, columns=columns, episode_mask=self.train_mask):
             yield values
-
-    def get_normalizer(self, spec, *, initial_state=None):
-        if self.training_dataset is not None:
-            return self.training_dataset.get_normalizer(spec, initial_state=initial_state)
-        if self._normalizer is not None:
-            if initial_state is not None:
-                raise ValueError("Normalizer is already initialized; initial_state is only accepted once")
-            return self._normalizer
-        initial_state = {} if initial_state is None else initial_state
-        shapes = {
-            key: initial_state[f"fields.{key}.scale"].shape
-            for key, mode in spec.items()
-            if mode != "identity" and f"fields.{key}.scale" in initial_state
-        }
-        normalizer = LinearNormalizer(shapes)
-        normalizer.load_state_dict(initial_state, strict=True)
-        validate_normalizer_state(normalizer)
-        for key, mode in spec.items():
-            if mode == "identity" or key in normalizer.fields:
-                continue
-            normalizer.fit_field(
-                key, self.iter_normalization_data(key),
-                mode="limits" if mode == "auto" else mode,
-                last_n_dims=len(FIELD_FEATURE_SHAPES.get(key, (0,))),
-            )
-            if key == "action" and mode == "auto" and self.action_key == "action_ee":
-                field = normalizer[key]
-                if field.scale.numel() <= 9:
-                    raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
-                field.scale[3:9] = 1
-                field.offset[3:9] = 0
-        self._normalizer = normalizer
-        return normalizer

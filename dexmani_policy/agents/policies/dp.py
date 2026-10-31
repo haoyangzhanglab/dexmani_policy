@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Literal
 
 import torch
-from omegaconf import DictConfig
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import (
@@ -56,20 +55,6 @@ class DPObservationEncoder(nn.Module):
 
 class DPPolicy(BasePolicy):
     supported_execution_modes = ("sync", "async", "rtc")
-
-    @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        rgb = dict(config.rgb_backbone_config)
-        if config.rgb_backbone_name == "resnet":
-            if not {"tune_mode", "norm_mode"} <= rgb.keys():
-                raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
-            rgb["weights"] = None
-        if config.rgb_backbone_name in {"dino", "siglip"} and not isinstance(
-            rgb.get("architecture"), (dict, DictConfig)
-        ):
-            raise ValueError("Saved HF backbone requires an architecture mapping")
-        rgb["load_pretrained"] = False
-        config.rgb_backbone_config = rgb
 
     def __init__(
         self,

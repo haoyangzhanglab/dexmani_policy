@@ -24,7 +24,6 @@ class DQRISEPolicy(BasePolicy):
         n_action_steps: int = 8,
         action_dim: int = 19,
         tcp_dim: int = 7,
-        codebook_path: str | None = None,
         codebook_num_groups: int = 2,
         codebook_size: int = 4,
         pc_dim: int = 3,
@@ -98,64 +97,21 @@ class DQRISEPolicy(BasePolicy):
             num_groups=codebook_num_groups,
             codebook_size=codebook_size,
         )
-        self.codebook_path = codebook_path
-        self.register_load_state_dict_post_hook(self.validate_restored_codebook)
 
-    @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        config["rgb_backbone_config"] = SpatialObservationEncoder.prepare_rgb_restore_config(
-            config.get("rgb_backbone_config")
-        )
-        config["codebook_path"] = None
-
-    def initialize_training(self, data_description) -> None:
-        if self.codebook_path is None:
-            raise ValueError("Fresh DQ-RISE training requires codebook_path")
+    def initialize_training(self, data_description, codebook_path) -> dict[str, torch.Tensor]:
+        if codebook_path is None:
+            raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
         validate_hand_coordinates(data_description["attrs"])
-        metadata = load_codebook(self.codebook_path, self.hand_codebook)
+        metadata, hand_affine = load_codebook(codebook_path, self.hand_codebook)
         if data_description["action_key"] != "action" or metadata["hand_data"]["action_key"] != "action":
             raise ValueError("DQ-RISE requires joint policy data and a codebook pretrained with action_key=action")
         if data_description["split_manifest"] != metadata["split_manifest"]:
             raise ValueError("Pretraining/policy split mismatch")
-
-    def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
-        self.validate_codebook_normalizer()
-
-    def load_normalizer(self, normalizer) -> None:
-        super().load_normalizer(normalizer)
-        self.validate_codebook_normalizer()
-
-    def validate_codebook_normalizer(self, *, rtol: float = 1e-5, atol: float = 1e-6) -> None:
-        field = self.normalizer["action"]
-        policy_scale = field.scale[-self.hand_dim :].detach().cpu()
-        policy_offset = field.offset[-self.hand_dim :].detach().cpu()
-        code_scale = self.hand_codebook.hand_normalizer_scale.detach().cpu()
-        code_offset = self.hand_codebook.hand_normalizer_offset.detach().cpu()
-
-        if not (
-            torch.allclose(policy_scale, code_scale, rtol=rtol, atol=atol)
-            and torch.allclose(policy_offset, code_offset, rtol=rtol, atol=atol)
-        ):
-            raise ValueError(
-                "The policy action normalizer and VQ codebook hand normalizer "
-                "do not match. Training/inference would use incompatible hand "
-                "coordinates. Rebuild the codebook with "
-                "python -m dexmani_policy.training.pretrain.hand_prior.vqvae "
-                "--config pretrain/hand_prior/vqvae using this policy's split manifest and normalization."
-            )
-
-    def require_codebook(self) -> None:
-        if not self.hand_codebook.is_loaded:
-            raise RuntimeError(
-                "DQRISEPolicy has no hand codebook. Supply codebook_path when "
-                "initializing fresh training, or load a complete "
-                "policy checkpoint before training/inference."
-            )
+        return hand_affine
 
     def compute_loss(
         self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,
     ) -> tuple[torch.Tensor, dict]:
-        self.require_codebook()
         condition = self.encode_observation(batch["obs"])
 
         normed = self.normalizer["action"].normalize(batch["action"])
@@ -193,7 +149,6 @@ class DQRISEPolicy(BasePolicy):
     ) -> dict[str, torch.Tensor]:
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("DQ-RISE does not support RTC")
-        self.require_codebook()
         reduced_action = self.action_decoder.predict_action(
             condition, (condition.shape[0], self.horizon, self.flow_action_dim),
             inference_steps=inference_steps, generator=generator,
@@ -201,22 +156,17 @@ class DQRISEPolicy(BasePolicy):
 
         arm_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]
-        hand_pred, discrete_idx = self.hand_codebook.decode(idx_pred)
+        hand_pred, _ = self.hand_codebook.decode(idx_pred)
         hand_pred = hand_pred.to(arm_pred.dtype)
 
         normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)
-        return {
-            **self.format_action_output(prediction),
-            "pred_code_index": discrete_idx[:, self.action_start_index :],
-            "pred_code_continuous": idx_pred[:, self.action_start_index :],
-        }
+        return self.format_action_output(prediction)
 
     def extra_repr(self) -> str:
         return (
             f"action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
             f"hand_dim={self.hand_dim}, "
             f"flow_action_dim={self.flow_action_dim}, "
-            f"codes={self.hand_codebook.num_codes}, "
-            f"codebook_loaded={self.hand_codebook.is_loaded}"
+            f"codes={self.hand_codebook.num_codes}"
         )

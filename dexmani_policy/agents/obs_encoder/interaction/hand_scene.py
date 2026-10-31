@@ -17,35 +17,25 @@ def query_local_surface(
     k: int,
     radius: float,
     metric_scale: float,
-    point_mask: Tensor | None = None,
 ) -> dict[str, Tensor]:
     with torch.autocast(device_type=points.device.type, enabled=False):
-        valid = torch.isfinite(points).all(-1)
-        if point_mask is not None:
-            valid = valid & point_mask
-        points = torch.where(valid[..., None], points.float(), 0.0)
-        anchors = anchors.float()
-
-        # A masked sentinel lets empty clouds use the same KNN path.
-        points = torch.cat((points, points.new_zeros(points.shape[0], 1, 3)), 1)
-        valid = torch.cat((valid, valid.new_zeros(valid.shape[0], 1)), 1)
+        points, anchors = points.float(), anchors.float()
 
         distance2 = (points[:, None, :, 0] - anchors[:, :, None, 0]).square_()
         for axis in (1, 2):
             distance2.add_((points[:, None, :, axis] - anchors[:, :, None, axis]).square_())
-        distance2.masked_fill_(~valid[:, None], torch.inf)
         distance2, indices = distance2.topk(min(k, points.shape[1]), largest=False)
         batch_indices = torch.arange(points.shape[0], device=points.device)[:, None, None]
         relative = points[batch_indices, indices] - anchors[:, :, None]
 
         nearest_distance = distance2[..., 0].sqrt()
-        has_reference = torch.isfinite(nearest_distance)
+        has_reference = torch.ones_like(nearest_distance, dtype=torch.bool)
         local_valid = distance2 <= radius**2
         near_supported = local_valid[..., 0]
-        nearest_relative = torch.where(has_reference[..., None], relative[..., 0, :], 0.0)
-        safe_distance = torch.where(has_reference, nearest_distance, 0.0)
+        nearest_relative = relative[..., 0, :]
+        safe_distance = nearest_distance
         denominator = metric_scale + safe_distance[..., None]
-        proximity = torch.exp(-0.5 * (safe_distance / radius).square()) * has_reference
+        proximity = torch.exp(-0.5 * (safe_distance / radius).square())
         descriptor = torch.cat(
             (
                 nearest_relative / denominator,
@@ -61,9 +51,6 @@ def query_local_surface(
             "relative": torch.where(local_valid[..., None], relative, 0.0),
             "valid": local_valid,
             "descriptor": descriptor,
-            "nearest_distance": nearest_distance,
-            "has_reference": has_reference,
-            "near_supported": near_supported,
         }
 
 
@@ -88,13 +75,10 @@ class SpatialCrossAttention(nn.Module):
         memory: Tensor,
         query_xyz: Tensor,
         memory_xyz: Tensor,
-        valid: Tensor,
-        *,
-        return_attention: bool = False,
-    ) -> tuple[Tensor, Tensor | None]:
+    ) -> Tensor:
         batch, queries, channels = query.shape
         patches = memory.shape[1]
-        memory = torch.where(valid[..., None], memory, 0.0).to(self.kv.weight.dtype)
+        memory = memory.to(self.kv.weight.dtype)
         q = self.q(self.query_norm(query.to(self.q.weight.dtype)))
         q = q.reshape(batch, queries, self.heads, self.head_dim).transpose(1, 2)
         kv = self.kv(self.memory_norm(memory))
@@ -108,28 +92,18 @@ class SpatialCrossAttention(nn.Module):
         cos, sin = self.rope(torch.cat((query_xyz, memory_xyz), 1))
         q = self.rope.apply_rotary(q, cos[:, :, :queries], sin[:, :, :queries])
         k = self.rope.apply_rotary(k, cos[:, :, queries:], sin[:, :, queries:])
-        k, v = F.pad(k, (0, 0, 0, 1)), F.pad(v, (0, 0, 0, 1))
-        available = valid.any(-1, keepdim=True)
-        # Only empty scenes can read the zero K/V slot.
-        allowed = torch.cat((valid, ~available), -1)
         with torch.autocast(device_type=q.device.type, enabled=False):
             distance2 = (memory_xyz[:, None].float() - query_xyz[:, :, None].float()).square().sum(-1)
             distance_bias = -torch.log1p(distance2 / self.metric_scale**2)
-            # Wrist and the final head read globally; the zero K/V slot has no distance bias.
-            attention_bias = distance_bias.new_zeros(batch, self.heads, queries, patches + 1)
+            # Wrist and the final head read globally.
+            attention_bias = distance_bias.new_zeros(batch, self.heads, queries, patches)
             attention_bias[:, :-1, 1:, :patches] = distance_bias[:, None, 1:]
-        attention_bias = attention_bias.masked_fill(~allowed[:, None, None], -torch.inf).to(q)
+        attention_bias = attention_bias.to(q)
         message = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
         message = message.transpose(1, 2).reshape(batch, queries, channels)
         output = self.out(message.to(self.out.weight.dtype))
 
-        attention = None
-        if return_attention:
-            with torch.no_grad(), torch.autocast(device_type=q.device.type, enabled=False):
-                logits = (q.float() @ k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
-                attention = (logits + attention_bias.float()).softmax(-1)
-                attention = attention.transpose(1, 2)
-        return output, attention
+        return output
 
 
 class HandSceneEncoder(nn.Module):
@@ -168,12 +142,10 @@ class HandSceneEncoder(nn.Module):
         hand_tokens: Tensor,
         *,
         rotation_world_from_eef: Tensor,
-        point_mask: Tensor | None = None,
         query_context: Tensor | None = None,
-        return_intermediate: bool = False,
     ) -> dict[str, Tensor]:
         """XYZ use world meters; rotation maps EEF axes to world; return scene increments."""
-        memory, centers, token_valid = patches["tokens"], patches["xyz"], patches["mask"]
+        memory, centers = patches["tokens"], patches["xyz"]
         batch, channels = memory.shape[0], self.token_channels
         if anchor_xyz.shape != (batch, 6, 3) or hand_tokens.shape != (batch, 6, channels):
             raise ValueError("anchor_xyz/hand_tokens must be [N,6,3] / [N,6,D]")
@@ -183,12 +155,11 @@ class HandSceneEncoder(nn.Module):
         with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
             anchors = anchor_xyz.float()
             rotation = rotation_world_from_eef.float()
-            valid = token_valid & torch.isfinite(centers).all(-1) & torch.isfinite(memory).all(-1)
             query_xyz = (anchors - anchors[:, :1]) @ rotation
-            memory_xyz = torch.where(valid[..., None], centers.float() - anchors[:, :1], 0.0) @ rotation
+            memory_xyz = (centers.float() - anchors[:, :1]) @ rotation
             support = query_local_surface(
                 pointcloud[..., :3], anchors, self.surface_k,
-                self.surface_radius, self.metric_scale, point_mask,
+                self.surface_radius, self.metric_scale,
             )
             surface_relative = support["relative"] @ rotation[:, None]
             geometry = torch.cat(
@@ -212,38 +183,14 @@ class HandSceneEncoder(nn.Module):
                 query_context = query_context[:, None]
             query = query + query_context.float()
 
-        context, attention = self.context(
-            query, memory, query_xyz, memory_xyz, valid, return_attention=return_intermediate,
-        )
+        context = self.context(query, memory, query_xyz, memory_xyz)
         update = geometry_update + context.float()
-        output = {
+        return {
             "hand_query": hand_tokens,
             "relation_update": update,
-            "wrist_relation": update[:, :1],
-            "finger_relation": update[:, 1:],
-            "interaction_center": anchors,
             "geometry_descriptor": geometry,
-            "min_observed_distance": support["nearest_distance"],
-            "has_reference": support["has_reference"],
-            "near_has_support": support["near_supported"],
         }
-        if return_intermediate:
-            output.update(
-                geometry_update=geometry_update,
-                context_update=context,
-                context_attention=attention,
-                context_null_mass=attention[..., -1],
-                surface_features=local,
-                finger_local=local[:, 1:],
-                surface_relative=surface_relative,
-                surface_valid=support["valid"],
-            )
-        return output
 
     @property
     def out_dim(self) -> int:
         return self.token_channels
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return 6, self.token_channels

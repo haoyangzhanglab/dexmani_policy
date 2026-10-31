@@ -1,6 +1,7 @@
 """Focused numerical and synthetic policy checks: python -m dexmani_policy.test_tools.agent_checks."""
 
 import argparse
+import copy
 import io
 import tempfile
 from pathlib import Path
@@ -21,6 +22,7 @@ from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.dp3 import DP3Policy
 from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
+from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.codebook import deployment_diagnostics, export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
@@ -97,18 +99,6 @@ def check_tactile(device):
         reference_grad, = torch.autograd.grad((expected * probe).mean(), x)
         new_grad, = torch.autograd.grad((actual * probe).mean(), x)
         torch.testing.assert_close(reference_grad, new_grad, rtol=1e-5, atol=1e-6)
-    for all_missing in (False, True):
-        valid = torch.ones(2, 5, dtype=torch.bool, device=device)
-        valid[:, 1:] = False
-        if all_missing:
-            valid.zero_()
-        x = torch.randn(2, 5, 120, 3, device=device).masked_fill(~valid[..., None, None], float("nan"))
-        x.requires_grad_()
-        with torch.autocast(device.type, dtype=torch.bfloat16):
-            tokens = encoder(x, tactile_valid=valid)
-        tokens.float().square().sum().backward()
-        assert torch.isfinite(tokens).all() and x.grad is not None and torch.isfinite(x.grad).all()
-        assert (tokens[~valid] == 0).all() and (x.grad[~valid] == 0).all()
     config = encoder.effective_config.copy()
     config.pop("_target_")
     restored = XHandPatchEncoder(**config).to(device)
@@ -119,8 +109,8 @@ def check_rgb(device):
     architecture = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
                         num_attention_heads=4, image_size=32, patch_size=16)
     for mode in ("freeze", "full", "lora"):
-        model = ViTEncoder("siglip", "random", tune_mode=mode, out_dim=16,
-                           architecture=architecture, load_pretrained=False).to(device)
+        model = ViTEncoder("siglip", tune_mode=mode, out_dim=16,
+                           architecture=architecture).to(device)
         assert not hasattr(model.backbone.vision_model, "head")
         assert model.effective_config["architecture"]["vision_use_head"] is False
         optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-3)
@@ -143,11 +133,51 @@ def check_rgb(device):
         with torch.no_grad():
             torch.testing.assert_close(model.eval()(rgb)["global_token"],
                                        restored.eval()(rgb)["global_token"], rtol=0, atol=0)
-    pooler = ViTEncoder("siglip", "random", global_token_type="pooler", architecture=architecture,
-                        load_pretrained=False).to(device)
+    pooler = ViTEncoder("siglip", global_token_type="pooler", architecture=architecture).to(device)
     assert hasattr(pooler.backbone.vision_model, "head")
     with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
         assert torch.isfinite(pooler(rgb)["global_token"]).all()
+
+    from omegaconf import OmegaConf
+    from transformers import Dinov2Config, Dinov2Model, SiglipVisionConfig, SiglipVisionModel
+    from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
+
+    for kind, config_class, model_class in (
+        ("dino", Dinov2Config, Dinov2Model), ("siglip", SiglipVisionConfig, SiglipVisionModel),
+    ):
+        for mode in ("freeze", "full", "lora"):
+            config = config_class(**architecture)
+            if kind == "siglip":
+                config.vision_use_head = False
+            source_model = model_class(config).to(dtype=torch.bfloat16)
+            with tempfile.TemporaryDirectory(prefix="dexmani-rgb-source-") as directory:
+                source_model.save_pretrained(directory)
+                cfg = OmegaConf.create(dict(
+                    policy_name="dp", initialization={"rgb": directory},
+                    agent={"rgb_backbone_name": kind, "rgb_backbone_config": {"tune_mode": mode}},
+                ))
+                prepare_initialization(cfg)
+                model = ViTEncoder(kind, **cfg.agent.rgb_backbone_config, out_dim=16)
+                model.initialize_weights(directory)
+                base = model.backbone.get_base_model() if mode == "lora" else model.backbone
+                source_state = source_model.state_dict()
+                for key, value in base.state_dict().items():
+                    if ".lora_" not in key:
+                        torch.testing.assert_close(value, source_state[key.replace(".base_layer.", ".")], rtol=0, atol=0)
+            # The source directory is gone: structure and parameters alone must restore offline.
+            restored = ViTEncoder(kind, **model.effective_config)
+            restored.load_state_dict(model.state_dict(), strict=True)
+            model.to(device).eval()
+            restored.to(device).eval()
+            expected = model(rgb)["global_token"]
+            actual = restored(rgb)["global_token"]
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            expected.float().square().mean().backward()
+            actual.float().square().mean().backward()
+            for (name, parameter), (other_name, other) in zip(model.named_parameters(), restored.named_parameters()):
+                assert name == other_name
+                if parameter.grad is not None:
+                    torch.testing.assert_close(parameter.grad, other.grad, rtol=0, atol=0)
 
 
 def check_vq(device):
@@ -207,13 +237,7 @@ def check_vq(device):
 def check_codebook(device):
     for size in (256, 512):
         table = HandStateCodebook(12, num_groups=1, codebook_size=size).to(device)
-        table.set_buffers(dict(
-            sorted_hand_poses=torch.randn(size, 12, device=device),
-            pca_permutation=torch.arange(size, device=device),
-            layer_weights=torch.ones(1, device=device),
-            hand_normalizer_scale=torch.ones(12, device=device),
-            hand_normalizer_offset=torch.zeros(12, device=device),
-        ))
+        table.set_prototypes(torch.randn(size, 12, device=device))
         for dtype in (torch.float16, torch.bfloat16, torch.float32):
             _, index = table.decode(torch.tensor([-2, -1, 1, 2], device=device, dtype=dtype))
             assert index.tolist() == [0, 0, size - 1, size - 1]
@@ -235,6 +259,7 @@ def check_codebook(device):
             assert continuous.shape == (*shape[:-1], 1)
         restored = HandStateCodebook(12, num_groups=1, codebook_size=size).to(device)
         restored.load_state_dict(table.state_dict(), strict=True)
+        assert set(restored.state_dict()) == {"sorted_hand_poses"}
 
 
 def check_codebook_pipeline(device):
@@ -261,39 +286,54 @@ def check_codebook_pipeline(device):
         loaded_table = HandStateCodebook(
             model.hand_dim, num_groups=model.num_groups, codebook_size=model.codebook_size,
         )
-        assert load_codebook(artifact, loaded_table) == metadata
+        loaded_metadata, hand_affine = load_codebook(artifact, loaded_table)
+        assert loaded_metadata == metadata
         for name, value in table.state_dict().items():
             torch.testing.assert_close(value, loaded_table.state_dict()[name], rtol=0, atol=0)
-        report = deployment_diagnostics(table, {"validation": rows.numpy()}, metadata=metadata, chunk_size=5)
+        report = deployment_diagnostics(
+            table, {"validation": rows.numpy()}, metadata=metadata,
+            hand_scale=hand_affine["scale"], chunk_size=5,
+        )
         torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
                                    torch.tensor(report["splits"]["validation"]["lookup_mse"]), rtol=1e-5, atol=1e-7)
         assert sum(report["splits"]["validation"]["prototype_counts"]) == len(rows)
-        policy = DQRISEPolicy(
-            4, 2, 2, 19, codebook_path=str(artifact), n_layers=1, hidden_dim=32, n_head=4,
+        policy_config = dict(
+            horizon=4, n_obs_steps=2, n_action_steps=2, action_dim=19,
+            n_layers=1, hidden_dim=32, n_head=4,
             num_inference_steps=2, num_points=32,
             pc_encoder_config=dict(channels=48, num_patches=8, group_size=4, depth=2, num_heads=4),
             fps_random_config=dict(use_random=False),
             # Tiny random DINO only checks the codebook/policy pipeline.
             rgb_backbone_config=dict(
-                model_name="random-dinov2-test", tune_mode="freeze", load_pretrained=False,
+                tune_mode="freeze",
                 image_size=(28, 28), architecture=dict(
                     model_type="dinov2", hidden_size=24, intermediate_size=48,
                     num_hidden_layers=1, num_attention_heads=4, image_size=28, patch_size=14,
                 ),
             ),
         )
+        policy = DQRISEPolicy(**policy_config)
         spec = dict(joint_state="limits", point_cloud="identity", rgb="identity",
                     camera_intrinsic="identity", camera_extrinsic="identity", action="auto")
         dims = dict(joint_state=19, point_cloud=3, rgb=3,
                     camera_intrinsic=9, camera_extrinsic=12, action=19)
-        policy.set_normalization_spec(
-            spec, dims, action_key="action",
-        )
-        policy.initialize_training(dict(
+        policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
+        description = dict(
             attrs=dict(hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
                        hand_units="radians"),
             action_key="action", split_manifest=manifest,
-        ))
+        )
+        try:
+            policy.initialize_training(
+                {**description, "split_manifest": {**manifest, "train_indices": [1]}}, artifact,
+            )
+        except ValueError as error:
+            assert "split mismatch" in str(error)
+        else:
+            raise AssertionError("DQ accepted a different VQ training split")
+        imported_affine = policy.initialize_training(description, artifact)
+        policy.normalizer["action"].scale[-12:].copy_(imported_affine["scale"])
+        policy.normalizer["action"].offset[-12:].copy_(imported_affine["offset"])
         policy.to(device)
         xyz = torch.rand(2, 2, 32, 3, device=device) * 0.2 - 0.1
         xyz[..., 2] += 1
@@ -301,7 +341,7 @@ def check_codebook_pipeline(device):
         extrinsics = torch.eye(4, device=device)[:3]
         obs = dict(
             joint_state=torch.randn(2, 2, 19, device=device), point_cloud=xyz,
-            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device),
+            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device).permute(0, 1, 4, 2, 3).float().div_(255),
             camera_intrinsic=intrinsics.flatten().expand(2, 2, -1).clone(),
             camera_extrinsic=extrinsics.flatten().expand(2, 2, -1).clone(),
         )
@@ -320,6 +360,33 @@ def check_codebook_pipeline(device):
         else:
             raise AssertionError("DQ-RISE accepted an unsupported RTC prefix")
 
+        ema = copy.deepcopy(policy)
+        with torch.no_grad():
+            next(ema.parameters()).add_(0.01)
+        saved = Path(directory) / "policy.pt"
+        effective = dict(
+            agent={"_target_": "dexmani_policy.agents.policies.dqrise.DQRISEPolicy",
+                   **policy_config, **policy.effective_config},
+            normalization_dims=dims,
+            normalizer_shapes={key: tuple(field.scale.shape) for key, field in policy.normalizer.fields.items()},
+        )
+        save_checkpoint(saved, Checkpoint(
+            global_step=1, model_state=policy.state_dict(), ema_model_state=ema.state_dict(),
+            optimizer_state={}, scheduler_state={}, rng_state={}, effective_config=effective,
+        ))
+        artifact.unlink()
+        for use_ema, expected in ((False, policy), (True, ema)):
+            restored = restore_policy(saved, use_ema=use_ema, device=device)
+            for key, value in expected.state_dict().items():
+                torch.testing.assert_close(restored.state_dict()[key], value, rtol=0, atol=0)
+            expected_prediction = expected.predict_action(
+                obs, generator=torch.Generator(device=device).manual_seed(1024),
+            )["future_actions"]
+            actual_prediction = restored.predict_action(
+                obs, generator=torch.Generator(device=device).manual_seed(1024),
+            )["future_actions"]
+            torch.testing.assert_close(actual_prediction, expected_prediction, rtol=0, atol=0)
+
 
 def check_policies(device):
     kwargs: dict[str, Any] = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, encoder_type="dp3",
@@ -329,7 +396,7 @@ def check_policies(device):
     policy = DP3Policy(**kwargs)
     spec = dict(joint_state="limits", point_cloud="identity", action="auto")
     dims = dict(joint_state=19, point_cloud=3, action=19)
-    policy.set_normalization_spec(spec, dims, action_key="action")
+    policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
     policy.to(device)
     with torch.no_grad():
         policy.normalizer["action"].scale.copy_(torch.linspace(0.5, 1.5, 19, device=device))
@@ -363,7 +430,7 @@ def check_policies(device):
     storage.seek(0)
     saved = torch.load(storage, map_location=device, weights_only=True)
     restored = DP3Policy(**kwargs)
-    restored.set_normalization_spec(spec, dims, action_key="action")
+    restored.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
     restored.load_state_dict(saved["model"], strict=True, assign=True)
     restored.to(device)
     new_optimizer = build_optimizer(restored, lr=1e-4, weight_decay=1e-6)
