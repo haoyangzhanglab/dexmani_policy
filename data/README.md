@@ -31,4 +31,4 @@ data/
 
 格式: `robot_data/<task_name>.zarr`
 
-新版本数据先运行 `python -m dexmani_policy.datasets.tools.check_data --zarr-path <path>`，通过后不就地修改。远程同步显式指定路径，例如 `bash scripts/remote/sync_data.sh --host <host> --local robot_data --remote /data/project/robot_data`；脚本保留目标独有文件。启动时的 `--data-root /data/project` 为源码副本提供 `robot_data/`、`data/` 和 `pretrained_models/` 链接，实验目录另外由 `--run` 指定，详见 [SSH 文档](../docs/SSH服务器训练部署.md)。
+训练使用的数据版本不就地修改。远程同步显式指定路径，例如 `bash scripts/remote/sync_data.sh --host <host> --local robot_data --remote /data/project/robot_data`；脚本保留目标独有文件。启动时的 `--data-root /data/project` 为源码副本提供 `robot_data/`、`data/` 和 `pretrained_models/` 链接，实验目录另外由 `--run` 指定，详见 [SSH 文档](../docs/SSH服务器训练部署.md)。

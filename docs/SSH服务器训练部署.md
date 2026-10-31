@@ -20,7 +20,7 @@ bash scripts/remote/sync_data.sh --host "$HOST" \
   --local data --remote "$DATA_ROOT/data" --checksum
 ```
 
-每次同步一个明确目录，默认上传；`--pull` 反转方向，`--checksum` 改用内容比较，`--dry-run` 预览。同步不删除目标独有文件。数据版本完成 `check_data` 后不就地修改；重新导出或修改加工配方时使用新路径。
+每次同步一个明确目录，默认上传；`--pull` 反转方向，`--checksum` 改用内容比较，`--dry-run` 预览。同步不删除目标独有文件。训练使用的数据版本不就地修改；重新导出或修改加工配方时使用新路径。
 
 Uni3D 初始权重随 `data/pretrained/uni3d/` 上传；HF 初始模型缓存须在远端单独准备，来源设置见 [数据说明](../data/README.md)。从完整 checkpoint 续训或推理不需要初始来源文件。
 

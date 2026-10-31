@@ -16,16 +16,15 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 
 `pyproject.toml` 声明直接依赖和必要 API 范围；`requirements.txt` 固定已验证环境版本。更新依赖时只在环境文件维护精确版本，不顺带升级。文本组件所需 transformers/tokenizers 等依赖继续保留。
 
-数据准备与完整检查使用独立工具，普通 Dataset 构造只做必要结构检查，不再完整扫描浮点字段：
+数据划分与接触标签生成使用独立工具：
 
 ```bash
-python -m dexmani_policy.datasets.tools.check_data --zarr-path INPUT
 python -m dexmani_policy.datasets.split --zarr-path INPUT --output split.json \
   --seed 42 --val-ratio 0.1 --max-train-episodes 100
 python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output OUTPUT
 ```
 
-接触标签生成需要 Open3D；另外两个工具及常规数据读取不加载它。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
+接触标签生成需要 Open3D；数据划分及常规数据读取不加载它。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
 
 ## 快速开始
 
@@ -139,7 +138,7 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
 python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>/<run>
 ```
 
-`test_tools/smoke_test.py` 每次接收一个配置，调用正式 `prepare_training/run_training` 短训、保存，再用 `prepare_resume` 在原目录恢复。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，数据准备使用独立 `check_data`，不在 smoke 中建立第二套配置或扫描流程。
+`test_tools/smoke_test.py` 每次接收一个配置，调用正式 `prepare_training/run_training` 短训、保存，再用 `prepare_resume` 在原目录恢复。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，不在 smoke 中建立第二套配置或扫描流程。
 
 `python -m dexmani_policy.test_tools.agent_checks --device cuda` 提供无需数据集或预训练权重的 agents 数值回归与合成短训；也支持 `--device cpu`，点云检查使用实际 PyTorch3D 后端。覆盖及组件计时边界见[项目架构](docs/项目架构.md#agents-优化依据与验证)。
 
