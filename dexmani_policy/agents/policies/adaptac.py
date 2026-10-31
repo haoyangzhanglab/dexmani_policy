@@ -11,13 +11,10 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     validate_unet_horizon,
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.obs_encoder.interaction.future_tactile.force_guided_attention_fusion import (
+from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
+    DiffusionForceHead,
     ForceGuidedAttentionFusion,
-)
-from dexmani_policy.agents.obs_encoder.interaction.future_tactile.force_prediction_transformer import (
     ForcePredictionTransformer,
-)
-from dexmani_policy.agents.obs_encoder.interaction.future_tactile.visuo_tactile_interaction import (
     VisuoTactileInteraction,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
@@ -82,41 +79,6 @@ class AdapTacObservationEncoder(nn.Module):
         tactile = self.tactile_projection(tactile.flatten(1))
         state = self.state_mlp(obs["joint_state"])
         return visual, tactile, state
-
-
-class DiffusionForceHead(Diffusion):
-    def __init__(
-        self,
-        model: nn.Module,
-        num_training_steps: int = 100,
-        num_inference_steps: int = 20,
-    ) -> None:
-        super().__init__(
-            model,
-            num_training_steps,
-            num_inference_steps,
-            prediction_type="sample",
-            clip_sample=False,
-        )
-
-    def compute_loss_and_prediction(
-        self, condition: torch.Tensor, force: torch.Tensor, valid: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        force = force.float()
-        noise = torch.randn_like(force)
-        timestep = torch.randint(
-            self.noise_scheduler.config.num_train_timesteps,
-            (force.shape[0],),
-            device=force.device,
-        )
-        prediction = self.model(
-            x=self.noise_scheduler.add_noise(force, noise, timestep),
-            timestep=timestep,
-            context=condition,
-        )
-        prediction = prediction.float()
-        loss = ((prediction - force).square() * valid[..., None]).sum() / (force.shape[-1] * valid.float().sum())
-        return loss, prediction
 
 
 class AdapTacPolicy(BasePolicy):
@@ -220,10 +182,6 @@ class AdapTacPolicy(BasePolicy):
     def current_force(self, preprocessed: dict) -> torch.Tensor:
         return preprocessed["finger_tactile_force"].float().reshape(-1, self.n_obs_steps, self.force_dim)
 
-    def normalize_force(self, force):
-        field = self.normalizer.fields
-        return field["finger_tactile_force"].normalize(force) if "finger_tactile_force" in field else force.float()
-
     def action_condition(self, features, current_force, predicted_force) -> torch.Tensor:
         visual, tactile, state = features
         guide = torch.cat((current_force, predicted_force), dim=1).flatten(1)
@@ -238,7 +196,7 @@ class AdapTacPolicy(BasePolicy):
         features = self.obs_encoder(obs)
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
             torch.cat(features[:2], dim=-1).unsqueeze(1),
-            self.normalize_force(batch["future_force"]).flatten(-2),
+            self.normalizer["finger_tactile_force"].normalize(batch["future_force"]).flatten(-2),
             batch["future_force_valid"],
         )
         # The action objective also trains the force predictor through this prediction.

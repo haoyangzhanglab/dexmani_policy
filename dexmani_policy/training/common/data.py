@@ -10,7 +10,6 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes, validate_normalizer_state
 from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
-from dexmani_policy.datasets.split import read_split_manifest
 
 
 def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
@@ -48,9 +47,7 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
 def build_dataset(cfg):
     """Admit one train/val source before choosing the model's affine initialization."""
     spec = cfg.normalization
-    dataset = hydra.utils.instantiate(
-        cfg.dataset, _convert_="all", split_manifest=read_split_manifest(cfg.dataset.split_manifest),
-    )
+    dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
     # DemonstrationDataset 已核对 split 与数据身份一致；resume 额外拒绝双方都没有 ID。
     if (

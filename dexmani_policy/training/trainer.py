@@ -2,6 +2,7 @@ import copy
 import os
 import signal
 import time
+from pathlib import Path
 from typing import Any, cast
 
 import hydra
@@ -56,7 +57,20 @@ class PolicyTrainer:
             if method == "dqrise":
                 hand_affine = model.initialize_training(data_description, sources.get("codebook"))
             elif method in {"afro", "cordvip"}:
-                pretrained_state = model.initialize_training(data_description, sources.get("encoder"))
+                source = sources.get("encoder")
+                if source is None:
+                    if method == "afro" and model.freeze_visual:
+                        raise ValueError("AFRO frozen visual requires initialization.encoder; scratch requires freeze_visual=false")
+                    if method == "afro":
+                        print("[AFRO] Scratch training with trainable visual encoder")
+                    else:
+                        print("[CordViP] Scratch training; all observation encoder parameters are trainable")
+                else:
+                    payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
+                    encoder = model.obs_encoder.visual if method == "afro" else model.obs_encoder.encoder
+                    encoder.load_state_dict(payload["encoder_state"], strict=True)
+                    pretrained_state = payload["normalizer_state"]
+                    del payload
             normalizer = fit_normalizer(dataset, cfg.normalization, initial_state=pretrained_state,
                                         feature_dims=data_description["normalization_dims"])
             if hand_affine is not None:
@@ -181,7 +195,7 @@ class PolicyTrainer:
             ).detach()
         else:
             finite = [
-                torch.isfinite(p.grad).all() for p in self.model.parameters() if p.grad is not None
+                torch.isfinite(p.grad).all() for p in self.trainable_parameters if p.grad is not None
             ]
             if finite and not torch.stack(finite).all():
                 raise RuntimeError(f"Non-finite gradient at step {self.global_step}")

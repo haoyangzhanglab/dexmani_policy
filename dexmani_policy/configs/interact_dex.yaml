@@ -18,7 +18,6 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.variants.tactile.InterActDexDataset
   sensor_modalities: [joint_state, point_cloud, eef_pose, fingertip_xyz, finger_tactile_force]
 
   augmentation_cfg:

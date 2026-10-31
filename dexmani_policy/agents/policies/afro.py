@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import torch
 from torch import nn
 
@@ -49,16 +47,6 @@ class AFROPolicy(BasePolicy):
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
         self.freeze_visual = freeze_visual
-
-    def initialize_training(self, data_description, pretrained_path) -> dict[str, torch.Tensor] | None:
-        if pretrained_path is None:
-            if self.freeze_visual:
-                raise ValueError("AFRO frozen visual requires initialization.encoder; scratch requires freeze_visual=false")
-            print("[AFRO] Scratch training with trainable visual encoder")
-            return None
-        payload = torch.load(Path(pretrained_path).expanduser(), map_location="cpu", weights_only=True)
-        self.obs_encoder.visual.load_state_dict(payload["encoder_state"], strict=True)
-        return payload["normalizer_state"]
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
         return [

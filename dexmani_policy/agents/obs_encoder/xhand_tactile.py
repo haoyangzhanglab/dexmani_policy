@@ -13,8 +13,9 @@ class XHandForceEncoder(nn.Module):
     """Normalized [BT,5,3] -> [BT,5,64] with one shared 3-layer MLP."""
 
     num_tokens = 5
-    frame_dim = 64
+    out_dim = 64
     input_key = "finger_tactile_force"
+    consumed_observation_fields = (input_key,)
 
     def __init__(self) -> None:
         super().__init__()
@@ -23,7 +24,7 @@ class XHandForceEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(64, self.out_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -33,28 +34,21 @@ class XHandForceEncoder(nn.Module):
     def effective_config(self):
         return {"_target_": f"{type(self).__module__}.{type(self).__name__}"}
 
-    @property
-    def out_dim(self) -> int:
-        return self.frame_dim
-
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return (self.input_key,)
-
 
 class XHandTaxelEncoder(nn.Module):
     """Normalized [BT,5,120,3] -> [BT,5,64] with KineDex 1D CNN."""
 
     num_tokens = 5
-    frame_dim = 64
+    out_dim = 64
     input_key = "taxel_tactile_force"
+    consumed_observation_fields = (input_key,)
 
     def __init__(self) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv1d(3, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.Conv1d(32, self.out_dim, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.AdaptiveAvgPool1d(1),
         )
@@ -62,19 +56,11 @@ class XHandTaxelEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.to(dtype=self.net[0].weight.dtype)
         fingers = x.flatten(0, 1).transpose(1, 2)
-        return self.net(fingers).squeeze(-1).reshape(x.shape[0], self.num_tokens, self.frame_dim)
+        return self.net(fingers).squeeze(-1).reshape(x.shape[0], self.num_tokens, self.out_dim)
 
     @property
     def effective_config(self):
         return {"_target_": f"{type(self).__module__}.{type(self).__name__}"}
-
-    @property
-    def out_dim(self) -> int:
-        return self.frame_dim
-
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return (self.input_key,)
 
 
 # Reconstructed right-hand regions; these are not a verified SDK map.
@@ -118,8 +104,9 @@ class XHandPatchEncoder(nn.Module):
 
     num_tokens = 5
     num_regions = 5
-    frame_dim = 64
+    out_dim = 64
     input_key = "taxel_tactile_force"
+    consumed_observation_fields = (input_key,)
 
     def __init__(self, region_ids: torch.Tensor | None = None, activity_scale: float = 1.0) -> None:
         super().__init__()
@@ -148,13 +135,13 @@ class XHandPatchEncoder(nn.Module):
         # Rebuilt from effective_config.region_ids; no duplicate checkpoint state.
         self.register_buffer("region_ids", labels, persistent=False)
         self.register_buffer("region_sizes", region_sizes, persistent=False)
-        self.patch_mlp = nn.Sequential(nn.Linear(8, 256), nn.SiLU(), nn.Linear(256, self.frame_dim))
-        self.finger_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
-        self.region_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
+        self.patch_mlp = nn.Sequential(nn.Linear(8, 256), nn.SiLU(), nn.Linear(256, self.out_dim))
+        self.finger_embedding = nn.Parameter(torch.empty(5, self.out_dim))
+        self.region_embedding = nn.Parameter(torch.empty(5, self.out_dim))
         nn.init.normal_(self.finger_embedding, std=0.02)
         nn.init.normal_(self.region_embedding, std=0.02)
-        self.attention_score = nn.Linear(self.frame_dim, 1)
-        self.token_norm = nn.LayerNorm(self.frame_dim)
+        self.attention_score = nn.Linear(self.out_dim, 1)
+        self.token_norm = nn.LayerNorm(self.out_dim)
 
     @property
     def effective_config(self):
@@ -203,11 +190,3 @@ class XHandPatchEncoder(nn.Module):
         attention_weights = torch.softmax(logits, dim=-1)
         tokens = self.token_norm((attention_weights[..., None] * patch_features.float()).sum(dim=2))
         return tokens
-
-    @property
-    def out_dim(self) -> int:
-        return self.frame_dim
-
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return (self.input_key,)

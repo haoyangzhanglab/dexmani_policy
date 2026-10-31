@@ -1,11 +1,9 @@
-from pathlib import Path
-
 import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D, validate_unet_horizon
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordination_encoder import (
+from dexmani_policy.agents.obs_encoder.interaction.correspondence import (
     ContactCoordinationEncoder,
 )
 from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
@@ -50,14 +48,6 @@ class CordViPPolicy(BasePolicy):
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-
-    def initialize_training(self, data_description, pretrained_path) -> dict[str, torch.Tensor] | None:
-        if pretrained_path is None:
-            print("[CordViP] Scratch training; all observation encoder parameters are trainable")
-            return None
-        payload = torch.load(Path(pretrained_path).expanduser(), map_location="cpu", weights_only=True)
-        self.obs_encoder.encoder.load_state_dict(payload["encoder_state"], strict=True)
-        return payload["normalizer_state"]
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
         return [

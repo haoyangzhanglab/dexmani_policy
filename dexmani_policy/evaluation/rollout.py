@@ -13,7 +13,9 @@ from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.io_util import write_failure, write_json
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.evaluation.metrics import summarize_episodes
-from dexmani_policy.evaluation.seeds import validate_seed_pool, validate_evaluation_seed
+from dexmani_policy.evaluation.seeds import (
+    load_seed_pool, split_evaluation_seeds, validate_seed_pool, validate_evaluation_seed,
+)
 
 
 def create_run_directory(root, directory=None):
@@ -28,17 +30,9 @@ def create_run_directory(root, directory=None):
     return directory
 
 
-def load_seed_pool(cfg):
-    task = cfg["env_runner"]
-    if task.get("eval_seeds") is not None:
-        return validate_seed_pool(task["eval_seeds"])
-    from dexmani_sim import DATA_DIR
-    return [int(value) for value in (DATA_DIR / "eval_seeds" / f"{task['task_name']}.txt").read_text().split()]
-
-
 def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_steps=None,
-                    seeds, seed=1024, device="cuda:0", video=True, output_dir=None):
-    """Run one checkpoint with explicit evaluation settings and one result directory."""
+                    seeds=None, episodes=100, seed=1024, device="cuda:0", video=True, output_dir=None):
+    """Run one checkpoint with explicit or deterministically sampled evaluation seeds."""
     checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
     cfg = load_checkpoint(checkpoint).effective_config
     weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
@@ -51,10 +45,13 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     future_steps = cfg["agent"]["horizon"] - cfg["policy_metadata"]["action_start_index"]
     if action_steps > future_steps:
         raise ValueError(f"action_steps must not exceed future_steps ({future_steps})")
-    seeds = validate_seed_pool(list(seeds))
-    if not seeds:
-        raise ValueError("Evaluation seeds must be nonempty")
-    validate_evaluation_seed(seed)
+    if seeds is None:
+        seeds, _ = split_evaluation_seeds(load_seed_pool(cfg), seed, episodes)
+    else:
+        seeds = validate_seed_pool(list(seeds))
+        if not seeds:
+            raise ValueError("Evaluation seeds must be nonempty")
+        validate_evaluation_seed(seed)
     if require_tactile_source(cfg["dataset"]["sensor_modalities"], cfg.get("tactile_source")) == "real":
         raise ValueError("Simulation evaluation requires sim-source tactile observations")
     options = dict(cfg["env_runner"])

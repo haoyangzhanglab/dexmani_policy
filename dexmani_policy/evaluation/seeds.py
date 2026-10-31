@@ -3,6 +3,15 @@ import random
 from dexmani_policy.common.config import positive_int
 
 
+def load_seed_pool(cfg):
+    task = cfg["env_runner"]
+    if task.get("eval_seeds") is not None:
+        return task["eval_seeds"]
+    from dexmani_sim import DATA_DIR
+
+    return [int(value) for value in (DATA_DIR / "eval_seeds" / f"{task['task_name']}.txt").read_text().split()]
+
+
 def validate_evaluation_seed(seed):
     if type(seed) is not int or not 0 <= seed < 2**32:
         raise ValueError("Evaluation seed must be an integer in [0, 2**32)")

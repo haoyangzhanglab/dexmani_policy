@@ -2,20 +2,13 @@ import argparse
 import json
 from collections import Counter
 from pathlib import Path
+from typing import cast
 
 import numpy as np
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import write_json
-
-
-def read_split_manifest(value):
-    if isinstance(value, (str, Path)):
-        return json.loads(Path(value).expanduser().read_text())
-    if OmegaConf.is_config(value):
-        return OmegaConf.to_container(value, resolve=True)
-    return value
 
 
 def validate_episode_metadata(metadata, count):
@@ -85,7 +78,11 @@ def get_val_mask(n_episodes, val_ratio, seed):
     return mask
 
 
-def split_episodes(buffer, *, manifest: dict | None = None, val_ratio=0.1, seed=42, max_train_episodes=None):
+def split_episodes(buffer, *, manifest: dict | DictConfig | str | Path | None = None, val_ratio=0.1, seed=42, max_train_episodes=None):
+    if isinstance(manifest, (str, Path)):
+        manifest = json.loads(Path(manifest).expanduser().read_text())
+    elif isinstance(manifest, DictConfig):
+        manifest = cast(dict, OmegaConf.to_container(manifest, resolve=True))
     if max_train_episodes is not None:
         positive_int(max_train_episodes, "max_train_episodes")
     ids, trials = validate_episode_metadata(buffer.attrs, buffer.n_episodes)

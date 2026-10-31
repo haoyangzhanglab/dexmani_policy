@@ -46,11 +46,8 @@ def build_patch_correspondence(
         )
         supported_confidence = confidence * bilinear.sum(-1)
         reliability = supported_confidence
-        active_confidence = torch.where(supported_confidence > 0, confidence, 0.0)
-        # A common scale cancels in normalization and prevents tiny corner masses underflowing.
-        scale = active_confidence
-        scaled_confidence = active_confidence / torch.where(scale > 0, scale, 1)
-        mass = scaled_confidence[..., None] * bilinear  # [BT,N,4]
+        active = (supported_confidence > 0).to(bilinear.dtype)
+        mass = active[..., None] * bilinear  # [BT,N,4]
         total_mass = mass.sum(dim=-1, keepdim=True)
         point_weight = mass / torch.where(total_mass > 0, total_mass, 1)
         point_valid = total_mass[..., 0] > 0

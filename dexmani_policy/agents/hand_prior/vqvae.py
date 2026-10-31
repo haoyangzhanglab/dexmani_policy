@@ -159,17 +159,16 @@ class ResidualVectorQuantizer(nn.Module):
     def codebooks(self) -> Tensor:
         return torch.stack([layer.embed for layer in self.layers])
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         residual, output = x, 0.0
-        indices, losses = [], []
+        losses = []
         weights = self.layer_weights.softmax(0)
         for weight, layer in zip(weights, self.layers):
-            quantized, index, loss = layer(residual)
+            quantized, _, loss = layer(residual)
             residual = residual - quantized.detach()
             output = output + weight * quantized
-            indices.append(index)
             losses.append(loss)
-        return cast(Tensor, output), torch.stack(indices, -1), torch.stack(losses)
+        return cast(Tensor, output), torch.stack(losses)
 
 
 class HandVQVAE(nn.Module):
@@ -231,14 +230,14 @@ class HandVQVAE(nn.Module):
             "kmeans_iters": layer.kmeans_iters, "kmeans_init": self.kmeans_init,
         }
 
-    def forward(self, hand: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, hand: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         target = hand / self.act_scale
-        quantized, indices, losses = self.quantizer(self.encoder(target))
+        quantized, losses = self.quantizer(self.encoder(target))
         reconstruction = self.decoder(quantized)
         reconstruction_loss = ((target - reconstruction).abs() * self.loss_weight).mean()
         with torch.no_grad():
             mse = F.mse_loss(target, reconstruction)
-        return reconstruction_loss, losses.sum(), indices, mse
+        return reconstruction_loss, losses.sum(), mse
 
     def decode(self, latent: Tensor) -> Tensor:
         return self.decoder(latent) * self.act_scale

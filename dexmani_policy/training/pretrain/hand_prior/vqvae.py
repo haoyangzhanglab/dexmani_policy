@@ -24,7 +24,7 @@ from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
-from dexmani_policy.datasets.split import read_split_manifest, split_episodes
+from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
@@ -49,7 +49,7 @@ def prepare_hand_data(cfg):
     if buffer["action"].shape[1:] != (19,):
         raise ValueError("VQ pretraining requires action shape [T,19]")
     train, val, split = split_episodes(
-        buffer, manifest=read_split_manifest(cfg.dataset.split_manifest), seed=cfg.dataset.seed,
+        buffer, manifest=cfg.dataset.split_manifest, seed=cfg.dataset.seed,
         val_ratio=cfg.dataset.val_ratio, max_train_episodes=cfg.dataset.max_train_episodes,
     )
     validate_hand_coordinates(buffer.attrs)
@@ -171,7 +171,7 @@ def train(cfg):
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            recon_loss, commitment_loss, _, recon_mse = vqvae(batch)
+            recon_loss, commitment_loss, recon_mse = vqvae(batch)
             total_loss = recipe.enc_loss_weight * recon_loss + recipe.vq_loss_weight * commitment_loss
             if not torch.isfinite(total_loss):
                 raise FloatingPointError("Nonfinite VQ training loss")

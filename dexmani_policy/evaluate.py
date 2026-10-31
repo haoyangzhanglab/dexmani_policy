@@ -2,9 +2,7 @@
 
 import argparse
 
-from dexmani_policy.common.checkpoint import load_checkpoint
-from dexmani_policy.evaluation.rollout import evaluate_policy, load_seed_pool
-from dexmani_policy.evaluation.seeds import split_evaluation_seeds
+from dexmani_policy.evaluation.rollout import evaluate_policy
 
 
 def main(argv=None):
@@ -20,12 +18,7 @@ def main(argv=None):
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir")
     args = parser.parse_args(argv)
-    options = vars(args).copy()
-    episodes = options.pop("episodes")
-    if args.seeds is None:
-        cfg = load_checkpoint(args.checkpoint).effective_config
-        options["seeds"], _ = split_evaluation_seeds(load_seed_pool(cfg), args.seed, episodes)
-    evaluate_policy(**options)
+    evaluate_policy(**vars(args))
 
 
 if __name__ == "__main__":

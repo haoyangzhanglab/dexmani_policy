@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import torch
+from omegaconf import DictConfig
 
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.datasets.episode_store import EpisodeStore
@@ -10,7 +13,7 @@ class AFROPretrainDataset(ObservationPretrainDataset):
     sensor_modalities = ("point_cloud",)
 
     def __init__(self, zarr_path, *, frame_stride, seed=42, val_ratio=0.1, max_train_episodes=None,
-                 split_manifest: dict | None = None, horizon=33, pad_before=0, pad_after=7):
+                 split_manifest: dict | DictConfig | str | Path | None = None, horizon=33, pad_before=0, pad_after=7):
         self.frame_stride = positive_int(frame_stride, "frame_stride")
         if len(range(0, horizon, self.frame_stride)) < 2:
             raise ValueError("AFRO frame_stride must leave at least two sampled frames")

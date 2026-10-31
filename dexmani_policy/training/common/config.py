@@ -75,9 +75,14 @@ def assemble_policy_config(cfg):
                                       else "dexmani_policy.datasets.demonstration.DemonstrationDataset")
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
-        if "future_force_offsets" in cfg:
+        if method == "interact-dex":
             cfg.agent.future_force_offsets = cfg.future_force_offsets
-            cfg.dataset.future_force_offsets = cfg.future_force_offsets
+            if float(cfg.agent.get("future_force_loss_weight", 0.0)) == 0:
+                cfg.dataset._target_ = "dexmani_policy.datasets.demonstration.DemonstrationDataset"
+                cfg.dataset.pop("future_force_offsets", None)
+            else:
+                cfg.dataset._target_ = "dexmani_policy.datasets.variants.tactile.InterActDexDataset"
+                cfg.dataset.future_force_offsets = cfg.future_force_offsets
         if "tactile_source" in cfg:
             cfg.agent.tactile_source = cfg.tactile_source
             cfg.dataset.tactile_source = cfg.tactile_source
@@ -90,8 +95,20 @@ def prepare_training(cfg):
     if cfg.get("resume_from") is not None:
         raise ValueError("Use python -m dexmani_policy.training.common.resume --run <run>")
     validate_config(cfg)
-    from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
-    prepare_initialization(cfg)
+    if cfg.policy_name in {"dp", "sat", "dqrise"}:
+        name = cfg.agent.get("rgb_backbone_name", "dino")
+        if name != "resnet":
+            rgb = dict(cfg.agent.get("rgb_backbone_config") or {})
+            if rgb.get("architecture") is None:
+                source = cfg.get("initialization", {}).get("rgb")
+                if source is None:
+                    raise ValueError("Fresh HF RGB requires initialization.rgb or an explicit architecture")
+                from transformers import AutoConfig, SiglipVisionConfig
+
+                config_class = SiglipVisionConfig if name == "siglip" else AutoConfig
+                rgb["architecture"] = config_class.from_pretrained(source).to_dict()
+            with open_dict(cfg.agent):
+                cfg.agent.rgb_backbone_config = rgb
     return cfg
 
 

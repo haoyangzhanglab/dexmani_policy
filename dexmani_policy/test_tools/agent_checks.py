@@ -139,9 +139,8 @@ def check_rgb(device):
     with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
         assert torch.isfinite(pooler(rgb)["global_token"]).all()
 
-    from omegaconf import OmegaConf
     from transformers import Dinov2Config, Dinov2Model, SiglipVisionConfig, SiglipVisionModel
-    from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
+    from dexmani_policy.training.common.config import load_policy_config, prepare_training
 
     for kind, config_class, model_class in (
         ("dino", Dinov2Config, Dinov2Model), ("siglip", SiglipVisionConfig, SiglipVisionModel),
@@ -153,11 +152,11 @@ def check_rgb(device):
             source_model = model_class(config).to(dtype=torch.bfloat16)
             with tempfile.TemporaryDirectory(prefix="dexmani-rgb-source-") as directory:
                 source_model.save_pretrained(directory)
-                cfg = OmegaConf.create(dict(
-                    policy_name="dp", initialization={"rgb": directory},
-                    agent={"rgb_backbone_name": kind, "rgb_backbone_config": {"tune_mode": mode}},
-                ))
-                prepare_initialization(cfg)
+                cfg = load_policy_config("dp")
+                cfg.initialization.rgb = directory
+                cfg.agent.rgb_backbone_name = kind
+                cfg.agent.rgb_backbone_config = {"tune_mode": mode}
+                prepare_training(cfg)
                 model = ViTEncoder(kind, **cfg.agent.rgb_backbone_config, out_dim=16)
                 model.initialize_weights(directory)
                 base = model.backbone.get_base_model() if mode == "lora" else model.backbone
@@ -226,7 +225,7 @@ def check_vq(device):
     optimizer = torch.optim.AdamW(vae.parameters(), lr=1e-3)
     for _ in range(3):
         optimizer.zero_grad(set_to_none=True)
-        reconstruction, commitment, _, _ = vae(torch.randn(16, 12, device=device))
+        reconstruction, commitment, _ = vae(torch.randn(16, 12, device=device))
         (reconstruction + commitment).backward()
         assert vae.quantizer.layer_weights.grad is not None and vae.quantizer.layer_weights.grad.abs().sum() > 0
         optimizer.step()

@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
 
 from dexmani_policy.common.image_util import (
     preprocess_rgb_train,
@@ -76,7 +77,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: Callable | None = None,
         rgb_keep_uint8: bool = False,
-        split_manifest: dict | None = None,
+        split_manifest: dict | DictConfig | str | Path | None = None,
         pc_dim: int | None = None,
         tactile_source: str | None = None,
     ) -> None:

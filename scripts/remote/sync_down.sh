@@ -30,17 +30,14 @@ fi
 printf 'Remote: %s\nLocal: %s\n' "$REMOTE_PATH" "$LOCAL_PATH"
 
 # Refuse any config byte difference before transferring experiment artifacts.
-if config_changes=$(rsync -rclsni --existing --out-format='%i %n' \
+config_changes=$(rsync -rclsni --existing --out-format='%i %n' \
     "${WANDB_EXCLUDE[@]}" --include='*/' \
     --include='config.yaml' --exclude='*' \
-    "$REMOTE_PATH" "$LOCAL_PATH"); then
-    conflicts=$(printf '%s\n' "$config_changes" | sed -n '/^[<>ch][fL]/p')
-    if [[ -n "$conflicts" ]]; then
-        printf 'Training config conflict; no artifacts updated:\n%s\n' "$conflicts" >&2
-        exit 1
-    fi
-else
-    exit "$?"
+    "$REMOTE_PATH" "$LOCAL_PATH")
+conflicts=$(printf '%s\n' "$config_changes" | sed -n '/^[<>ch][fL]/p')
+if [[ -n "$conflicts" ]]; then
+    printf 'Training config conflict; no artifacts updated:\n%s\n' "$conflicts" >&2
+    exit 1
 fi
 
 # --partial would leave incomplete files that --ignore-existing skips on retry.
@@ -65,11 +62,7 @@ PASS1_OPTS=(
     "${DRY_RUN[@]}"
 )
 
-rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
-    rc=$?
-    echo "[sync_down] Pass 1 incomplete (code $rc); mutable references not updated." >&2
-    exit "$rc"
-}
+rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
 
 # rsync's temporary transfer preserves the previous complete file on failure.
 echo ""
@@ -89,17 +82,13 @@ PASS2_OPTS=(
     "${DRY_RUN[@]}"
 )
 
-rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
-    rc=$?
-    echo "[sync_down] Pass 2: rsync error (code $rc)" >&2
-    exit "$rc"
-}
+rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
 
 # Run records may change at completion even if their size and mtime match.
 rsync -avs --ignore-times "${WANDB_EXCLUDE[@]}" \
     --include='*/' --include='**/result_details.json' \
     --include='eval_ckpt_selector/**/selection_result.json' \
-    --exclude='*' "${DRY_RUN[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
+    --exclude='*' "${DRY_RUN[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
 
 # Copy the small best pointer only after all referenced records succeeded.
 echo "--- Pass 3/3: best pointer (--ignore-times) ---"
@@ -111,11 +100,7 @@ PASS3_OPTS=(
     --exclude='*'
     "${DRY_RUN[@]}"
 )
-rsync "${PASS3_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
-    rc=$?
-    echo "[sync_down] Pass 3: rsync error (code $rc)" >&2
-    exit "$rc"
-}
+rsync "${PASS3_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
 
 if [[ ${#DRY_RUN[@]} -eq 0 ]]; then
     echo ""

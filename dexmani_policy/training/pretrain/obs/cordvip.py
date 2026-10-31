@@ -10,12 +10,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordination_encoder import (
+from dexmani_policy.agents.obs_encoder.interaction.correspondence import (
     ContactCoordinationEncoder,
 )
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.datasets.split import read_split_manifest
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
@@ -79,7 +78,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     positive_int(cfg.training.val_every_epochs, 'training.val_every_epochs')
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(
-        cfg.dataset, _convert_="all", split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+        cfg.dataset, _convert_="all",
     )
     cfg.dataset.split_manifest = dataset.split_manifest
     loader = build_train_loader(cfg, dataset)
