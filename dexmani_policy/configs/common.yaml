@@ -1,7 +1,6 @@
 # 供主策略继承；独立预训练使用各自的配方。
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
-seed: 42
 action_key: action  # action：关节；action_ee：末端，仅适用于支持该模式的策略。
 
 dataloader:
@@ -17,11 +16,6 @@ dataset:
   max_train_episodes: 100
   split_manifest: null
 
-agent:
-  n_obs_steps: ${n_obs_steps}
-  n_action_steps: ${n_action_steps}
-  action_dim: ${action_dim}
-
 ema:
   _target_: dexmani_policy.training.common.optimization.EMA
   update_after_step: 0
@@ -32,7 +26,7 @@ ema:
 
 training:
   lr_scheduler: cosine
-  seed: ${seed}
+  seed: 42
   device: cuda:0
   loop:
     log_interval_steps: 100
@@ -42,15 +36,6 @@ env_runner:
   env_kwargs:
     randomize_model_id: true
     randomize_table_height: true
-
-eval:
-  seed: 1024
-  selection_episodes: 25
-  episodes: 100
-  action_steps: null
-  seeds: null
-  video:
-    enabled: true
 
 workspace:
   output_dir: ${hydra:runtime.output_dir}

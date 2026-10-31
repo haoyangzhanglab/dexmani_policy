@@ -21,8 +21,7 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
         cfg.resume_from = str(source)
         cfg.workspace.output_dir = str(directory)
         cfg.pop("max_updates", None)
-        if not wandb:
-            cfg.workspace.wandb_cfg = None
+        cfg.workspace.wandb_enabled = wandb
         if device is not None:
             cfg.training.device = device
         if num_workers is not None:

@@ -65,7 +65,7 @@ ssh "$HOST" 'tail -F -- "/absolute/repo/logs/<session>.log"'
 ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 ```
 
-收到一次 SIGINT 后，Trainer 在 update 边界保存并退出；重复中断或强杀可能使最近更新未保存。目录与日志状态需要人工确认，不使用最新目录发现或本地日志 fallback。
+收到一次 SIGINT 后，Trainer 在 update 边界保存并退出；重复中断或强杀可能使最近更新未保存。恢复前确认目标 run 与日志状态。
 
 ## 下载完成的 run
 

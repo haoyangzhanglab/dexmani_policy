@@ -1,12 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from dexmani_policy.common.io_util import atomic_path
-
-if TYPE_CHECKING:
-    from dexmani_policy.agents.policies.base import BasePolicy
-
 
 @dataclass
 class Checkpoint:

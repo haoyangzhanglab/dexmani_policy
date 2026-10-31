@@ -53,7 +53,7 @@ class AFROPolicy(BasePolicy):
     def initialize_training(self, data_description, pretrained_path) -> dict[str, torch.Tensor] | None:
         if pretrained_path is None:
             if self.freeze_visual:
-                raise ValueError("AFRO frozen visual requires pretrained_path; scratch requires freeze_visual=false")
+                raise ValueError("AFRO frozen visual requires initialization.encoder; scratch requires freeze_visual=false")
             print("[AFRO] Scratch training with trainable visual encoder")
             return None
         payload = torch.load(Path(pretrained_path).expanduser(), map_location="cpu", weights_only=True)

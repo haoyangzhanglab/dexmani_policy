@@ -95,9 +95,6 @@ class BasePolicy(nn.Module):
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
 
-    def load_normalizer(self, normalizer: LinearNormalizer) -> None:
-        self.normalizer = normalizer
-
     @property
     def requires_ema_for_loss(self) -> bool:
         return bool(getattr(self.action_decoder, "requires_ema_for_loss", False))

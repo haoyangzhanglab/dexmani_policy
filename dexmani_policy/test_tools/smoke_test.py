@@ -41,10 +41,10 @@ def main(argv=None):
         cfg.workspace.wandb_cfg = None
         if args.device is not None:
             cfg.training.device = args.device
-        cfg, checkpoint = prepare_training(cfg)
+        cfg = prepare_training(cfg)
         if cfg.training.loop.total_train_steps <= args.max_updates:
             raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
-        step = run_training(cfg, checkpoint=checkpoint, max_updates=args.max_updates)
+        step = run_training(cfg, max_updates=args.max_updates)
         assert step == args.max_updates, "Fresh update count mismatch"
         saved = load_checkpoint(directory / "checkpoints" / "latest.pt", mmap=True)
         assert saved.global_step == step, "Saved update count mismatch"

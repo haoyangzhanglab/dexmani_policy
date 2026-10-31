@@ -13,8 +13,6 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 use_aux_ee: false  # 启用时要求 action_key=action，末端姿态仅作辅助预测。
-joint_dim: 19
-ee_dim: 9  # action_ee[:9]：位置 3 维 + rot6d 6 维。
 
 normalization:
   joint_state: limits
@@ -40,8 +38,6 @@ agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.r3d.R3DPolicy
   use_aux_ee: ${use_aux_ee}
-  joint_dim: ${joint_dim}
-  ee_dim: ${ee_dim}
   aux_loss_weight: 1.0
 
   state_dim: 19

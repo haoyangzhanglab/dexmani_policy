@@ -334,7 +334,7 @@ class InterActDexChecks(unittest.TestCase):
                 dims = description["normalization_dims"]
                 self.assertEqual(dims["point_cloud"], channels)
                 model.configure_normalizer(dims, {})
-                model.load_normalizer(fit_normalizer(dataset, cfg.normalization, feature_dims=dims))
+                model.normalizer = fit_normalizer(dataset, cfg.normalization, feature_dims=dims)
                 self.assertNotIn("point_cloud", model.normalizer.fields)
                 obs = {key: value.unsqueeze(0) for key, value in dataset[0]["obs"].items()}
                 self.assertEqual(model.preprocess(obs)["point_cloud"].shape[-1], channels)

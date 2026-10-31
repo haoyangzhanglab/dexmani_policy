@@ -26,11 +26,9 @@ class R3DObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        pc_encoder_config = dict(pc_encoder_config or {})
-        if fps_random_config:
-            pc_encoder_config.setdefault("fps_random_config", fps_random_config)
-
-        self.pc_encoder = Uni3DEncoder(**pc_encoder_config)
+        self.pc_encoder = Uni3DEncoder(
+            fps_random_config=fps_random_config, **(pc_encoder_config or {}),
+        )
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
 

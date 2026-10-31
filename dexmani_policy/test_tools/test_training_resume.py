@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import zarr
+from omegaconf import open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import load_policy_config
@@ -68,7 +69,7 @@ class TrainingResumeChecks(unittest.TestCase):
         ])
         cfg.workspace.output_dir = str(run)
         cfg.workspace.wandb_cfg = None
-        return prepare_training(cfg)[0]
+        return prepare_training(cfg)
 
     def test_continuous_matches_original_run_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,6 +113,27 @@ class TrainingResumeChecks(unittest.TestCase):
             resumed_cfg, checkpoint = prepare_resume(root / "interrupted")
             self.assertEqual(checkpoint.global_step, 1)
             self.assertEqual(run_training(resumed_cfg, checkpoint=checkpoint, max_updates=1), 2)
+
+    def test_resume_can_reenable_wandb_after_disabled_updates(self):
+        with tempfile.TemporaryDirectory() as temporary, patch('wandb.init') as initialize:
+            root = Path(temporary)
+            run = root / 'logging'
+            cfg = self.make_config(root, run)
+            backend = {'project': 'resume-test', 'mode': 'offline'}
+            with open_dict(cfg):
+                cfg.workspace.wandb_cfg = backend
+                cfg.workspace.wandb_enabled = False
+            run_training(cfg, max_updates=1)
+            cfg, checkpoint = prepare_resume(run)
+            self.assertEqual(dict(cfg.workspace.wandb_cfg), backend)
+            run_training(cfg, checkpoint=checkpoint, max_updates=1)
+            initialize.assert_not_called()
+            cfg, checkpoint = prepare_resume(run, wandb=True)
+            self.assertEqual(dict(cfg.workspace.wandb_cfg), backend)
+            run_training(cfg, checkpoint=checkpoint, max_updates=1)
+            initialize.assert_called_once()
+            self.assertEqual(initialize.call_args.kwargs['project'], backend['project'])
+            initialize.return_value.finish.assert_called_once()
 
     def test_log_tail_is_backed_up_only_when_ahead(self):
         with tempfile.TemporaryDirectory() as temporary:

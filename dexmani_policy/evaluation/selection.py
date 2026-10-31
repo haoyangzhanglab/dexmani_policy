@@ -63,7 +63,7 @@ def select_checkpoint(checkpoints, *, weights=None, inference_steps=None, action
     return record, root / winner["checkpoint"]
 
 
-def run_pipeline(checkpoints, *, selection_only=False, **options):
+def run_pipeline(checkpoints, **options):
     if not checkpoints:
         raise ValueError("Candidates must be nonempty")
     root = Path(checkpoints[0]).expanduser().resolve(strict=True).parent.parent
@@ -75,9 +75,9 @@ def run_pipeline(checkpoints, *, selection_only=False, **options):
             raise RuntimeError(f"Another eval pipeline is running for {root}") from error
         record, checkpoint = select_checkpoint(checkpoints, **options)
         path = root / record["selection_result"]
-        write_json(root / "best_ckpt.json", {key: record[key] for key in
-                   ("ckpt_relpath", "global_step", "inference", "selection_result")})
-        if not selection_only:
+        try:
+            write_json(root / "best_ckpt.json", {key: record[key] for key in
+                       ("ckpt_relpath", "global_step", "inference", "selection_result")})
             inference = record["inference"]
             _, result_path = evaluate_policy(
                 checkpoint, weights="ema" if inference["use_ema"] else "raw",
@@ -86,4 +86,8 @@ def run_pipeline(checkpoints, *, selection_only=False, **options):
                 video=record["test_video"], output_dir=path.parent / "test")
             record["test_result"] = str(result_path.relative_to(root))
             write_json(path, record)
+        except BaseException:
+            record.update(status="failed", error=traceback.format_exc())
+            write_failure(path, record)
+            raise
         return path

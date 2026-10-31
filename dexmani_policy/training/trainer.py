@@ -63,7 +63,7 @@ class PolicyTrainer:
             if hand_affine is not None:
                 normalizer["action"].scale[-model.hand_dim:].copy_(hand_affine["scale"])
                 normalizer["action"].offset[-model.hand_dim:].copy_(hand_affine["offset"])
-            model.load_normalizer(normalizer)
+            model.normalizer = normalizer
 
         if model.requires_ema_for_loss and not cfg.training.use_ema:
             raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
@@ -271,14 +271,13 @@ class PolicyTrainer:
             "train/samples_per_sec": samples / elapsed,
             "train/samples_per_step": samples,
         })
-        if pbar is not None:
-            pbar.set_postfix(
-                loss=f"{metrics['train/loss']:.5f}",
-                step=f"{self.global_step:,}",
-                lr=f"{metrics['train/lr']:.2e}",
-                refresh=False,
-            )
-            pbar.update(self.global_step - pbar.n)
+        pbar.set_postfix(
+            loss=f"{metrics['train/loss']:.5f}",
+            step=f"{self.global_step:,}",
+            lr=f"{metrics['train/lr']:.2e}",
+            refresh=False,
+        )
+        pbar.update(self.global_step - pbar.n)
         self.logger.log(metrics, step=self.global_step)
 
     def train(self, *, max_updates=None):

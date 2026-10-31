@@ -1,5 +1,6 @@
 """Selection orchestration tests; these do not claim simulation backend coverage."""
 
+import fcntl
 import json
 import tempfile
 import unittest
@@ -75,6 +76,42 @@ class EvaluationChecks(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     run_pipeline(candidates, selection_episodes=2, test_episodes=3,
                                  output_dir=run / 'comparison')
+            with (run / '.pipeline.lock').open('w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(RuntimeError, 'Another eval pipeline'):
+                    run_pipeline(candidates, output_dir=run / 'locked')
+                self.assertFalse((run / 'locked').exists())
+
+            def fail_test(checkpoint, **settings):
+                if settings['output_dir'].name == 'test':
+                    raise RuntimeError('held-out failure')
+                return score(checkpoint, **settings)
+
+            with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=fail_test):
+                with self.assertRaisesRegex(RuntimeError, 'held-out failure'):
+                    run_pipeline(candidates, weights='ema', inference_steps=3, action_steps=2,
+                                 selection_episodes=2, test_episodes=3,
+                                 output_dir=run / 'failed-test')
+            failed = json.loads((run / 'failed-test/selection_result.json').read_text())
+            self.assertEqual(failed['status'], 'failed')
+            self.assertIn('held-out failure', failed['error'])
+            self.assertEqual(failed['global_step'], 6)
+            published = (run / 'best_ckpt.json').read_bytes()
+
+            def fail_best(path, record, **kwargs):
+                if Path(path).name == 'best_ckpt.json':
+                    raise RuntimeError('best publication failure')
+                return write_json(path, record, **kwargs)
+
+            with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=score), \
+                 patch('dexmani_policy.evaluation.selection.write_json', side_effect=fail_best):
+                with self.assertRaisesRegex(RuntimeError, 'best publication failure'):
+                    run_pipeline(candidates, selection_episodes=2, test_episodes=3,
+                                 output_dir=run / 'failed-publication')
+            failed = json.loads((run / 'failed-publication/selection_result.json').read_text())
+            self.assertEqual(failed['status'], 'failed')
+            self.assertIn('best publication failure', failed['error'])
+            self.assertEqual((run / 'best_ckpt.json').read_bytes(), published)
             (run / 'config.yaml').unlink()
             info = inspect_policy(run, weights='raw')
             self.assertEqual(info.checkpoint_path, candidates[1])

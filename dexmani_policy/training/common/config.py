@@ -5,31 +5,28 @@ from pathlib import Path
 
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
-    assemble_policy_config,
     load_policy_config,
     positive_int,
+    require_tactile_source,
     validate_action_mode,
     validate_normalization_config,
-    validate_tactile_config,
 )
 
 
 def prepare_training(cfg):
     if cfg.get("resume_from") is not None:
         raise ValueError("Use python -m dexmani_policy.training.common.resume --run <run>")
-    assemble_policy_config(cfg)
     validate_config(cfg)
     from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
     prepare_initialization(cfg)
-    return cfg, None
+    return cfg
 
 
 def validate_config(cfg):
     validate_normalization_config(cfg)
-    validate_tactile_config(cfg)
+    require_tactile_source(cfg.dataset.sensor_modalities, cfg.get("tactile_source"))
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
@@ -70,7 +67,7 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
 
 
 def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
-    """Resolve fresh or saved dataset paths without opening data or importing models."""
+    """Resolve the fresh recipe's dataset path without opening data or importing models."""
     cfg = load_policy_config(config_name, overrides)
     return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
 

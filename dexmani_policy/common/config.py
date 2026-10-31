@@ -170,10 +170,6 @@ def require_tactile_source(fields: Iterable[str], source: str | None) -> str | N
     return None
 
 
-def validate_tactile_config(cfg):
-    require_tactile_source(cfg["dataset"]["sensor_modalities"], cfg.get("tactile_source"))
-
-
 def normalization_feature_shapes(dims):
     return {
         key: FIELD_FEATURE_SHAPES.get(key, (width,))

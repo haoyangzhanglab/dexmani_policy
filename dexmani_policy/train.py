@@ -5,7 +5,7 @@ from contextlib import closing
 
 import hydra
 
-from dexmani_policy.common.config import register_resolvers, set_project_root
+from dexmani_policy.common.config import assemble_policy_config, register_resolvers, set_project_root
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.common.config import prepare_training
 from dexmani_policy.training.common.data import build_dataset
@@ -14,8 +14,8 @@ from dexmani_policy.training.trainer import PolicyTrainer
 
 @hydra.main(version_base=None, config_path="configs")
 def _train(cfg):
-    cfg, checkpoint = prepare_training(cfg)
-    run_training(cfg, checkpoint=checkpoint, max_updates=cfg.get("max_updates"))
+    cfg = prepare_training(assemble_policy_config(cfg))
+    run_training(cfg, max_updates=cfg.get("max_updates"))
 
 
 def run_training(cfg, *, checkpoint=None, max_updates=None):

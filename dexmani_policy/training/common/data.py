@@ -12,25 +12,13 @@ from dexmani_policy.common.normalizer import LinearNormalizer, validate_normaliz
 from dexmani_policy.datasets.pretrain.common import ObservationPretrainDataset
 
 
-def fit_normalizer(dataset, spec, *, initial_state=None, feature_dims=None):
+def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
     """Assemble the train affine once, inheriting complete fields before fitting the rest."""
     if not dataset.training:
         raise ValueError("Normalizer fitting requires the training dataset")
     if isinstance(dataset, ObservationPretrainDataset):
-        columns = dataset.normalization_fields
-        if set(spec) != columns.keys():
-            raise ValueError(f"Normalization must declare {tuple(columns)}")
-    else:
-        columns = dataset.consumed_fields
-    if feature_dims is None:
-        feature_dims = {}
-        for key in spec:
-            if key == "action":
-                feature_dims[key] = dataset.action_dim
-            else:
-                width = dataset.episode_store[key].shape[-1]
-                selection = columns[key]
-                feature_dims[key] = width if selection is None else len(range(width)[selection])
+        if set(spec) != dataset.normalization_fields.keys():
+            raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
     expected_shapes = normalization_feature_shapes(feature_dims)
     initial_state = {} if initial_state is None else initial_state
     normalizer = LinearNormalizer({

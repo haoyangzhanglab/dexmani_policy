@@ -1,9 +1,9 @@
 import json
 import os
 import shutil
-from datetime import datetime
 import uuid
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,8 @@ from dexmani_policy.common.io_util import atomic_path, close_resources
 
 
 class ExperimentLogger:
-    def __init__(self, output_dir: str, wandb_cfg: Mapping | None = None, *, resume_step=None):
+    def __init__(self, output_dir: str, wandb_cfg: Mapping | None = None, *,
+                 resume_step=None, wandb_enabled=True):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.resuming = resume_step is not None
@@ -41,7 +42,7 @@ class ExperimentLogger:
             "a", buffering=1, encoding="utf-8"
         )
         self.wandb_run = None
-        if wandb_cfg is not None:
+        if wandb_enabled and wandb_cfg is not None:
             try:
                 os.environ.setdefault("WANDB_SILENT", "true")
                 import wandb

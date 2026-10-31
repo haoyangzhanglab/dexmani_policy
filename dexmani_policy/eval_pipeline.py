@@ -5,7 +5,7 @@ import argparse
 from dexmani_policy.evaluation.selection import run_pipeline
 
 
-def build_parser():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoints", nargs="+", required=True)
     parser.add_argument("--weights", choices=("raw", "ema"))
@@ -17,11 +17,7 @@ def build_parser():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir")
-    return parser
-
-
-def main(argv=None):
-    args = build_parser().parse_args(argv)
+    args = parser.parse_args(argv)
     run_pipeline(**vars(args))
 
 

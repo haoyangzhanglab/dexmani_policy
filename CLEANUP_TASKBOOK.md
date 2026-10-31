@@ -328,7 +328,7 @@ M5 完成：内部Tensor/CHW FP32 RGB、PointNet输出、单相机与五指输�
 
 **主要文件**：`evaluate.py`、`eval_pipeline.py`、`select_checkpoint.py`、`evaluation/{protocol,selection,rollout,artifacts,seeds}.py`、`common/experiments.py`、`deployment/{metadata,runtime}.py`、`scripts/eval/`、`scripts/remote/sync_down.sh`。
 
-M6a 完成：直接checkpoint评测与显式同run候选共用rollout；protocol/merge/test_request链退出；inspect从同一checkpoint读取，公开字段/动作窗口保持。编排2项回归（相同预算、seed隔离、tie、显式EMA覆盖raw默认、唯一输出/失败记录、删除config.yaml后inspect）通过。M6b部分待迁移：Real源码存在且有用户改动，未完成跨仓实际联调，保留best/lock及同步发布链；因此selection输出仍在原run内，selection-only薄CLI暂保留。真实SimRunner已尝试，SAPIEN RenderSystem报Vulkan ErrorExtensionNotPresent，失败详情落盘后进程exit139；真实闭环未通过，CUDA不可用。
+M6a 完成：直接checkpoint评测与显式同run候选共用rollout；protocol/merge/test_request链退出；inspect从同一checkpoint读取，公开字段/动作窗口保持。编排2项回归（相同预算、seed隔离、tie、显式EMA覆盖raw默认、唯一输出/失败记录、删除config.yaml后inspect）通过。M6b部分待迁移：Real源码存在且有用户改动，未完成跨仓实际联调，保留best/lock及同步发布链；因此selection输出仍在原run内，selection-only CLI已在后续定向复核确认无实际消费者后删除。真实SimRunner已尝试，SAPIEN RenderSystem报Vulkan ErrorExtensionNotPresent，失败详情落盘后进程exit139；真实闭环未通过，CUDA不可用。
 
 ### M7：把工具和文档也变薄
 
@@ -353,6 +353,8 @@ M6a 完成：直接checkpoint评测与显式同run候选共用rollout；protocol
 - 最终报告列出完成批次、真实删除/合并内容、运行过的检查和结果、阻塞/未验证项。没有测量就不报告提速、内存或删减百分比。
 
 M7 完成：单config正式smoke、显式远程路径/解释器/GPU及源码快照、无删除传播的code/data同步、保留best分轮发布的单run同步上线；stop/tail脚本退出，文档给直接命令。依赖职责收敛且requirements版本未升级，文本依赖保留。实际CPU smoke2+1（总预算9不变）、全部shell语法、远端Bash本地传输替身+真实rsync的特殊字符argv/前后台/resume/保留目标/配置冲突/best最后发布/可变预训练产物重复同步检查通过。README及日常文档同步。未连接真实SSH主机，未验证远端服务/CUDA。最终InterAct14项、训练恢复4项、评测编排2项、agent_checks CPU8组各自通过；集成中发现并修复显式EMA和候选结果变量问题后重跑评测2项通过，保护文件hash一致。
+
+定向复核（起点 `c0d2998`）：删除fresh恒空checkpoint返回、重复组装、闲置YAML/维度推断、normalizer赋值转发、R3D FPS双来源、DQ运行导入的诊断依赖及无消费者的选模CLI；修复W&B关闭后配置丢失和选模后发布/test失败仍记录完成的问题，真实公开best消费者保留。21项unittest、agent_checks CPU8组、R3D原生CPU输出/梯度对照、正式Hydra fresh/resume CLI1+1及smoke2+1、9文件mypy（含未标注函数体）、shell语法/compileall/wheel构建通过，10方法数学/训练默认不变；保护文件diff为空。本轮未执行CUDA、真实仿真、远程主机或Real硬件联调。
 
 ## 5. 条件项的最终取舍
 

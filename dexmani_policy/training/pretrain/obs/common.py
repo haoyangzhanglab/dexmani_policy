@@ -46,6 +46,7 @@ def load_run(method):
             cfg.workspace.output_dir = args.output_dir
     with open_dict(cfg):
         cfg.resume_from = args.resume_from
+        cfg.workspace.wandb_enabled = not args.no_wandb
     if args.device is not None:
         cfg.training.device = args.device
     if args.num_workers is not None:
@@ -57,8 +58,6 @@ def load_run(method):
         cfg.training.loop.log_interval_steps = args.log_interval
     if args.zarr_path is not None:
         cfg.dataset.zarr_path = args.zarr_path
-    if args.no_wandb:
-        cfg.workspace.wandb_cfg = None
     if checkpoint is None:
         for name in ("encoder.pt", "resume.pt"):
             path = Path(cfg.workspace.output_dir) / name

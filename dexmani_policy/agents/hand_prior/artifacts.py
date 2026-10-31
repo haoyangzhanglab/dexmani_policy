@@ -38,21 +38,11 @@ def load_codebook(path: str | Path, codebook: HandStateCodebook) -> tuple[dict, 
         if dimensions != (codebook.hand_dim, codebook.num_groups, codebook.codebook_size):
             raise ValueError(f"Hand codebook dimensions do not match Policy: {dimensions}")
         poses = torch.from_numpy(data["sorted_hand_poses"])
-        permutation = torch.from_numpy(data["pca_permutation"])
-        weights = torch.from_numpy(data["layer_weights"])
         affine = {
             key: torch.from_numpy(data[f"hand_normalizer_{key}"])
             for key in ("scale", "offset")
         }
         metadata = json.loads(data["metadata_json"].item())
-    if permutation.shape != (codebook.num_codes,) or permutation.dtype not in (
-        torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8,
-    ) or not torch.equal(permutation.long().sort().values, torch.arange(codebook.num_codes)):
-        raise ValueError("pca_permutation must cover every pose exactly once")
-    if weights.shape != (codebook.num_groups,) or weights.is_complex() or weights.dtype == torch.bool:
-        raise ValueError("layer_weights must contain one real value per group")
-    if not torch.isfinite(weights.float()).all():
-        raise ValueError("layer_weights must be finite in runtime dtype")
     for key, values in affine.items():
         if values.shape != (codebook.hand_dim,) or values.is_complex() or values.dtype == torch.bool:
             raise ValueError(f"Hand normalizer {key} requires {codebook.hand_dim} real values")

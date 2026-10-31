@@ -63,9 +63,7 @@ python -m dexmani_policy.eval_pipeline \
 
 action 归一化由策略和动作表示固定：连续 joint 使用 `auto`（等价 `limits`），EEF 只使用分段 `auto`，rot6d 保持 identity；DQ 和 R3D 辅助目标保留各自规则。`normalization.action=rms/gaussian/max_abs` 等非既定配方会在 fresh 配置边界报错，关闭 clipping 也不能绕过；恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 
-本轮清理改变了 checkpoint 构造配置和状态布局；旧实验使用对应旧提交读取，不自动猜测格式，也不使用宽松加载。
-
-FPS 使用 PyTorch3D 原生随机起点。评测关闭随机起点、选点噪声和输出 shuffle；训练随机数消耗及距离并列时的选点可能与旧实现不同，checkpoint 结构兼容不代表随机轨迹逐位续接。
+FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测关闭随机起点、选点噪声和输出 shuffle。
 
 主策略默认最多使用 100 个训练 episodes，在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。选点使用显式候选列表和相同评测预算。
 
@@ -98,14 +96,14 @@ python -m dexmani_policy.test_tools.smoke_test interact_dex \
   --override tactile=real_force --override 'zarr_path=<real_zarr>'
 ```
 
-当前方案按优先级集中落实四项改动：
+InterAct-Dex 包含以下四部分：
 
 1. **观测端未来力监督**：最后观测帧的五指历史特征通过共享小型 MLP 预测 `future_force_offsets=[1,4,8,13]`，与 `n_action_steps` 解耦，不读取含噪动作。标签留在 batch 顶层，按 episode 边界计算有效性；合法零值有效。sim 当前力旋转到各自观测末端系，未来力统一旋转到查询末端系；real 保留未标定的 SDK 通道约定。
 2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
 3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取有效指均值；跨指通信集中在 HandHistory，移除触觉模块内部的两层注意力。
 4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandScene 查询；保留每帧六个交互 token 加十二个场景 token、单个 DiTX 和原有采样内 K/V 缓存。
 
-标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。训练仅编码一次观测；部署跳过未来力头，保持完整 `future_actions` 输出。小头使用动作侧优化器设置并随整策略 EMA 保存。新融合结构和辅助头需要重新训练，不兼容旧版 InterAct-Dex checkpoint 的严格恢复。
+标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。训练仅编码一次观测；部署跳过未来力头，保持完整 `future_actions` 输出。小头使用动作侧优化器设置并随整策略 EMA 保存。
 
 空间 FiLM、抓取中心描述、未来几何重建、目标力条件及额外 VLM/动作专家暂不接入默认路径。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-逐指触觉监督)。功能检查不代替闭环性能验证：
 
