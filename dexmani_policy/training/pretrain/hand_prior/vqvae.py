@@ -60,7 +60,7 @@ def prepare_hand_data(cfg):
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
     cfg.dataset.zarr_path = buffer.path
     cfg.dataset.split_manifest = split
-    metadata = dict(hand_data={"action_key": "action"}, split_manifest=split)
+    metadata = dict(split_manifest=split)
     train_hand = normalizer["hand"].normalize(train_hand).numpy()
     val_hand = normalizer["hand"].normalize(val_hand).numpy()
     return train_hand, val_hand, normalizer, metadata

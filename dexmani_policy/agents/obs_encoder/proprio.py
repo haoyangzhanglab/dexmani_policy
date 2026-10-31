@@ -46,8 +46,6 @@ class FourierPositionEmbedding3D(nn.Module):
         )
 
     def forward(self, xyz: torch.Tensor) -> torch.Tensor:
-        if xyz.ndim < 1 or xyz.size(-1) != 3:
-            raise ValueError(f"xyz must have shape [..., 3], got {tuple(xyz.shape)}")
         angles = xyz.unsqueeze(-1) * self.frequencies.to(dtype=xyz.dtype)
         return torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(start_dim=-2)
 

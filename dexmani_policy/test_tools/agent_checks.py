@@ -280,8 +280,7 @@ def check_codebook_pipeline(device):
             model_config=model.model_config, model_state_dict=model.state_dict(), epoch=1,
             metrics={"val_lookup_mse": metrics["lookup_mse"]},
             normalizer_state_dict={"fields.hand.scale": torch.ones(12), "fields.hand.offset": torch.zeros(12)},
-            split_metadata=dict(hand_data={"action_key": "action"},
-                                split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
+            split_metadata=dict(split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
         ), checkpoint)
         table, metadata = export_codebook(checkpoint, artifact)
         loaded_table = HandStateCodebook(
@@ -294,7 +293,7 @@ def check_codebook_pipeline(device):
         lookup_mse = (rows[:, None] - table.sorted_hand_poses).square().sum(-1).amin(-1).mean() / model.hand_dim
         torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
                                    lookup_mse, rtol=1e-5, atol=1e-7)
-        policy_config = dict(
+        policy_config: dict[str, Any] = dict(
             horizon=4, n_obs_steps=2, n_action_steps=2, action_dim=19,
             n_layers=1, hidden_dim=32, n_head=4,
             num_inference_steps=2, num_points=32,

@@ -89,4 +89,9 @@ python -m dexmani_policy.eval_pipeline \
   --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
-实验默认不拉取 W&B；需要 offline run 时加 `--with-wandb`，再执行 `bash scripts/utils/wandb_sync.sh --all`，上传凭据与网络由本地环境提供。
+训练默认使用 offline W&B，实验下载默认不拉取 W&B；需要 offline run 时给 `sync_down.sh` 加 `--with-wandb`。在本地安装 W&B 的 `policy` 环境中直接同步所需 run，上传凭据与网络由该环境提供：
+
+```bash
+conda activate policy
+wandb sync "experiments/dp3/pick_apple/run01/wandb/<offline-run目录>"
+```

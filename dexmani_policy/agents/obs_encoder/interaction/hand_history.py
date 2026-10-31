@@ -5,8 +5,6 @@ from torch import nn
 class HandHistoryEncoder(nn.Module):
     def __init__(self, n_obs_steps: int) -> None:
         super().__init__()
-        if n_obs_steps <= 0:
-            raise ValueError("n_obs_steps must be greater than 0")
         self.n_obs_steps = n_obs_steps
         self.spatial_attn_norm = nn.LayerNorm(192)
         self.spatial_attn = nn.MultiheadAttention(192, 4, dropout=0.0, batch_first=True)
@@ -30,8 +28,6 @@ class HandHistoryEncoder(nn.Module):
         )
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        if tokens.ndim != 4 or tokens.shape[1:] != (self.n_obs_steps, 6, 192):
-            raise ValueError("tokens must have shape [B,n_obs_steps,6,192]")
         batch = tokens.shape[0]
         spatial = tokens.reshape(batch * self.n_obs_steps, 6, 192).float()
         normalized = self.spatial_attn_norm(spatial.to(self.spatial_attn_norm.weight.dtype))

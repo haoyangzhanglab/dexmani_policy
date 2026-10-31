@@ -46,9 +46,6 @@ def main(argv=None):
             raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
         step = run_training(cfg, max_updates=args.max_updates)
         assert step == args.max_updates, "Fresh update count mismatch"
-        saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
-        assert saved.global_step == step, "Saved update count mismatch"
-        del saved
         resumed_cfg, checkpoint = prepare_resume(directory, device=args.device)
         assert checkpoint.global_step == step, "Resume source mismatch"
         final = run_training(resumed_cfg, checkpoint=checkpoint, max_updates=args.resume_updates)

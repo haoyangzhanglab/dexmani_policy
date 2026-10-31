@@ -1,6 +1,4 @@
-import argparse
 import copy
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +9,6 @@ from dexmani_policy.common.config import (
     PROJECT_ROOT,
     TACTILE_FEATURE_SHAPES,
     positive_int,
-    require_tactile_source,
 )
 
 CONFIG_ROOT = PROJECT_ROOT / "dexmani_policy" / "configs"
@@ -110,7 +107,6 @@ def validate_config(cfg):
         allowed = {"rms", "max_abs"} if key in TACTILE_FEATURE_SHAPES else {"identity", "limits", "gaussian", "rms", "max_abs"}
         if mode not in allowed:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected {sorted(allowed)}")
-    require_tactile_source(cfg.dataset.sensor_modalities, cfg.get("tactile_source"))
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
@@ -150,29 +146,3 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     OmegaConf.resolve(effective)
     OmegaConf.set_readonly(effective, True)
     return effective
-
-
-def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
-    """Resolve the fresh recipe's dataset path without opening data or importing models."""
-    cfg = load_policy_config(config_name, overrides)
-    return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Resolve training dataset paths.")
-    parser.add_argument("--config-name", required=True, help="Config name or relative path under dexmani_policy/configs")
-    parser.add_argument(
-        "--check", action="store_true", help="Require existing dataset directories."
-    )
-    parser.add_argument("overrides", nargs="*", help="Hydra overrides passed to training.")
-    args = parser.parse_args()
-    paths = resolve_dataset_paths(args.config_name, args.overrides)
-    print(json.dumps({"dataset_paths": [str(path) for path in paths]}, indent=2))
-    if args.check:
-        missing = [str(path) for path in paths if not path.is_dir()]
-        if missing:
-            raise SystemExit("Missing dataset directories:\n  " + "\n  ".join(missing))
-
-
-if __name__ == "__main__":
-    main()

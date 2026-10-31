@@ -6,18 +6,16 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor, nn
 
-from ..xhand_tactile import XHandForceEncoder
-
 
 class GatedTactileFusion(nn.Module):
     def __init__(
         self,
         token_channels: int = 192,
         *,
-        tactile_encoder: nn.Module | None = None,
+        tactile_encoder: nn.Module,
     ) -> None:
         super().__init__()
-        self.tactile_encoder = XHandForceEncoder() if tactile_encoder is None else tactile_encoder
+        self.tactile_encoder = tactile_encoder
         tactile_dim = self.tactile_encoder.out_dim
         self.query_norm = nn.LayerNorm(token_channels)
         self.tactile_norm = nn.LayerNorm(tactile_dim)

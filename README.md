@@ -35,10 +35,6 @@ python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output O
 python -m dexmani_policy.test_tools.smoke_test dp3 --max-updates 2 --resume-updates 1 \
   --override 'task_name=<task>' --override dataloader.num_workers=0
 
-# 检查任务的数据路径
-python -m dexmani_policy.training.common.config \
-  --config-name dp3 'task_name=<task>' --check
-
 # 训练，支持 Hydra 配置覆盖
 bash scripts/training/train.sh dp3 'task_name=<task>'
 
@@ -58,7 +54,7 @@ python -m dexmani_policy.eval_pipeline \
   --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
-配置检查不代表完整训练可运行。续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
+续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
 动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 

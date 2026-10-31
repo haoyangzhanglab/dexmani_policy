@@ -103,8 +103,8 @@ class DQRISEPolicy(BasePolicy):
             raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
         validate_hand_coordinates(data_description["attrs"])
         metadata, hand_affine = load_codebook(codebook_path, self.hand_codebook)
-        if data_description["action_key"] != "action" or metadata["hand_data"]["action_key"] != "action":
-            raise ValueError("DQ-RISE requires joint policy data and a codebook pretrained with action_key=action")
+        if data_description["action_key"] != "action":
+            raise ValueError("DQ-RISE requires joint policy data with action_key=action")
         if data_description["split_manifest"] != metadata["split_manifest"]:
             raise ValueError("Pretraining/policy split mismatch")
         return hand_affine

@@ -1,5 +1,8 @@
+"""Export PCA-ordered hand states from a DQ-RISE VQ-VAE checkpoint."""
+
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +59,6 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     codebook.set_prototypes(poses[permutation])
     metadata = {
         "model_config": checkpoint["model_config"],
-        "hand_data": split["hand_data"],
         "split_manifest": split["split_manifest"],
         "ordering": "decoded_prototype_pca1_ascending",
         "selection": {
@@ -74,3 +76,18 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
             temporary, codebook, metadata, hand_affine={"scale": scale, "offset": offset},
         )
     return codebook, metadata
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+    codebook, _ = export_codebook(args.checkpoint, args.output, device=args.device, overwrite=args.overwrite)
+    print(f"Exported {codebook.num_codes} hand states to {args.output}")
+
+
+if __name__ == "__main__":
+    main()

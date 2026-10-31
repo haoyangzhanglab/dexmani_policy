@@ -76,7 +76,6 @@ def build_dataset(cfg):
     description = {
         "normalization_dims": dims, "split_manifest": dataset.split_manifest,
         "action_key": dataset.action_key, "attrs": buffer.attrs,
-        "zarr_path": buffer.path,
         "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }
