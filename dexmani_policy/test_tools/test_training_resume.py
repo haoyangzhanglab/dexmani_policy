@@ -3,6 +3,8 @@
 import json
 import os
 import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import zarr
-from omegaconf import open_dict
+from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
@@ -76,6 +78,60 @@ class ConfigRecipeChecks(unittest.TestCase):
                 validate_config_cli(arguments)
         with self.assertRaisesRegex(ValueError, "searchpath"):
             load_policy_config("dp3", ["hydra.searchpath=[file:///tmp]"])
+
+
+class SplitChecks(unittest.TestCase):
+    def test_cli_manifest_shared_with_policy_and_vq(self):
+        from dexmani_policy.datasets.demonstration import DemonstrationDataset
+        from dexmani_policy.datasets.split import read_split_manifest
+        from dexmani_policy.training.pretrain.hand_prior.vqvae import prepare_hand_data
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, output = root / 'data.zarr', root / 'split.json'
+            store = zarr.open_group(str(data), mode='w')
+            store.create_dataset('data/action', data=np.arange(24 * 19, dtype=np.float32).reshape(24, 19))
+            # Split export reads episode metadata, without requiring a full data scan.
+            store.create_dataset('data/unused', data=np.full((24, 1), np.nan))
+            store.create_dataset('meta/episode_ends', data=np.arange(3, 25, 3))
+            ids = [f'episode-{index}' for index in range(8)]
+            store.attrs.update(source_id='shared-source', episode_ids=ids,
+                               trial_ids={name: f'trial-{index // 2}' for index, name in enumerate(ids)})
+            command = [sys.executable, '-m', 'dexmani_policy.datasets.split',
+                       '--zarr-path', str(data), '--output', str(output),
+                       '--val-ratio', '0.25', '--seed', '17', '--max-train-episodes', '4']
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            manifest = read_split_manifest(output)
+            self.assertEqual(len(manifest['train_indices']), 4)
+            self.assertEqual(len(manifest['val_indices']), 2)
+            trials = store.attrs['trial_ids']
+            self.assertFalse({trials[ids[i]] for i in manifest['train_indices']} &
+                             {trials[ids[i]] for i in manifest['val_indices']})
+            restored = read_split_manifest(OmegaConf.create(manifest))
+            self.assertIsInstance(restored, dict)
+            self.assertIsInstance(restored['train_indices'], list)
+            dataset = DemonstrationDataset(
+                str(data), sensor_modalities=[], obs_horizon=1, horizon=2,
+                split_manifest=restored, seed=999, val_ratio=0, max_train_episodes=4,
+            )
+            self.assertEqual(dataset.split_manifest, manifest)
+            cfg = load_policy_config('pretrain/hand_prior/vqvae', [
+                f'zarr_path={data}', f'dataset.split_manifest={output}',
+                'dataset.seed=123', 'dataset.val_ratio=0', 'dataset.max_train_episodes=4',
+            ])
+            train, val, _, metadata = prepare_hand_data(cfg)
+            self.assertEqual(metadata['split_manifest'], manifest)
+            self.assertEqual((len(train), len(val)), (12, 6))
+            failed = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn('FileExistsError', failed.stderr)
+            self.assertEqual(read_split_manifest(output), manifest)
+            cfg.dataset.max_train_episodes = 2
+            with self.assertRaisesRegex(ValueError, 'exceeding max_train_episodes'):
+                prepare_hand_data(cfg)
+            store.attrs['source_id'] = 'different-source'
+            with self.assertRaisesRegex(ValueError, 'source_id differs'):
+                prepare_hand_data(cfg)
 
 
 class TrainingResumeChecks(unittest.TestCase):

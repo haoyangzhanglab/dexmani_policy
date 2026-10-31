@@ -24,7 +24,7 @@ def select_checkpoint(checkpoints, *, weights=None, inference_steps=None, action
     root = checkpoints[0].parent.parent
     if any(path.parent != root / "checkpoints" for path in checkpoints):
         raise ValueError("Select explicit checkpoints from one training run")
-    cfg = load_checkpoint(checkpoints[0], mmap=True).effective_config
+    cfg = load_checkpoint(checkpoints[0]).effective_config
     weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
     if weights not in {"raw", "ema"}:
         raise ValueError("weights must be raw or ema")
@@ -43,7 +43,7 @@ def select_checkpoint(checkpoints, *, weights=None, inference_steps=None, action
                   inference=dict(use_ema=weights == "ema", inference_steps=inference_steps, action_steps=action_steps),
                   device=device, test_video=video, candidates=[])
     for checkpoint in checkpoints:
-        step = load_checkpoint(checkpoint, mmap=True).global_step
+        step = load_checkpoint(checkpoint).global_step
         record["candidates"].append(dict(checkpoint=str(checkpoint.relative_to(root)), global_step=step))
     write_json(path, record, overwrite=False)
     try:

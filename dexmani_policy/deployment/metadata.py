@@ -77,7 +77,7 @@ class PolicyInfo:
 def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=None) -> PolicyInfo:
     # Read the checkpoint recipe without constructing a model.
     directory, path, selection = _resolve_checkpoint(experiment, checkpoint)
-    cfg = load_checkpoint(path, mmap=True).effective_config
+    cfg = load_checkpoint(path).effective_config
     defaults = cfg["eval"] if selection is None else selection["inference"]
     if weights is None:
         if type(defaults["use_ema"]) is not bool:

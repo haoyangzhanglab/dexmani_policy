@@ -23,7 +23,7 @@ def main(argv=None):
     options = vars(args).copy()
     episodes = options.pop("episodes")
     if args.seeds is None:
-        cfg = load_checkpoint(args.checkpoint, mmap=True).effective_config
+        cfg = load_checkpoint(args.checkpoint).effective_config
         options["seeds"], _ = split_evaluation_seeds(load_seed_pool(cfg), args.seed, episodes)
     evaluate_policy(**options)
 

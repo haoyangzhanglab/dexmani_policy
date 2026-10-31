@@ -25,11 +25,11 @@ def save_checkpoint(path: str | Path, checkpoint: Checkpoint) -> Path:
     return path
 
 
-def load_checkpoint(path: str | Path, *, mmap: bool = False) -> Checkpoint:
+def load_checkpoint(path: str | Path) -> Checkpoint:
     import torch
 
     # Project checkpoints contain trusted training state, not just tensors.
-    payload = torch.load(path, map_location="cpu", weights_only=False, mmap=mmap)
+    payload = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     return Checkpoint(**payload)
 
 
@@ -43,7 +43,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
 
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
-    checkpoint = load_checkpoint(checkpoint_path, mmap=True)
+    checkpoint = load_checkpoint(checkpoint_path)
     cfg = checkpoint.effective_config
     state = checkpoint.ema_model_state if use_ema else checkpoint.model_state
     if state is None:

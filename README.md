@@ -20,7 +20,7 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 
 ```bash
 python -m dexmani_policy.datasets.tools.check_data --zarr-path INPUT
-python -m dexmani_policy.datasets.tools.make_split --zarr-path INPUT --output split.json \
+python -m dexmani_policy.datasets.split --zarr-path INPUT --output split.json \
   --seed 42 --val-ratio 0.1 --max-train-episodes 100
 python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output OUTPUT
 ```

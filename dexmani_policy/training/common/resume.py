@@ -13,7 +13,7 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
                    use_compile=None, compile_mode=None, wandb=False, zarr_path=None):
     directory = Path(run).expanduser().resolve(strict=True)
     source = directory / "checkpoints" / "latest.pt"
-    checkpoint = load_checkpoint(source, mmap=True)
+    checkpoint = load_checkpoint(source)
     cfg = OmegaConf.create(checkpoint.effective_config)
     if not OmegaConf.is_dict(cfg.dataset.split_manifest):
         raise ValueError("Resume requires the actual saved split indices")

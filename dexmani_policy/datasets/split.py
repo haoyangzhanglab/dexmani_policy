@@ -1,3 +1,4 @@
+import argparse
 import json
 from collections import Counter
 from pathlib import Path
@@ -6,6 +7,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.io_util import write_json
 
 
 def read_split_manifest(value):
@@ -130,3 +132,34 @@ def split_episodes(buffer, *, manifest: dict | None = None, val_ratio=0.1, seed=
         "val_indices": np.flatnonzero(val).tolist(),
     }
     return train, val, manifest
+
+
+def main():
+    from dexmani_policy.datasets.episode_store import EpisodeStore
+
+    parser = argparse.ArgumentParser(
+        description="Create a shared episode split, keeping known trials together"
+    )
+    parser.add_argument("--zarr-path", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-train-episodes", type=int)
+    args = parser.parse_args()
+    buffer = EpisodeStore(args.zarr_path, keys=[])
+    _, _, manifest = split_episodes(
+        buffer,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+        max_train_episodes=args.max_train_episodes,
+    )
+    output = Path(args.output).expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output, manifest, overwrite=False)
+    print(
+        f"Split: train={len(manifest['train_indices'])}, validation={len(manifest['val_indices'])}; {output}"
+    )
+
+
+if __name__ == "__main__":
+    main()

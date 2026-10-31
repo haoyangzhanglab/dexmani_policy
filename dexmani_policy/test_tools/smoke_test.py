@@ -46,7 +46,7 @@ def main(argv=None):
             raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
         step = run_training(cfg, max_updates=args.max_updates)
         assert step == args.max_updates, "Fresh update count mismatch"
-        saved = load_checkpoint(directory / "checkpoints" / "latest.pt", mmap=True)
+        saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
         assert saved.global_step == step, "Saved update count mismatch"
         del saved
         resumed_cfg, checkpoint = prepare_resume(directory, device=args.device)
@@ -54,7 +54,7 @@ def main(argv=None):
         final = run_training(resumed_cfg, checkpoint=checkpoint, max_updates=args.resume_updates)
         expected = min(step + args.resume_updates, cfg.training.loop.total_train_steps)
         assert final == expected, "Resume update count mismatch"
-        saved = load_checkpoint(directory / "checkpoints" / "latest.pt", mmap=True)
+        saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
         assert saved.global_step == final, "Resumed checkpoint mismatch"
         print(f"PASS {args.config}: fresh={step}, resumed={final}; run={directory}", flush=True)
 

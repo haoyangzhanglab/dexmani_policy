@@ -40,7 +40,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                     seeds, seed=1024, device="cuda:0", video=True, output_dir=None):
     """Run one checkpoint with explicit evaluation settings and one result directory."""
     checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
-    cfg = load_checkpoint(checkpoint, mmap=True).effective_config
+    cfg = load_checkpoint(checkpoint).effective_config
     weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
     if weights not in {"raw", "ema"}:
         raise ValueError("weights must be raw or ema")
