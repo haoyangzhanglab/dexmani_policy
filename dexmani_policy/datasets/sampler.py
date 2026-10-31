@@ -49,7 +49,8 @@ class SequenceSampler:
         sequence_length: int,
         pad_before: int = 0,
         pad_after: int = 0,
-        episode_mask: np.ndarray | None = None,
+        *,
+        episode_mask: np.ndarray,
         fields: dict[str, slice | None] | None = None,
         field_horizons: dict[str, int] | None = None,
     ):
@@ -57,12 +58,9 @@ class SequenceSampler:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
 
         episode_ends = episode_store.episode_ends
-        if episode_mask is None:
-            episode_mask = np.ones(episode_ends.shape, dtype=bool)
-        else:
-            episode_mask = np.asarray(episode_mask, dtype=bool)
-            if episode_mask.shape != episode_ends.shape:
-                raise ValueError("episode_mask must have one entry per episode")
+        episode_mask = np.asarray(episode_mask, dtype=bool)
+        if episode_mask.shape != episode_ends.shape:
+            raise ValueError("episode_mask must have one entry per episode")
 
         indices = window_indices(
             episode_ends,
@@ -82,17 +80,14 @@ class SequenceSampler:
     def __len__(self):
         return len(self.indices)
 
-    def source_rows(self, indices):
-        """Original source rows, including repeated boundary rows used by padding."""
-        start, end, sample_start = np.asarray(indices).T
-        return np.clip(
-            start[:, None] + np.arange(self.sequence_length) - sample_start[:, None],
-            start[:, None],
-            end[:, None] - 1,
-        )
-
     def sample_source_rows(self, idx):
-        return self.source_rows(self.indices[idx][None])[0]
+        """Original source rows, including repeated boundary rows used by padding."""
+        start, end, sample_start = self.indices[idx]
+        return np.clip(
+            start + np.arange(self.sequence_length) - sample_start,
+            start,
+            end - 1,
+        )
 
     def sample_sequence(self, idx):
         result = {}

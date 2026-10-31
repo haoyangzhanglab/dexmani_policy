@@ -53,10 +53,6 @@ class CordViPPolicy(BasePolicy):
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
         self.pretrained_path = pretrained_path
 
-    @classmethod
-    def prepare_restore_config(cls, config):
-        config.pretrained_path = None
-
     def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
         if self.pretrained_path is None:
             print("[CordViP] Scratch training; all observation encoder parameters are trainable")

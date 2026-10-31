@@ -50,10 +50,6 @@ class AFROPolicy(BasePolicy):
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
         self.pretrained_path, self.freeze_visual = pretrained_path, freeze_visual
 
-    @classmethod
-    def prepare_restore_config(cls, config):
-        config.pretrained_path = None
-
     def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
         if self.pretrained_path is None:
             if self.freeze_visual:

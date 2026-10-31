@@ -36,7 +36,7 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
     def build_sampler(self, mask):
         fields = {**self.normalization_fields, "contact_map": None}
         return SequenceSampler(
-            self.episode_store, self.horizon, self.pad_before, self.pad_after, mask,
+            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask=mask,
             fields=fields, field_horizons={key: self.obs_horizon for key in fields},
         )
 

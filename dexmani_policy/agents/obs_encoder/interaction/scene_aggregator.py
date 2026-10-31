@@ -281,7 +281,3 @@ class SceneAggregator(nn.Module):
     @property
     def out_dim(self) -> int:
         return self.token_channels
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return self.num_scene_tokens, self.token_channels

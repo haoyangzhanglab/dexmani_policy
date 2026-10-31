@@ -175,7 +175,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
     def build_sampler(self, episode_mask):
         return SequenceSampler(
-            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask,
+            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask=episode_mask,
             fields=self.consumed_fields, field_horizons={key: self.obs_horizon for key in self.sensor_modalities},
         )
 

@@ -230,7 +230,3 @@ class Sparse3DEncoder(nn.Module):
     @property
     def out_dim(self) -> int:
         return self.channels
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return self.num_patches, self.channels

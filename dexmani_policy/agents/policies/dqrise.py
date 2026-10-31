@@ -106,7 +106,6 @@ class DQRISEPolicy(BasePolicy):
         config["rgb_backbone_config"] = SpatialObservationEncoder.prepare_rgb_restore_config(
             config.get("rgb_backbone_config")
         )
-        config["codebook_path"] = None
 
     def initialize_training(self, data_description) -> None:
         if self.codebook_path is None:

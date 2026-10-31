@@ -163,7 +163,3 @@ class HandStateEncoder(nn.Module):
     @property
     def out_dim(self) -> int:
         return self.token_dim
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return (6, self.token_dim)

@@ -56,12 +56,6 @@ class R3DPolicy(BasePolicy):
     supported_execution_modes = ("sync", "async", "rtc")
 
     @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        pc = dict(config.get("pc_encoder_config") or {})
-        pc.update(use_pretrained_weights=False, pretrained_weights_path=None)
-        config.pc_encoder_config = pc
-
-    @classmethod
     def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
         if spec["point_cloud"] != "limits":
             raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")

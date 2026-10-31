@@ -132,7 +132,3 @@ class SpatialObservationEncoder(nn.Module):
         state = state + self.modality_embedding[:, 1:].to(state.dtype)
         frames = self.output_norm(torch.cat((spatial, state), dim=1))
         return frames.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return self.n_obs_steps * (self.pc_encoder.num_patches + 1), self.out_dim
