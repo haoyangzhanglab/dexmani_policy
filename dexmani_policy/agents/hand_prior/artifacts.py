@@ -9,12 +9,10 @@ from .codebook import HandStateCodebook
 
 def save_codebook(
     path: str | Path, codebook: HandStateCodebook, metadata: dict, *,
-    pca_permutation, layer_weights, hand_affine,
+    hand_affine,
 ) -> None:
     payload = {
         "sorted_hand_poses": codebook.sorted_hand_poses.detach().cpu().numpy(),
-        "pca_permutation": pca_permutation.detach().cpu().numpy(),
-        "layer_weights": layer_weights.detach().cpu().numpy(),
         "hand_normalizer_scale": hand_affine["scale"].detach().cpu().numpy(),
         "hand_normalizer_offset": hand_affine["offset"].detach().cpu().numpy(),
     }

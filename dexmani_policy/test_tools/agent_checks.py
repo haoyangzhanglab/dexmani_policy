@@ -25,7 +25,7 @@ from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.pytorch_util import get_rng_state
 from dexmani_policy.training.common.optimization import build_optimizer
-from dexmani_policy.training.pretrain.hand_prior.codebook import deployment_diagnostics, export_codebook
+from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
 
 
@@ -287,17 +287,13 @@ def check_codebook_pipeline(device):
         loaded_table = HandStateCodebook(
             model.hand_dim, num_groups=model.num_groups, codebook_size=model.codebook_size,
         )
-        loaded_metadata, hand_affine = load_codebook(artifact, loaded_table)
+        loaded_metadata, _ = load_codebook(artifact, loaded_table)
         assert loaded_metadata == metadata
         for name, value in table.state_dict().items():
             torch.testing.assert_close(value, loaded_table.state_dict()[name], rtol=0, atol=0)
-        report = deployment_diagnostics(
-            table, {"validation": rows.numpy()}, metadata=metadata,
-            hand_scale=hand_affine["scale"], chunk_size=5,
-        )
+        lookup_mse = (rows[:, None] - table.sorted_hand_poses).square().sum(-1).amin(-1).mean() / model.hand_dim
         torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
-                                   torch.tensor(report["splits"]["validation"]["lookup_mse"]), rtol=1e-5, atol=1e-7)
-        assert sum(report["splits"]["validation"]["prototype_counts"]) == len(rows)
+                                   lookup_mse, rtol=1e-5, atol=1e-7)
         policy_config = dict(
             horizon=4, n_obs_steps=2, n_action_steps=2, action_dim=19,
             n_layers=1, hidden_dim=32, n_head=4,

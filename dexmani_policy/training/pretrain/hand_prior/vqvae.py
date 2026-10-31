@@ -77,7 +77,7 @@ def evaluate_vq(vqvae, loader, device, *, chunk_size=4096):
     training = vqvae.training
     vqvae.eval()
     try:
-        prototypes, _ = build_hand_prototypes(vqvae)
+        prototypes = build_hand_prototypes(vqvae)
         lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
         count = 0
         for (batch,) in loader:

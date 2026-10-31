@@ -20,7 +20,6 @@ huggingface-hub==0.25.2
 peft==0.20.0
 wandb==0.22.3
 imageio-ffmpeg==0.6.0
-matplotlib==3.10.9
 scikit-learn==1.7.2
 pyyaml==6.0.3
 # Optional: pytorch3d==0.7.8 (build against installed Torch/CUDA).
