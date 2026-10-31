@@ -40,11 +40,6 @@ def load_policy_config(config, overrides=()):
 def assemble_policy_config(cfg):
     """Derive fixed recipe fields; YAML only exposes research choices."""
     if "policy_name" not in cfg:
-        if "vq_vae" in cfg:
-            if cfg.get("normalization"):
-                raise ValueError("VQ action normalization is fixed; remove normalization inputs")
-            with open_dict(cfg):
-                cfg.normalization = {"action": "limits"}
         return cfg
     with open_dict(cfg):
         action_key = cfg.action_key

@@ -58,13 +58,9 @@ def prepare_hand_data(cfg):
     val_hand = load_hand_array(buffer, val)
     normalizer = LinearNormalizer()
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
-    metadata = dict(
-        hand_data={"action_key": "action"}, split_manifest=split,
-        dataset_config={key: cfg.dataset[key] for key in (
-            "zarr_path", "seed", "val_ratio", "max_train_episodes",
-        )},
-    )
-    metadata["dataset_config"]["zarr_path"] = buffer.path
+    cfg.dataset.zarr_path = buffer.path
+    cfg.dataset.split_manifest = split
+    metadata = dict(hand_data={"action_key": "action"}, split_manifest=split)
     train_hand = normalizer["hand"].normalize(train_hand).numpy()
     val_hand = normalizer["hand"].normalize(val_hand).numpy()
     return train_hand, val_hand, normalizer, metadata
@@ -115,8 +111,6 @@ def train(cfg):
     set_seed(recipe.seed)
     train_norm, val_norm, normalizer, split_metadata = prepare_hand_data(cfg)
     cfg.vq_vae.output_dir = str(output_dir)
-    cfg.dataset.zarr_path = split_metadata["dataset_config"]["zarr_path"]
-    cfg.dataset.split_manifest = split_metadata["split_manifest"]
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
