@@ -15,14 +15,16 @@ from dexmani_policy.training.trainer import PolicyTrainer
 @hydra.main(version_base=None, config_path="configs")
 def _train(cfg):
     cfg, checkpoint = prepare_training(cfg)
+    run_training(cfg, checkpoint=checkpoint, max_updates=cfg.get("max_updates"))
+
+
+def run_training(cfg, *, checkpoint=None, max_updates=None):
     set_seed(cfg.training.seed)
     dataset, data_description = build_dataset(cfg)
-    with closing(PolicyTrainer(
-        cfg, dataset, data_description, checkpoint=checkpoint
-    )) as trainer:
-        del checkpoint
+    with closing(PolicyTrainer(cfg, dataset, data_description, checkpoint=checkpoint)) as trainer:
         trainer.compile_models()
-        trainer.train(max_updates=cfg.get("max_updates"))
+        trainer.train(max_updates=max_updates)
+        return trainer.global_step
 
 
 def main():

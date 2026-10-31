@@ -383,8 +383,8 @@ def check_codebook_pipeline(device):
             normalizer_shapes={key: tuple(field.scale.shape) for key, field in policy.normalizer.fields.items()},
         )
         save_checkpoint(saved, Checkpoint(
-            epoch=0, global_step=1, model_state=policy.state_dict(), ema_model_state=ema.state_dict(),
-            optimizer_state={}, scheduler_state={}, ema_updater_step=1, rng_state={}, effective_config=effective,
+            global_step=1, model_state=policy.state_dict(), ema_model_state=ema.state_dict(),
+            optimizer_state={}, scheduler_state={}, rng_state={}, effective_config=effective,
         ))
         artifact.unlink()
         for use_ema, expected in ((False, policy), (True, ema)):

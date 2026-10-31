@@ -25,11 +25,7 @@ from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.training.common.optimization import build_scheduler
-from dexmani_policy.training.pretrain.hand_prior.codebook import (
-    build_hand_prototypes,
-    deployment_diagnostics,
-    export_codebook,
-)
+from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +108,9 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
 
 
 def train(cfg):
-    import matplotlib.pyplot as plt
-
     recipe = cfg.vq_vae
     hand_dim = 12
-    for name in ("num_epochs", "batch_size", "save_epochs", "codebook_report_epochs"):
+    for name in ("num_epochs", "batch_size", "save_epochs"):
         positive_int(recipe[name], name)
     if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
@@ -130,6 +124,10 @@ def train(cfg):
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
     train_norm, val_norm, normalizer, split_metadata = prepare_hand_data(cfg)
+    cfg.vq_vae.output_dir = str(output_dir)
+    cfg.dataset.zarr_path = split_metadata["dataset_config"]["zarr_path"]
+    cfg.dataset.split_manifest = split_metadata["split_manifest"]
+    OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
     if len(train_ds) < recipe.batch_size:
@@ -180,21 +178,16 @@ def train(cfg):
         "validation" if has_validation else "train_no_holdout"
     )
     logger.info("VQ selection: %s (%s)", selection_metric, split_metadata["selection_split"])
-    train_history: list[float] = []
     best_lookup_mse = float("inf")
 
     for epoch in range(1, recipe.num_epochs + 1):
         vqvae.train()
         sums = torch.zeros(3, device=device, dtype=torch.float64)
         train_count = 0
-        report_usage = epoch % recipe.codebook_report_epochs == 0
-        if report_usage:
-            usage = torch.zeros(recipe.num_groups, recipe.codebook_size, dtype=torch.long, device=device)
-
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            recon_loss, commitment_loss, indices, recon_mse = vqvae(batch)
+            recon_loss, commitment_loss, _, recon_mse = vqvae(batch)
             total_loss = recipe.enc_loss_weight * recon_loss + recipe.vq_loss_weight * commitment_loss
             if not torch.isfinite(total_loss):
                 raise FloatingPointError("Nonfinite VQ training loss")
@@ -212,8 +205,6 @@ def train(cfg):
             scheduler.step()
 
             with torch.no_grad():
-                if report_usage:
-                    usage.scatter_add_(1, indices.T, torch.ones_like(indices.T))
                 sums += torch.stack((recon_loss, commitment_loss, recon_mse)).double() * batch.shape[0]
             train_count += batch.shape[0]
 
@@ -221,8 +212,6 @@ def train(cfg):
         train_total = (
             recipe.enc_loss_weight * train_metrics["enc"] + recipe.vq_loss_weight * train_metrics["vq"]
         )
-        train_history.append(train_total)
-
         selection_metrics = evaluate_vq(
             vqvae, selection_loader, device, reconstruction=has_validation
         )
@@ -249,6 +238,8 @@ def train(cfg):
                 metrics["val_enc"], metrics["val_vq"], metrics["val_mse"],
             )
         logger.info("%s %.7f", selection_metric, metrics[selection_metric])
+        with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as file:
+            file.write(json.dumps({"epoch": epoch, **metrics}, allow_nan=False) + "\n")
 
         checkpoint_paths = []
         if epoch % recipe.save_epochs == 0 or epoch == recipe.num_epochs:
@@ -264,7 +255,6 @@ def train(cfg):
                 "epoch": int(epoch),
                 "model_state_dict": vqvae.state_dict(),
                 "normalizer_state_dict": normalizer.state_dict(),
-                "training_config": OmegaConf.to_container(recipe, resolve=True),
                 "model_config": vqvae.model_config,
                 "split_metadata": split_metadata,
                 "metrics": metrics,
@@ -274,37 +264,10 @@ def train(cfg):
                     torch.save(payload, temporary)
                 logger.info("checkpoint saved: %s", checkpoint_path)
 
-        if report_usage:
-            for group in range(recipe.num_groups):
-                fig, ax = plt.subplots(figsize=(6, 3))
-                ax.bar(np.arange(recipe.codebook_size), usage[group].cpu().numpy())
-                ax.set_title(f"Group {group} code usage — epoch {epoch}")
-                ax.set_xlabel("Code index")
-                ax.set_ylabel("Count")
-                fig.tight_layout()
-                fig.savefig(output_dir / f"code_usage_g{group}_epoch{epoch:04d}.png")
-                plt.close(fig)
-
-    # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / "vqvae_hand_best.pt"
     codebook_path = output_dir / "codebook.npz"
-    runtime_codebook, codebook_metadata = export_codebook(selected_path, codebook_path, device="cpu")
+    export_codebook(selected_path, codebook_path, device="cpu")
     print(f"Saved selected runtime codebook: {codebook_path}")
-    diagnostics = deployment_diagnostics(
-        runtime_codebook, {"train": train_norm, "held_out": val_norm}, metadata=codebook_metadata,
-        hand_scale=normalizer["hand"].scale,
-    )
-    with atomic_path(output_dir / "codebook_diagnostics.json") as temporary:
-        temporary.write_text(json.dumps(diagnostics, indent=2, allow_nan=False) + "\n")
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(train_history)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Training objective")
-    ax.set_title("VQ-VAE training objective")
-    fig.tight_layout()
-    fig.savefig(output_dir / "loss_curve.png")
-    plt.close(fig)
 
 
 def main():

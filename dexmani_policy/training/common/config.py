@@ -3,7 +3,6 @@ import copy
 import json
 from pathlib import Path
 
-from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
@@ -16,26 +15,16 @@ from dexmani_policy.common.config import (
     validate_normalization_config,
     validate_tactile_config,
 )
-from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_resume_source
 
 
 def prepare_training(cfg):
-    source = resolve_resume_source(cfg.get("resume_from"))
-    checkpoint = load_checkpoint(source, mmap=True) if source is not None else None
-    overrides = HydraConfig.get().overrides.task if source is not None else []
-    effective_config = resolve_input_recipe(
-        cfg, overrides=overrides, saved_config=None if checkpoint is None else checkpoint.effective_config,
-    )
-    with open_dict(effective_config):
-        effective_config.resume_from = source
-        # Resume writes into this invocation's directory, never the source run.
-        effective_config.workspace.output_dir = cfg.workspace.output_dir
-    assemble_policy_config(effective_config)
-    validate_config(effective_config)
-    if checkpoint is None:
-        from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
-        prepare_initialization(effective_config)
-    return effective_config, checkpoint
+    if cfg.get("resume_from") is not None:
+        raise ValueError("Use python -m dexmani_policy.training.common.resume --run <run>")
+    assemble_policy_config(cfg)
+    validate_config(cfg)
+    from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
+    prepare_initialization(cfg)
+    return cfg, None
 
 
 def validate_config(cfg):
@@ -83,9 +72,6 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
 def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
     """Resolve fresh or saved dataset paths without opening data or importing models."""
     cfg = load_policy_config(config_name, overrides)
-    source = resolve_resume_source(cfg.get("resume_from"))
-    saved = load_checkpoint(source, mmap=True).effective_config if source is not None else None
-    cfg = resolve_input_recipe(cfg, overrides=overrides, saved_config=saved)
     return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
 
 

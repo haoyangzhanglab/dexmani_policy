@@ -139,7 +139,7 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
   --override 'task_name=<task>' adaptac
 
 # 正式续训由 checkpoint 拥有配方，不再次传 tactile 或 normalization override
-bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/<run>'
+python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>/<run>
 ```
 
 `test_tools/smoke_test.py` 提供配置、数据 batch、短训和 checkpoint 续训检查。数据模式检查训练与验证 split 的核心形状及有限值，打印各字段的 shape/dtype，不额外拟合 normalizer。训练模式复用 `PolicyTrainer`，检查参数更新、checkpoint 保存加载和续训步数。

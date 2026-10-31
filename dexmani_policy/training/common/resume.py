@@ -1,96 +1,67 @@
-import copy
-import errno
-import os
-import shutil
+"""Resume latest.pt in its original run using only explicit execution settings."""
+
+import argparse
 from pathlib import Path
 
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.config import PROJECT_ROOT
-from dexmani_policy.common.experiments import discover_milestone_checkpoints
-from dexmani_policy.common.io_util import atomic_path
-
-RESUME_OPERATIONAL_FIELDS = {
-    "resume_from",
-    "workspace.output_dir",
-    "workspace.wandb_cfg",
-    "training.device",
-    "training.loop.log_interval_steps",
-    "dataloader.num_workers",
-    "dataloader.persistent_workers",
-    "dataloader.prefetch_factor",
-}
-POLICY_RESUME_FIELDS = RESUME_OPERATIONAL_FIELDS | {
-    "max_updates", "training.use_compile", "training.compile_mode",
-}
+from dexmani_policy.common.checkpoint import load_checkpoint
+from dexmani_policy.common.config import positive_int, set_project_root
 
 
-def resolve_resume_source(source):
-    if source is None:
-        return None
-    path = PROJECT_ROOT / Path(source).expanduser()
-    if path.is_dir():
-        path = path / "checkpoints" / "latest.pt"
-    path = path.resolve(strict=True)
-    if not path.is_file():
-        raise ValueError(f"Resume source must be a checkpoint file: {path}")
-    return str(path)
+def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
+                   use_compile=None, compile_mode=None, wandb=False, zarr_path=None):
+    directory = Path(run).expanduser().resolve(strict=True)
+    source = directory / "checkpoints" / "latest.pt"
+    checkpoint = load_checkpoint(source, mmap=True)
+    cfg = OmegaConf.create(checkpoint.effective_config)
+    if not OmegaConf.is_dict(cfg.dataset.split_manifest):
+        raise ValueError("Resume requires the actual saved split indices")
+    with open_dict(cfg):
+        cfg.resume_from = str(source)
+        cfg.workspace.output_dir = str(directory)
+        cfg.pop("max_updates", None)
+        if not wandb:
+            cfg.workspace.wandb_cfg = None
+        if device is not None:
+            cfg.training.device = device
+        if num_workers is not None:
+            if num_workers < 0:
+                raise ValueError("num_workers must be nonnegative")
+            cfg.dataloader.num_workers = num_workers
+        if log_interval is not None:
+            cfg.training.loop.log_interval_steps = positive_int(log_interval, "log_interval")
+        if use_compile is not None:
+            cfg.training.use_compile = use_compile
+        if compile_mode is not None:
+            cfg.training.compile_mode = compile_mode
+        if zarr_path is not None:
+            cfg.zarr_path = str(Path(zarr_path).expanduser().resolve(strict=True))
+            cfg.dataset.zarr_path = cfg.zarr_path
+    return cfg, checkpoint
 
 
-def resolve_input_recipe(cfg, *, overrides, saved_config=None, operational_fields=POLICY_RESUME_FIELDS):
-    """Use the saved recipe on resume, applying only explicit operational/location overrides."""
-    from hydra.core.override_parser.overrides_parser import OverridesParser
-
-    if saved_config is None:
-        return copy.deepcopy(cfg)
-    result = OmegaConf.create(saved_config)
-    if not OmegaConf.is_dict(result.dataset.get("split_manifest")):
-        raise ValueError("Resume requires an embedded dataset.split_manifest")
-    with open_dict(result):
-        # The execution limit belongs to this invocation.
-        result.pop("max_updates", None)
-        for override in OverridesParser.create().parse_overrides(list(overrides)):
-            key = override.key_or_group
-            if key.startswith("hydra."):
-                continue
-            if override.is_delete() or override.is_sweep_override():
-                raise ValueError(f"Unsupported resume override: {override.input_line}")
-            if key == "task_name":
-                requested, identity = override.value(), result.get("task_name")
-                if requested != identity:
-                    raise ValueError(
-                        f"Resume task identity mismatch: requested={requested!r}, saved={identity!r}"
-                    )
-                continue
-            if (
-                key not in operational_fields
-                and not key.startswith("workspace.wandb_cfg.")
-                and key != "dataset.zarr_path"
-            ):
-                raise ValueError(
-                    f"Resume recipe is owned by saved config; forbidden override: {key}"
-                )
-            if key == "resume_from":
-                continue
-            OmegaConf.update(result, key, override.value(), merge=False, force_add=True)
-        result.resume_from = cfg.get("resume_from")
-    return result
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run", required=True)
+    parser.add_argument("--device")
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--log-interval", type=int)
+    parser.add_argument("--max-updates", type=int)
+    parser.add_argument("--compile", dest="use_compile", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--compile-mode")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--zarr-path")
+    args = parser.parse_args(argv)
+    set_project_root()
+    options = vars(args).copy()
+    max_updates = options.pop("max_updates")
+    if max_updates is not None:
+        positive_int(max_updates, "max_updates")
+    cfg, checkpoint = prepare_resume(**options)
+    from dexmani_policy.train import run_training
+    run_training(cfg, checkpoint=checkpoint, max_updates=max_updates)
 
 
-def archive_resume_milestones(source, destination, *, max_step):
-    """Preserve this experiment's milestone files up to the resume point."""
-    directory = Path(source).resolve(strict=True).parent.parent
-    target = Path(destination) / "checkpoints"
-    target.mkdir(parents=True, exist_ok=True)
-    for candidate in discover_milestone_checkpoints(directory):
-        if candidate.global_step > max_step:
-            continue
-        path = target / candidate.path.name
-        with atomic_path(path, overwrite=False) as temporary:
-            temporary.unlink()
-            try:
-                os.link(candidate.path, temporary)
-            except OSError as error:
-                if error.errno != errno.EXDEV:
-                    raise
-                shutil.copyfile(candidate.path, temporary)
+if __name__ == "__main__":
+    main()

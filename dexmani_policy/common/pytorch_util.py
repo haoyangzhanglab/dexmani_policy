@@ -34,9 +34,7 @@ def set_rng_state(state: dict[str, Any], device="cpu") -> None:
 
     device = torch.device(device)
     cuda_state = state["torch_cuda"]
-    if (cuda_state is not None) != (device.type == "cuda"):
-        raise ValueError("Checkpoint CUDA RNG state must match the target device type")
-    if cuda_state is not None:
+    if device.type == "cuda" and cuda_state is not None:
         torch.cuda.set_rng_state(cuda_state.cpu(), device=device)
 
     random.setstate(state["python"])

@@ -84,7 +84,7 @@
 | [x] | M1 确定冗余清理 | P2/P3 | 删除无效恢复 hook、闲置属性和采样/脚本转发 | M0 |
 | [x] | M2 配置、数据与归一化 | P1 | 组装一次，Policy 持有 affine，Dataset 无回指/缓存 | M1 |
 | [x] | M3 初始化与 DQ 状态 | P1/P2 | fresh/restore 分开；码本只持运行必需状态 | M2 |
-| [ ] | M4 续训与预训练生命周期 | P1/P2 | 同目录续训、完整恢复、按需导出/诊断 | M2、M3 |
+| [x] | M4 续训与预训练生命周期 | P1/P2 | 同目录续训、完整恢复、按需导出/诊断 | M2、M3 |
 | [ ] | M5 内部观测接口与封装 | P2 | 明确 Tensor 布局、收窄内部协议、展平固定壳层 | M2；相关路径需 M3 |
 | [ ] | M6 评测与部署 | P1/P2 | 简单评测函数、显式选模、同源部署配置 | M3、M4；公开接口切换需实际消费者 |
 | [ ] | M7 工具与文档收尾 | P2/P3 | 远程脚本、smoke、依赖职责和日常文档收敛 | 对应前序批次 |
@@ -245,6 +245,8 @@ M3 完成：fresh 来源移到 initialization，RGB/HF/Uni3D 构造无外部加�
 - 观测预训练 checkpoint 可恢复，显式导出的 encoder 可用于下游 fresh；VQ 无绘图库也能完成训练主流程，显式诊断正常。
 
 **主要文件**：`train.py`、`training/trainer.py`、`training/common/{resume,logging,optimization,data}.py`、`common/{checkpoint,pytorch_util}.py`、`training/pretrain/`。
+
+M4 完成：原目录latest续训及显式运行参数入口上线；退出override白名单/历史搬运/epoch与EMA镜像计数，无用EMA compile退出；日志仅超恢复点时备份截尾。AFRO/CordViP周期仅保存resume、结束/显式导出encoder；VQ诊断/绘图改显式分析。CPU主训练9步vs3+恢复的raw/EMA/optimizer/scheduler/RNG逐值一致，日志step/备份/fresh拒绝/实际SIGTERM恢复共4项通过；AFRO/CordViP真实4vs2+2（跨epoch/累积/尾batch）及删数据后导出逐值一致；禁止matplotlib的VQ两epoch训练与显式分析出图通过。未验证CUDA/跨设备optimizer与编译逐位重放。checkpoint格式已收敛，旧实验使用旧提交读取。
 
 ### M5：明确内部输入，撤掉无实际生产者的协议
 

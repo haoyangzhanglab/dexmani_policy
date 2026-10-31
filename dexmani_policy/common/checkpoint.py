@@ -10,13 +10,11 @@ if TYPE_CHECKING:
 
 @dataclass
 class Checkpoint:
-    epoch: int
     global_step: int
     model_state: dict[str, Any]
     ema_model_state: dict[str, Any] | None
     optimizer_state: dict[str, Any]
     scheduler_state: dict[str, Any]
-    ema_updater_step: int | None
     rng_state: dict[str, Any]
     effective_config: dict[str, Any]
 

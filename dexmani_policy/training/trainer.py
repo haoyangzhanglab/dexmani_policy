@@ -25,7 +25,6 @@ from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
 from dexmani_policy.training.common.optimization import build_optimizer, build_scheduler
-from dexmani_policy.training.common.resume import archive_resume_milestones
 from dexmani_policy.training.common.signals import training_signal_handlers
 
 
@@ -97,7 +96,7 @@ class PolicyTrainer:
             # Assignment replaces Parameters; restore before constructing the optimizer.
             model.load_state_dict(checkpoint.model_state, strict=True, assign=True)
             if ema_model is not None:
-                if checkpoint.ema_model_state is None or checkpoint.ema_updater_step is None:
+                if checkpoint.ema_model_state is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
         model.to(device)
@@ -119,7 +118,7 @@ class PolicyTrainer:
         self.max_grad_norm = cfg.training.get("max_grad_norm", 1.0)
         self.use_bfloat16 = cfg.training.get("use_bfloat16", False)
         self.batches_per_epoch = self.train_loader.batch_sampler.batches_per_epoch
-        self.current_epoch = self.global_step = 0
+        self.global_step = 0
 
         if checkpoint is not None:
             groups, saved = self.optimizer.param_groups, checkpoint.optimizer_state["param_groups"]
@@ -131,20 +130,16 @@ class PolicyTrainer:
             self.optimizer.load_state_dict(checkpoint.optimizer_state)
             self.scheduler.load_state_dict(checkpoint.scheduler_state)
             if ema_updater is not None:
-                ema_updater.optimization_step = checkpoint.ema_updater_step
+                ema_updater.optimization_step = checkpoint.global_step
             self.global_step = checkpoint.global_step
-            self.current_epoch, _ = epoch_position(
-                self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
-            )
             if self.global_step > self.total_train_steps:
                 raise ValueError("Checkpoint global_step exceeds the training budget")
 
         self.trainable_parameters = [
             param for group in self.optimizer.param_groups for param in group["params"]
         ]
-        self.last_grad_norm = self.last_clip_ratio = None
+        self.last_grad_norm = None
         self.stop_requested = False
-        self.step_pbar = None
         self.last_checkpoint_step = None
         self.milestone_steps = milestone_steps(self.total_train_steps)
 
@@ -152,13 +147,9 @@ class PolicyTrainer:
         print_training_recipe(
             self.cfg, batches_per_epoch=self.batches_per_epoch, samples_per_epoch=len(dataset)
         )
-        self.logger = ExperimentLogger(**cfg.workspace)
+        self.logger = ExperimentLogger(**cfg.workspace, resume_step=None if checkpoint is None else checkpoint.global_step)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
-            if checkpoint is not None:
-                archive_resume_milestones(
-                    cfg.resume_from, self.logger.output_dir, max_step=checkpoint.global_step,
-                )
             self.logger.save_config(self.cfg)
             if checkpoint is not None:
                 set_rng_state(checkpoint.rng_state, device=device)
@@ -166,10 +157,18 @@ class PolicyTrainer:
             self.logger.close()
             raise
 
+    @property
+    def current_epoch(self):
+        return epoch_position(self.global_step, self.batches_per_epoch,
+                              self.gradient_accumulation_steps)[0]
+
     def compile_models(self):
         if self.cfg.training.get("use_compile", False):
             mode = self.cfg.training.get("compile_mode", "reduce-overhead")
-            for model in (self.model, self.ema_model):
+            models = [self.model]
+            if self.model.requires_ema_for_loss:
+                models.append(self.ema_model)
+            for model in models:
                 if model is not None:
                     model.compile_backbone(mode=mode)
 
@@ -181,7 +180,6 @@ class PolicyTrainer:
             self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.trainable_parameters, self.max_grad_norm, error_if_nonfinite=True
             ).detach()
-            self.last_clip_ratio = self.last_grad_norm / self.max_grad_norm
         else:
             finite = [
                 torch.isfinite(p.grad).all() for p in self.model.parameters() if p.grad is not None
@@ -227,7 +225,6 @@ class PolicyTrainer:
         if self.last_checkpoint_step == global_step:
             return
         checkpoint = Checkpoint(
-            epoch=self.current_epoch,
             global_step=global_step,
             model_state=policy_state_dict(self.model),
             ema_model_state=(
@@ -236,9 +233,6 @@ class PolicyTrainer:
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             effective_config=cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True)),
-            ema_updater_step=(
-                self.ema_updater.optimization_step if self.ema_updater is not None else None
-            ),
             rng_state=get_rng_state(self.device),
         )
         tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
@@ -260,14 +254,14 @@ class PolicyTrainer:
         )
         self.stop_requested = True
 
-    def log_step(self, group_metrics, samples, elapsed, data_wait):
+    def log_step(self, group_metrics, samples, elapsed, data_wait, pbar):
         metrics = {
             "train/lr": self.scheduler.get_last_lr()[0],
             "train/epoch": self.current_epoch,
         }
         if self.last_grad_norm is not None:
             metrics.update(
-                {"train/grad_norm": self.last_grad_norm, "train/clip_ratio": self.last_clip_ratio}
+                {"train/grad_norm": self.last_grad_norm, "train/clip_ratio": self.last_grad_norm / self.max_grad_norm}
             )
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
         metrics = to_log_scalars(metrics)
@@ -277,14 +271,14 @@ class PolicyTrainer:
             "train/samples_per_sec": samples / elapsed,
             "train/samples_per_step": samples,
         })
-        if self.step_pbar is not None:
-            self.step_pbar.set_postfix(
+        if pbar is not None:
+            pbar.set_postfix(
                 loss=f"{metrics['train/loss']:.5f}",
                 step=f"{self.global_step:,}",
                 lr=f"{metrics['train/lr']:.2e}",
                 refresh=False,
             )
-            self.step_pbar.update(self.global_step - self.step_pbar.n)
+            pbar.update(self.global_step - pbar.n)
         self.logger.log(metrics, step=self.global_step)
 
     def train(self, *, max_updates=None):
@@ -306,15 +300,15 @@ class PolicyTrainer:
             self.ema_model.eval()
 
         self.stop_requested = False
-        with training_signal_handlers(self.signal_handler):
-            self.step_pbar = tqdm(
-                initial=self.global_step,
-                total=self.total_train_steps,
-                desc="Steps",
-                position=0,
-                mininterval=5.0,
-                miniters=1,
-            )
+        self.model.train()
+        with training_signal_handlers(self.signal_handler), tqdm(
+            initial=self.global_step,
+            total=self.total_train_steps,
+            desc="Steps",
+            position=0,
+            mininterval=5.0,
+            miniters=1,
+        ) as pbar:
 
             iterator = None
             try:
@@ -323,7 +317,6 @@ class PolicyTrainer:
                         self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
                     )
                     self.train_loader.batch_sampler.set_epoch(epoch, start_batch)
-                    self.model.train()
                     self.optimizer.zero_grad(set_to_none=True)
 
                     num_batches = self.batches_per_epoch
@@ -334,7 +327,6 @@ class PolicyTrainer:
                     for group_start in range(
                         start_batch, num_batches, self.gradient_accumulation_steps
                     ):
-                        self.current_epoch = epoch
                         group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
                         record_group = (self.global_step + 1) % self.log_interval_steps == 0
                         group_metric_sums: dict[str, torch.Tensor | float] = {}
@@ -356,15 +348,13 @@ class PolicyTrainer:
                         if record_group:
                             accumulate_metrics(group_metric_sums, log_dict)
                         self.global_step += 1
-                        if group_start + group_size == num_batches:
-                            self.current_epoch = epoch + 1
                         if record_group:
                             group_metrics = {
                                 key: value / group_size
                                 for key, value in group_metric_sums.items()
                             }
                             self.log_step(
-                                group_metrics, group_samples, group_elapsed, group_data_wait
+                                group_metrics, group_samples, group_elapsed, group_data_wait, pbar
                             )
 
                         pct = self.milestone_steps.get(self.global_step)
@@ -377,7 +367,6 @@ class PolicyTrainer:
                         group_data_wait = 0.0
                     iterator = None
 
-                    self.model.eval()
                     if self.stop_requested:
                         break
 
@@ -396,11 +385,10 @@ class PolicyTrainer:
 
                 if iterator is not None:
                     callbacks.append(lambda: close_data_loader(self.train_loader, iterator))
-                if self.step_pbar is not None:
-                    if self.step_pbar.n != self.global_step:
-                        # Show the actual stop step without metrics from an older step.
-                        self.step_pbar.set_postfix({}, refresh=False)
-                        self.step_pbar.n = self.global_step
-                    callbacks.append(self.step_pbar.close)
+                if pbar.n != self.global_step:
+                    # Show the actual stop step without metrics from an older step.
+                    pbar.set_postfix({}, refresh=False)
+                    pbar.n = self.global_step
 
+                self.model.eval()
                 close_resources(*callbacks)

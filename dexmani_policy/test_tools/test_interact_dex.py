@@ -261,7 +261,7 @@ class InterActDexChecks(unittest.TestCase):
         effective["agent"].update(model.effective_config)
         effective["normalization_dims"] = dims
         effective["normalizer_shapes"] = {key: list(field.scale.shape) for key, field in model.normalizer.fields.items()}
-        checkpoint = Checkpoint(0, 1, model.state_dict(), None, optimizer.state_dict(), {}, None, {}, effective)
+        checkpoint = Checkpoint(1, model.state_dict(), None, optimizer.state_dict(), {}, {}, effective)
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             path = save_checkpoint(Path(directory) / "policy.pt", checkpoint)
             restored = restore_policy(path, use_ema=False, device="cpu")

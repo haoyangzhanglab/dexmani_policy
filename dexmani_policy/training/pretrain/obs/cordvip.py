@@ -3,6 +3,7 @@
 # Source: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
 
 import time
+from pathlib import Path
 
 import hydra
 import torch
@@ -23,7 +24,9 @@ from dexmani_policy.training.common.data import (
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.common.signals import training_signal_handlers
-from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
+from dexmani_policy.training.pretrain.obs.common import (
+    evaluate, export_encoder, load_run, restore_run, save_run,
+)
 
 
 class CordViPPretrain(nn.Module):
@@ -99,7 +102,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace)
+    logger = ExperimentLogger(**cfg.workspace, resume_step=step if checkpoint is not None else None)
     print(f'[CordViP] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, '
           f'batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}')
     stop_requested = False
@@ -165,7 +168,7 @@ def train(cfg, checkpoint=None, max_updates=None):
                     if step >= stop_step or stop_requested:
                         break
                     if step % cfg.training.save_every_updates == 0:
-                        save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+                        save_run(model, optimizer, scheduler, cfg, step)
                     step_start = time.perf_counter()
                     data_wait = 0.0
                 iterator = None
@@ -182,14 +185,15 @@ def train(cfg, checkpoint=None, max_updates=None):
                     )
                     if metrics is not None:
                         logger.log(to_log_scalars(metrics), step)
-            save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+            save_run(model, optimizer, scheduler, cfg, step)
+            export_encoder(model, model.obs_encoder, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
         finally:
             close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():
-    train(*load_run('cordvip', resume_fields={'training.save_every_updates', 'training.val_every_epochs'}))
+    train(*load_run('cordvip'))
 
 
 if __name__ == '__main__':
