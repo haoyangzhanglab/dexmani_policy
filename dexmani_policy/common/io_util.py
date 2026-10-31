@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -29,6 +30,21 @@ def atomic_path(
             os.link(temporary, path)
     finally:
         close_resources(lambda: temporary.unlink(missing_ok=True))
+
+
+def write_json(path, record, *, overwrite=True):
+    with atomic_path(Path(path), overwrite=overwrite) as temporary:
+        temporary.write_text(
+            json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        )
+
+
+def write_failure(path, record):
+    # Preserve the original failure if saving its details also fails.
+    try:
+        write_json(path, record)
+    except BaseException:
+        traceback.print_exc()
 
 
 def close_resources(*callbacks: Callable[[], object]) -> None:

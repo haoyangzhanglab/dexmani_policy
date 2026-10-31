@@ -4,8 +4,8 @@ from pathlib import Path
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.evaluation.artifacts import create_run_directory, write_failure, write_json
-from dexmani_policy.evaluation.rollout import evaluate_policy, load_seed_pool
+from dexmani_policy.common.io_util import write_failure, write_json
+from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy, load_seed_pool
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
 

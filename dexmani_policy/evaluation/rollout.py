@@ -1,15 +1,31 @@
 import os
+import tempfile
 import traceback
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
+
+import torch
 
 from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
 from dexmani_policy.common.config import positive_int, require_tactile_source
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+from dexmani_policy.common.io_util import write_failure, write_json
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.evaluation.artifacts import create_run_directory, runtime_provenance, write_failure, write_json
 from dexmani_policy.evaluation.metrics import summarize_episodes
 from dexmani_policy.evaluation.seeds import validate_seed_pool, validate_evaluation_seed
+
+
+def create_run_directory(root, directory=None):
+    if directory is None:
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=datetime.now().strftime("%Y%m%d_%H%M%S_"), dir=root))
+    directory = Path(directory).expanduser().resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    if any(directory.iterdir()):
+        raise FileExistsError(f"Output directory must be empty: {directory}")
+    return directory
 
 
 def load_seed_pool(cfg):
@@ -58,7 +74,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
         if render_mode == "human" and not os.environ.get("DISPLAY"):
             raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
         set_seed(seed)
-        record["runtime"] = runtime_provenance()
+        record["runtime"] = {"torch": str(torch.__version__), "cuda": torch.version.cuda}
         agent = restore_policy(checkpoint, use_ema=weights == "ema", device=device)
         record["global_step"] = agent.checkpoint_step
         record["runtime"]["parameter_dtypes"] = sorted({str(p.dtype) for p in agent.parameters()})

@@ -1,10 +1,12 @@
 """Selection orchestration tests; these do not claim simulation backend coverage."""
 
 import fcntl
+import io
 import json
 import tempfile
 import unittest
 from dataclasses import replace
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,9 +15,9 @@ from omegaconf import open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint, save_checkpoint
 from dexmani_policy.deployment.metadata import inspect_policy
-from dexmani_policy.evaluation.artifacts import write_json
+from dexmani_policy.common.io_util import write_json
 from dexmani_policy.evaluation.selection import candidate_score, run_pipeline
-from dexmani_policy.evaluation.rollout import evaluate_policy
+from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy
 from dexmani_policy.test_tools import test_training_resume
 from dexmani_policy.train import run_training
 
@@ -130,6 +132,42 @@ class EvaluationChecks(unittest.TestCase):
             return {'statistics': {'success_rate': rate, 'avg_steps': steps}, 'global_step': step}
         values = [candidate(0.5, None, 9), candidate(0.5, 8, 4), candidate(0.5, 8, 6)]
         self.assertIs(max(values, key=candidate_score), values[2])
+
+    def test_output_isolation_and_atomic_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = create_run_directory(root)
+            second = create_run_directory(root)
+            self.assertNotEqual(first, second)
+            self.assertEqual(create_run_directory(root, second), second)
+            path = first / 'result.json'
+            write_json(path, {'value': 1}, overwrite=False)
+            original = path.read_bytes()
+            with self.assertRaises(ValueError):
+                write_json(path, {'value': float('nan')})
+            with self.assertRaises(FileExistsError):
+                write_json(path, {'value': 2}, overwrite=False)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse(list(first.glob('.dexmani-publish-*')))
+            with self.assertRaises(FileExistsError):
+                create_run_directory(root, first)
+
+    def test_failure_details_write_does_not_replace_original_exception(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / 'run'
+            cfg = test_training_resume.TrainingResumeChecks().make_config(root, run)
+            run_training(cfg, max_updates=1)
+            original = RuntimeError('original restore failure')
+            stderr = io.StringIO()
+            with patch('dexmani_policy.evaluation.rollout.restore_policy', side_effect=original), \
+                 patch('dexmani_policy.common.io_util.write_json', side_effect=OSError('details write failure')), \
+                 redirect_stderr(stderr):
+                with self.assertRaises(RuntimeError) as caught:
+                    evaluate_policy(run / 'checkpoints/latest.pt', weights='raw', seeds=[1],
+                                    device='cpu', output_dir=run / 'failed-write')
+            self.assertIs(caught.exception, original)
+            self.assertIn('details write failure', stderr.getvalue())
 
     def test_inspect_selectors_and_checkpoint_path_limits(self):
         with tempfile.TemporaryDirectory() as temporary:
