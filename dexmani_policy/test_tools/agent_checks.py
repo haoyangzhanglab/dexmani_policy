@@ -16,9 +16,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import zarr
 
+from dexmani_policy.agents.action_decoders.action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
-from dexmani_policy.agents.action_decoders.backbones.sat import SAT
+from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, DiTX
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
@@ -107,8 +107,9 @@ def check_time(device):
 
 def check_precision(device):
     models = (
-        (SAT(16, 19, 2, 256, hidden_dim=32, n_head=4, n_layers=1, p_drop_attn=0.0),
-         "blocks", (2, 16, 19), (2, 194, 256)),
+        (DiTX(16, 19, 2, 256, hidden_dim=32, n_head=4, n_layers=1, p_drop_attn=0.0,
+              qkv_bias=True, qk_norm=True, action_io=SATActionIO(16, 32)),
+         "ditx_blocks", (2, 16, 19), (2, 194, 256)),
         (DiT(4, 3, 16, n_emb=32, num_heads=4, n_layers=1), "blocks", (2, 4, 3), (2, 16)),
         (ConsistencyDiTX(4, 3, 2, 16, hidden_dim=32, n_head=4, n_layers=1),
          "ditx_blocks", (2, 4, 3), (2, 4, 16)),

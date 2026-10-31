@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# SAT：共享 spatial observation，每个关节的完整轨迹形成一个结构化动作 token。
+# SAT 动作表示 + DiTX-8 的本地适配；保留共享 spatial observation 和标准 flow。
 
 policy_name: sat
 
@@ -62,7 +62,9 @@ agent:
   n_head: 8
   mlp_ratio: 4.0
   p_drop_attn: 0.0
-  timestep_embed_dim: 256
+  qkv_bias: true
+  qk_norm: true
+  timestep_embed_dim: 128
 
   num_inference_steps: 10
 

@@ -174,6 +174,7 @@ class DiTX(nn.Module):
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
         qk_norm: bool = False,
+        action_io: nn.Module | None = None,
     ) -> None:
         super().__init__()
         positive_int(n_obs_steps, "n_obs_steps")
@@ -184,8 +185,10 @@ class DiTX(nn.Module):
         self.obs_token_dim = obs_token_dim
         self.hidden_dim = hidden_dim
 
-        self.input_embedder = nn.Linear(action_dim, hidden_dim)
-        self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
+        self.action_io = action_io
+        if self.action_io is None:
+            self.input_embedder = nn.Linear(action_dim, hidden_dim)
+            self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.timestep_embedder = TimestepMLP(timestep_embed_dim, hidden_dim)
@@ -200,11 +203,15 @@ class DiTX(nn.Module):
             )
             for _ in range(n_layers)
         )
-        self.final_layer = DiTXOutput(hidden_dim, action_dim)
+        if self.action_io is None:
+            self.final_layer = DiTXOutput(hidden_dim, action_dim)
         self.initialize_weights()
 
     def initialize_weights(self) -> None:
-        self.apply(initialize_linear)
+        # Action I/O owns its initialization, including the zero velocity head.
+        for module in self.children():
+            if module is not self.action_io:
+                module.apply(initialize_linear)
         for block in self.ditx_blocks:
             nn.init.xavier_uniform_(block.self_attn.in_proj_weight)
             if block.self_attn.in_proj_bias is not None:
@@ -212,14 +219,16 @@ class DiTX(nn.Module):
             nn.init.zeros_(block.adaln_modulation[-1].weight)
             nn.init.zeros_(block.adaln_modulation[-1].bias)
 
-        nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
-        nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
+        if self.action_io is None:
+            nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
+            nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
         nn.init.normal_(self.context_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.zeros_(self.context_frame_pos_embed)
         for layer in self.timestep_embedder.net:
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
-        nn.init.zeros_(self.final_layer.ffn_final.fc2.weight)
+        if self.action_io is None:
+            nn.init.zeros_(self.final_layer.ffn_final.fc2.weight)
 
     def embed_context(self, context):
         tokens = self.context_embedder(context)
@@ -243,8 +252,11 @@ class DiTX(nn.Module):
         timestep = batch_timesteps(timestep, x, dtype=torch.float32)
         time_c = self.timestep_embedder(timestep)
 
-        x = self.input_embedder(x)
-        x = x + self.input_pos_embed.to(dtype=x.dtype)
+        if self.action_io is None:
+            x = self.input_embedder(x)
+            x = x + self.input_pos_embed.to(dtype=x.dtype)
+        else:
+            x = self.action_io.encode(x)
         for index, block in enumerate(self.ditx_blocks):
             x = block(
                 x,
@@ -252,7 +264,9 @@ class DiTX(nn.Module):
                 context_c,
                 context_kv=None if context_kv is None else context_kv[index],
             )
-        return self.final_layer(x, return_features=return_features)
+        if self.action_io is None:
+            return self.final_layer(x, return_features=return_features)
+        return self.action_io.decode_velocity(x, return_features=return_features)
 
 
 class ConsistencyDiTX(nn.Module):

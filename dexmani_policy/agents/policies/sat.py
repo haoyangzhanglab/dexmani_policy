@@ -1,8 +1,9 @@
-"""Structural action tokens with flow matching and shared spatial observations."""
+"""SAT action representation with shared DiTX and standard flow matching."""
 
 from __future__ import annotations
 
-from dexmani_policy.agents.action_decoders.backbones.sat import SAT
+from dexmani_policy.agents.action_decoders.action_io import SATActionIO
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
@@ -30,12 +31,14 @@ class SATPolicy(BasePolicy):
         n_head: int = 8,
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.0,
-        timestep_embed_dim: int = 256,
+        timestep_embed_dim: int = 128,
         num_inference_steps: int = 10,
         modality_dropout_probs: dict | None = None,
+        qkv_bias: bool = True,
+        qk_norm: bool = True,
     ) -> None:
-        if n_obs_steps != 2 or action_dim != 19:
-            raise ValueError("SAT requires n_obs_steps=2 and joint action_dim=19")
+        if n_obs_steps != 2 or action_dim != 19 or hidden_dim % 4:
+            raise ValueError("SAT requires n_obs_steps=2, joint action_dim=19 and hidden_dim divisible by 4")
         obs_encoder = SpatialObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -47,7 +50,7 @@ class SATPolicy(BasePolicy):
             fusion_stage=fusion_stage,
             semantic_pool_sigma=semantic_pool_sigma,
         )
-        backbone = SAT(
+        backbone = DiTX(
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,
@@ -58,6 +61,9 @@ class SATPolicy(BasePolicy):
             n_head=n_head,
             mlp_ratio=mlp_ratio,
             p_drop_attn=p_drop_attn,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            action_io=SATActionIO(horizon, hidden_dim),
         )
         action_decoder = RectifiedFlow(
             model=backbone,
