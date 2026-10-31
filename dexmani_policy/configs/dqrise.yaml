@@ -10,14 +10,6 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 
-normalization:
-  joint_state: limits
-  action: auto
-  point_cloud: identity  # 保留 XYZ 物理坐标。
-  rgb: identity
-  camera_intrinsic: identity
-  camera_extrinsic: identity
-
 tcp_dim: 7
 
 initialization:

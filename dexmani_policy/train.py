@@ -1,19 +1,24 @@
 """Train a policy on one device, optionally restoring the full training state."""
 
 import os
+import sys
 from contextlib import closing
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 
-from dexmani_policy.common.config import assemble_policy_config, register_resolvers, set_project_root
+from dexmani_policy.common.config import set_project_root
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.training.common.config import prepare_training
+from dexmani_policy.training.common.config import (
+    assemble_policy_config, prepare_training, register_resolvers, validate_config_cli, validate_config_sources,
+)
 from dexmani_policy.training.common.data import build_dataset
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
 @hydra.main(version_base=None, config_path="configs")
 def _train(cfg):
+    validate_config_sources(HydraConfig.get())
     cfg = prepare_training(assemble_policy_config(cfg))
     run_training(cfg, max_updates=cfg.get("max_updates"))
 
@@ -28,6 +33,7 @@ def run_training(cfg, *, checkpoint=None, max_updates=None):
 
 
 def main():
+    validate_config_cli(sys.argv[1:])
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     register_resolvers()
     set_project_root()

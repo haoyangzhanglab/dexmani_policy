@@ -1,8 +1,19 @@
+import json
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
+from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
+
+
+def read_split_manifest(value):
+    if isinstance(value, (str, Path)):
+        return json.loads(Path(value).expanduser().read_text())
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)
+    return value
 
 
 def validate_episode_metadata(metadata, count):

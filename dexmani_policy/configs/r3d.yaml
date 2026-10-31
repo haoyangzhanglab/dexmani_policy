@@ -16,8 +16,6 @@ use_aux_ee: false  # 启用时要求 action_key=action，末端姿态仅作辅�
 
 normalization:
   joint_state: limits
-  action: auto
-  point_cloud: limits
 
 dataloader:
   batch_size: 128

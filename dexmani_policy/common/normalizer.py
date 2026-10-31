@@ -3,6 +3,15 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
+
+
+def normalization_feature_shapes(dims):
+    return {
+        key: FIELD_FEATURE_SHAPES.get(key, (width,))
+        for key, width in dims.items()
+    }
+
 
 class FieldNormalizer(nn.Module):
     def __init__(self, scale, offset):

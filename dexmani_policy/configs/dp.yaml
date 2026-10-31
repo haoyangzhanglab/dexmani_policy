@@ -15,8 +15,6 @@ n_action_steps: 8
 
 normalization:
   joint_state: limits
-  action: auto
-  rgb: identity
 
 dataloader:
   batch_size: 64

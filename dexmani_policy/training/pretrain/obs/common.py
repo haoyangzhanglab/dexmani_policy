@@ -6,7 +6,8 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.config import load_policy_config, positive_int
+from dexmani_policy.common.config import positive_int
+from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
@@ -15,7 +16,7 @@ from dexmani_policy.training.common.logging import accumulate_metrics
 
 def load_run(method):
     parser = argparse.ArgumentParser(description=f"Pretrain the {method} observation encoder")
-    parser.add_argument("--config")
+    parser.add_argument("--config", help="Config name or relative path under dexmani_policy/configs")
     parser.add_argument("--output-dir")
     parser.add_argument("--resume-from")
     parser.add_argument("--device")

@@ -6,9 +6,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from dexmani_policy.common.checkpoint import load_checkpoint
-from dexmani_policy.common.config import load_policy_config, positive_int, set_project_root
+from dexmani_policy.common.config import positive_int, set_project_root
 from dexmani_policy.train import run_training
-from dexmani_policy.training.common.config import prepare_training
+from dexmani_policy.training.common.config import load_policy_config, prepare_training
 from dexmani_policy.training.common.resume import prepare_resume
 
 
@@ -25,7 +25,7 @@ def smoke_output(output_dir):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", help="One Hydra config name or YAML path")
+    parser.add_argument("config", help="One config name or relative path under dexmani_policy/configs")
     parser.add_argument("--override", action="append", default=[], help="Repeatable Hydra override")
     parser.add_argument("--device")
     parser.add_argument("--output-dir", type=Path)

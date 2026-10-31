@@ -12,7 +12,6 @@ n_action_steps: 8
 
 normalization:
   joint_state: limits
-  action: auto
   point_cloud: identity  # XYZ 保留物理坐标，RGB 保持 [0, 1]。
 
 dataloader:

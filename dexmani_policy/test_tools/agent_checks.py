@@ -23,6 +23,7 @@ from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.dp3 import DP3Policy
 from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
+from dexmani_policy.common.pytorch_util import get_rng_state
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.codebook import deployment_diagnostics, export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
@@ -279,7 +280,7 @@ def check_codebook_pipeline(device):
             model_config=model.model_config, model_state_dict=model.state_dict(), epoch=1,
             metrics={"val_lookup_mse": metrics["lookup_mse"]},
             normalizer_state_dict={"fields.hand.scale": torch.ones(12), "fields.hand.offset": torch.zeros(12)},
-            split_metadata=dict(normalization_spec={"action": "auto"}, hand_data={"action_key": "action"},
+            split_metadata=dict(normalization_spec={"action": "limits"}, hand_data={"action_key": "action"},
                                 split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
         ), checkpoint)
         table, metadata = export_codebook(checkpoint, artifact)
@@ -314,7 +315,7 @@ def check_codebook_pipeline(device):
         )
         policy = DQRISEPolicy(**policy_config)
         spec = dict(joint_state="limits", point_cloud="identity", rgb="identity",
-                    camera_intrinsic="identity", camera_extrinsic="identity", action="auto")
+                    camera_intrinsic="identity", camera_extrinsic="identity", action="limits")
         dims = dict(joint_state=19, point_cloud=3, rgb=3,
                     camera_intrinsic=9, camera_extrinsic=12, action=19)
         policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
@@ -370,13 +371,23 @@ def check_codebook_pipeline(device):
             normalization_dims=dims,
             normalizer_shapes={key: tuple(field.scale.shape) for key, field in policy.normalizer.fields.items()},
         )
-        save_checkpoint(saved, Checkpoint(
+        checkpoint = Checkpoint(
             global_step=1, model_state=policy.state_dict(), ema_model_state=ema.state_dict(),
             optimizer_state={}, scheduler_state={}, rng_state={}, effective_config=effective,
-        ))
+        )
+        save_checkpoint(saved, checkpoint)
         artifact.unlink()
         for use_ema, expected in ((False, policy), (True, ema)):
+            before_rng = get_rng_state(device)
             restored = restore_policy(saved, use_ema=use_ema, device=device)
+            after_rng = get_rng_state(device)
+            assert before_rng["python"] == after_rng["python"]
+            assert before_rng["numpy"][0] == after_rng["numpy"][0]
+            assert (before_rng["numpy"][1] == after_rng["numpy"][1]).all()
+            assert before_rng["numpy"][2:] == after_rng["numpy"][2:]
+            torch.testing.assert_close(before_rng["torch"], after_rng["torch"], rtol=0, atol=0)
+            if device.type == "cuda":
+                torch.testing.assert_close(before_rng["torch_cuda"], after_rng["torch_cuda"], rtol=0, atol=0)
             for key, value in expected.state_dict().items():
                 torch.testing.assert_close(restored.state_dict()[key], value, rtol=0, atol=0)
             expected_prediction = expected.predict_action(
@@ -386,6 +397,20 @@ def check_codebook_pipeline(device):
                 obs, generator=torch.Generator(device=device).manual_seed(1024),
             )["future_actions"]
             torch.testing.assert_close(actual_prediction, expected_prediction, rtol=0, atol=0)
+        checkpoint.model_state = dict(checkpoint.model_state)
+        checkpoint.ema_model_state = dict(checkpoint.ema_model_state)
+        key = next(iter(checkpoint.model_state))
+        del checkpoint.model_state[key]
+        del checkpoint.ema_model_state[key]
+        invalid = Path(directory) / "incomplete.pt"
+        save_checkpoint(invalid, checkpoint)
+        for use_ema in (False, True):
+            try:
+                restore_policy(invalid, use_ema=use_ema, device=device)
+            except RuntimeError as error:
+                assert "Missing key(s)" in str(error)
+            else:
+                raise AssertionError("Inference accepted an incomplete policy state")
 
 
 def check_policies(device):
@@ -394,7 +419,7 @@ def check_policies(device):
                   down_dims=(32, 64), diffusion_step_embed_dim=32, n_groups=8,
                   num_training_steps=10, num_inference_steps=2)
     policy = DP3Policy(**kwargs)
-    spec = dict(joint_state="limits", point_cloud="identity", action="auto")
+    spec = dict(joint_state="limits", point_cloud="identity", action="limits")
     dims = dict(joint_state=19, point_cloud=3, action=19)
     policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
     policy.to(device)

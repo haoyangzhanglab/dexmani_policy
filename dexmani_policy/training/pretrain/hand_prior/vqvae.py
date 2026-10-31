@@ -15,15 +15,16 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
 from dexmani_policy.agents.hand_prior.codebook import (
-    codebook_chunk_size, codebook_distances, validate_dq_normalization, validate_hand_coordinates,
+    codebook_chunk_size, codebook_distances, validate_hand_coordinates,
 )
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import load_policy_config, positive_int, read_split_manifest
+from dexmani_policy.common.config import positive_int
+from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
-from dexmani_policy.datasets.split import split_episodes
+from dexmani_policy.datasets.split import read_split_manifest, split_episodes
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
@@ -45,7 +46,6 @@ def prepare_hand_data(cfg):
     if cfg.get("resume_from") is not None:
         raise ValueError("VQ pretraining does not support resume_from")
     spec = cfg.normalization
-    validate_dq_normalization(spec)
     if cfg.dataset.action_key != "action":
         raise ValueError("VQ pretraining requires arm7+hand12 joint commands")
     buffer = EpisodeStore(cfg.dataset.zarr_path, keys=["action"])
@@ -272,7 +272,7 @@ def train(cfg):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="pretrain/hand_prior/vqvae", help="Hydra config name or YAML path")
+    parser.add_argument("--config", default="pretrain/hand_prior/vqvae", help="Config name or relative path under dexmani_policy/configs")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. vq_vae.device=cpu")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")

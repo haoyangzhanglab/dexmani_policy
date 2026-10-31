@@ -19,9 +19,10 @@ from dexmani_policy.agents.obs_encoder.interaction.gated_tactile_fusion import G
 from dexmani_policy.agents.obs_encoder.interaction.scene_aggregator import sample_region_seeds
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import index_points
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
-from dexmani_policy.common.config import load_policy_config, validate_future_force_offsets, normalization_feature_shapes
+from dexmani_policy.common.config import validate_future_force_offsets
+from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.datasets.variants.tactile import InterActDexDataset, read_future_force
-from dexmani_policy.training.common.config import validate_config
+from dexmani_policy.training.common.config import load_policy_config, validate_config
 
 
 def sample_cpu_patches(xyz, num_patches, group_size, *args):

@@ -1,18 +1,127 @@
 import argparse
 import copy
 import json
+from datetime import datetime
 from pathlib import Path
 
+import hydra
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
-    load_policy_config,
+    TACTILE_FEATURE_SHAPES,
     positive_int,
     require_tactile_source,
-    validate_action_mode,
-    validate_normalization_config,
 )
+
+CONFIG_ROOT = PROJECT_ROOT / "dexmani_policy" / "configs"
+LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def register_resolvers():
+    OmegaConf.register_new_resolver("run_id", lambda: LAUNCH_ID, replace=True)
+
+
+def config_name(config):
+    path = Path(config)
+    if path.is_absolute() or ".." in path.parts or not str(config) or str(config).startswith("~"):
+        raise ValueError("Config must be a name or relative path under dexmani_policy/configs")
+    name = path.with_suffix("").as_posix() if path.suffix == ".yaml" else path.as_posix()
+    source = (CONFIG_ROOT / f"{name}.yaml").resolve()
+    if not source.is_relative_to(CONFIG_ROOT):
+        raise ValueError("Config must stay under dexmani_policy/configs")
+    if not source.is_file():
+        raise FileNotFoundError(f"Repository config does not exist: {source}")
+    return name
+
+
+def validate_config_cli(arguments):
+    for index, argument in enumerate(arguments):
+        flag, separator, value = argument.partition("=")
+        if flag in {"-cp", "-cd"} or flag.startswith(("--config-p", "--config-d")):
+            raise ValueError("The config root is fixed to dexmani_policy/configs")
+        if flag.lstrip("+~").split("@", 1)[0] == "hydra.searchpath":
+            raise ValueError("hydra.searchpath cannot change the repository config sources")
+        if flag == "-cn" or flag.startswith("--config-n"):
+            if separator:
+                config_name(value)
+            elif index + 1 < len(arguments):
+                config_name(arguments[index + 1])
+
+
+def validate_config_sources(hydra_cfg):
+    if hydra_cfg.searchpath:
+        raise ValueError("hydra.searchpath cannot change the repository config sources")
+
+
+def load_policy_config(config, overrides=()):
+    name = config_name(config)
+    overrides = list(overrides)
+    validate_config_cli(overrides)
+    register_resolvers()
+    with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+        cfg = hydra.compose(config_name=name, overrides=overrides, return_hydra_config=True)
+    validate_config_sources(cfg.hydra)
+    with open_dict(cfg):
+        del cfg.hydra
+    return assemble_policy_config(cfg)
+
+
+def assemble_policy_config(cfg):
+    """Derive fixed recipe fields; YAML only exposes research choices."""
+    if "policy_name" not in cfg:
+        if "vq_vae" in cfg:
+            if cfg.get("normalization"):
+                raise ValueError("VQ action normalization is fixed; remove normalization inputs")
+            with open_dict(cfg):
+                cfg.normalization = {"action": "limits"}
+        return cfg
+    with open_dict(cfg):
+        action_key = cfg.action_key
+        if action_key not in ("action", "action_ee"):
+            raise ValueError("action_key must be action or action_ee")
+        method = cfg.policy_name
+        auxiliary = method == "r3d" and cfg.use_aux_ee
+        if auxiliary and action_key != "action":
+            raise ValueError("R3D auxiliary targets require joint action")
+
+        fixed = {"action": "limits"}
+        if "rgb" in cfg.dataset.sensor_modalities:
+            fixed["rgb"] = "identity"
+        if method == "r3d":
+            fixed["point_cloud"] = "limits"
+        if method in {"sat", "dqrise", "adaptac", "interact-dex"}:
+            fixed["point_cloud"] = "identity"
+        if method in {"sat", "dqrise"}:
+            fixed.update(joint_state="limits", camera_intrinsic="identity", camera_extrinsic="identity")
+        if method == "interact-dex":
+            fixed.update(eef_pose="identity", fingertip_xyz="identity")
+        choices = cfg.get("normalization", {})
+        overlap = fixed.keys() & choices.keys()
+        if overlap:
+            raise ValueError(f"Normalization fields are fixed by the recipe; remove inputs: {sorted(overlap)}")
+        cfg.normalization = {**choices, **fixed}
+
+        cfg.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
+        for key in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
+            cfg.agent[key] = cfg[key]
+        cfg.dataset.update(action_key=action_key, zarr_path=cfg.zarr_path,
+                           horizon=cfg.horizon, obs_horizon=cfg.n_obs_steps,
+                           pad_before=cfg.n_obs_steps - 1, pad_after=cfg.n_action_steps - 1)
+        if method == "r3d":
+            cfg.dataset["_target_"] = ("dexmani_policy.datasets.variants.r3d.R3DDataset" if auxiliary
+                                      else "dexmani_policy.datasets.demonstration.DemonstrationDataset")
+        if "pc_dim" in cfg.agent:
+            cfg.dataset.pc_dim = cfg.agent.pc_dim
+        if "future_force_offsets" in cfg:
+            cfg.agent.future_force_offsets = cfg.future_force_offsets
+            cfg.dataset.future_force_offsets = cfg.future_force_offsets
+        if "tactile_source" in cfg:
+            cfg.agent.tactile_source = cfg.tactile_source
+            cfg.dataset.tactile_source = cfg.tactile_source
+        cfg.env_runner.task_name = cfg.task_name
+        cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
+    return cfg
 
 
 def prepare_training(cfg):
@@ -25,7 +134,17 @@ def prepare_training(cfg):
 
 
 def validate_config(cfg):
-    validate_normalization_config(cfg)
+    spec = cfg.normalization
+    expected = set(cfg.dataset.sensor_modalities) | {"action"}
+    if spec.keys() != expected:
+        raise ValueError(
+            f"Normalization field mismatch: missing={sorted(expected - spec.keys())}, "
+            f"extra={sorted(spec.keys() - expected)}"
+        )
+    for key, mode in spec.items():
+        allowed = {"rms", "max_abs"} if key in TACTILE_FEATURE_SHAPES else {"identity", "limits", "gaussian", "rms", "max_abs"}
+        if mode not in allowed:
+            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected {sorted(allowed)}")
     require_tactile_source(cfg.dataset.sensor_modalities, cfg.get("tactile_source"))
 
     if cfg.get("max_updates") is not None:
@@ -38,7 +157,9 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")
 
-    validate_action_mode(cfg)
+    cls = hydra.utils.get_class(cfg.agent._target_)
+    if cfg.action_key not in cls.supported_action_keys:
+        raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
 
     print("Config validation passed")
 
@@ -74,7 +195,7 @@ def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
 
 def main():
     parser = argparse.ArgumentParser(description="Resolve training dataset paths.")
-    parser.add_argument("--config-name", required=True)
+    parser.add_argument("--config-name", required=True, help="Config name or relative path under dexmani_policy/configs")
     parser.add_argument(
         "--check", action="store_true", help="Require existing dataset directories."
     )

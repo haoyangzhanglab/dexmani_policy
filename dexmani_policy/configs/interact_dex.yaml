@@ -12,10 +12,6 @@ future_force_offsets: [1, 4, 8, 13]
 
 normalization:
   joint_state: limits
-  action: auto
-  point_cloud: identity
-  eef_pose: identity
-  fingertip_xyz: identity
 
 dataloader:
   batch_size: 128

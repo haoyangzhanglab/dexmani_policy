@@ -11,7 +11,6 @@ n_obs_steps: 4
 n_action_steps: 6
 normalization:
   joint_state: limits
-  action: auto
   hand_pointcloud: limits
   object_pointcloud: limits
 dataloader:

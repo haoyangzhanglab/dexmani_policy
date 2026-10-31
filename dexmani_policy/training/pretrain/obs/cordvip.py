@@ -14,7 +14,8 @@ from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordi
     ContactCoordinationEncoder,
 )
 from dexmani_policy.agents.modules import build_mlp
-from dexmani_policy.common.config import positive_int, read_split_manifest
+from dexmani_policy.common.config import positive_int
+from dexmani_policy.datasets.split import read_split_manifest
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed

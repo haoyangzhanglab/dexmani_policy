@@ -29,7 +29,7 @@ python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output O
 
 ## 快速开始
 
-以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。配置位于 `dexmani_policy/configs/`，训练数据默认位于 `robot_data/<task>.zarr`。
+以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。配置只接受 `dexmani_policy/configs/` 下的名称或相对子路径（如 `dp3`、`pretrain/obs/afro`，可带 `.yaml`），不接受外部 YAML、配置根目录切换或 `hydra.searchpath`。训练数据默认位于 `robot_data/<task>.zarr`。
 
 ```bash
 # 用实际数据完成短训、保存和原目录恢复；按硬件设置 batch/worker
@@ -61,7 +61,7 @@ python -m dexmani_policy.eval_pipeline \
 
 配置检查不代表完整训练可运行。续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
-action 归一化由策略和动作表示固定：连续 joint 使用 `auto`（等价 `limits`），EEF 只使用分段 `auto`，rot6d 保持 identity；DQ 和 R3D 辅助目标保留各自规则。`normalization.action=rms/gaussian/max_abs` 等非既定配方会在 fresh 配置边界报错，关闭 clipping 也不能绕过；恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
+动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 
 FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测关闭随机起点、选点噪声和输出 shuffle。
 

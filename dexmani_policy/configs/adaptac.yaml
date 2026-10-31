@@ -14,8 +14,6 @@ n_action_steps: 8
 
 normalization:
   joint_state: limits
-  action: auto
-  point_cloud: identity
 
 dataloader:
   batch_size: 128

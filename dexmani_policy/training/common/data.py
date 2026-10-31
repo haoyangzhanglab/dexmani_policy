@@ -6,10 +6,11 @@ import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, normalization_feature_shapes, read_split_manifest,
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS,
 )
-from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
+from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes, validate_normalizer_state
 from dexmani_policy.datasets.pretrain.common import ObservationPretrainDataset
+from dexmani_policy.datasets.split import read_split_manifest
 
 
 def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
@@ -32,10 +33,10 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
             continue
         normalizer.fit_field(
             key, dataset.iter_normalization_data(key),
-            mode="limits" if mode == "auto" else mode,
+            mode=mode,
             last_n_dims=len(FIELD_FEATURE_SHAPES.get(key, (0,))),
         )
-        if key == "action" and mode == "auto" and dataset.action_key == "action_ee":
+        if key == "action" and dataset.action_key == "action_ee":
             field = normalizer[key]
             if field.scale.numel() <= 9:
                 raise ValueError("action_ee requires xyz, rot6d and hand coordinates")

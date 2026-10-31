@@ -14,12 +14,68 @@ import zarr
 from omegaconf import open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
-from dexmani_policy.common.config import load_policy_config
 from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 from dexmani_policy.train import run_training
-from dexmani_policy.training.common.config import prepare_training
+from dexmani_policy.training.common.config import (
+    load_policy_config, prepare_training, validate_config, validate_config_cli,
+)
 from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.common.resume import prepare_resume
+
+
+class ConfigRecipeChecks(unittest.TestCase):
+    def test_fixed_recipes_and_research_options(self):
+        for name in ("dp", "dp3", "r3d", "sat", "dqrise", "adaptac", "interact_dex", "maniflow", "afro", "cordvip"):
+            with self.subTest(config=name):
+                cfg = load_policy_config(name)
+                validate_config(cfg)
+                self.assertEqual(cfg.normalization.action, "limits")
+                self.assertEqual(set(cfg.normalization), set(cfg.dataset.sensor_modalities) | {"action"})
+                self.assertEqual(cfg.agent.action_dim, 19)
+        spatial = load_policy_config("sat")
+        self.assertEqual(dict(spatial.normalization), dict(
+            action="limits", joint_state="limits", point_cloud="identity", rgb="identity",
+            camera_intrinsic="identity", camera_extrinsic="identity",
+        ))
+        for name, overrides in (
+            ("dp3", ["normalization.point_cloud=gaussian", "normalization.joint_state=gaussian"]),
+            ("maniflow", ["normalization.point_cloud=limits"]),
+            ("adaptac", ["tactile=real_patch", "normalization.finger_tactile_force=max_abs",
+                          "normalization.taxel_tactile_force=max_abs"]),
+            ("interact_dex", ["tactile=real_force", "normalization.finger_tactile_force=max_abs"]),
+        ):
+            with self.subTest(config=name, overrides=overrides):
+                validate_config(load_policy_config(name, overrides))
+
+    def test_fixed_fields_are_not_input_options(self):
+        for name, override in (
+            ("dp3", "+normalization.action=limits"),
+            ("dp", "+normalization.rgb=identity"),
+            ("sat", "+normalization.joint_state=limits"),
+            ("r3d", "+normalization.point_cloud=identity"),
+            ("interact_dex", "+normalization.eef_pose=gaussian"),
+            ("pretrain/hand_prior/vqvae", "+normalization.action=limits"),
+        ):
+            with self.subTest(config=name, override=override), self.assertRaisesRegex(ValueError, "fixed"):
+                load_policy_config(name, [override])
+        cfg = load_policy_config("adaptac", ["normalization.finger_tactile_force=gaussian"])
+        with self.assertRaisesRegex(ValueError, "finger_tactile_force"):
+            validate_config(cfg)
+
+    def test_repository_config_names_and_pretraining(self):
+        self.assertEqual(load_policy_config("dp3.yaml").agent.action_dim, 19)
+        self.assertEqual(load_policy_config("pretrain/hand_prior/vqvae.yaml").normalization.action, "limits")
+        self.assertEqual(load_policy_config("pretrain/obs/afro").normalization.point_cloud, "limits")
+        self.assertEqual(load_policy_config("pretrain/obs/cordvip").normalization.joint_state, "limits")
+        for name in ("/tmp/outside.yaml", "../configs/dp3", "~/.config/policy.yaml"):
+            with self.subTest(config=name), self.assertRaisesRegex(ValueError, "Config"):
+                load_policy_config(name)
+        for arguments in (["-cp", "/tmp"], ["--config-dir=/tmp"], ["--config-p=/tmp"],
+                          ["--config-n=../outside"]):
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                validate_config_cli(arguments)
+        with self.assertRaisesRegex(ValueError, "searchpath"):
+            load_policy_config("dp3", ["hydra.searchpath=[file:///tmp]"])
 
 
 class TrainingResumeChecks(unittest.TestCase):
@@ -158,6 +214,40 @@ class TrainingResumeChecks(unittest.TestCase):
         state['torch_cuda'] = torch.tensor([1], dtype=torch.uint8)
         set_rng_state(state, device='cpu')
         self.assert_state_equal(torch.get_rng_state(), state['torch'])
+
+    def test_action_layouts_fit_only_training_frames(self):
+        from dexmani_policy.training.common.data import build_dataset, fit_normalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / 'actions.zarr'
+            store = zarr.open_group(str(data), mode='w')
+            rows = np.array([2, 4, 6, 100, 200, 300], dtype=np.float32)[:, None]
+            for key, width in [('action', 19), ('action_ee', 21), ('joint_state', 19)]:
+                store.create_dataset(f'data/{key}', data=np.repeat(rows, width, axis=1))
+            store.create_dataset('data/point_cloud', data=np.zeros((6, 4, 6), dtype=np.float32))
+            store.create_dataset('meta/episode_ends', data=np.array([3, 6]))
+            manifest = dict(episode_ends=[3, 6], episode_ids=None, source_id=None,
+                            trial_ids=None, train_indices=[0], val_indices=[1])
+            cases = [('dp3', 'action', False, 19), ('dp3', 'action_ee', False, 21),
+                     ('r3d', 'action', True, 28)]
+            for method, action_key, auxiliary, width in cases:
+                with self.subTest(method=method, action_key=action_key):
+                    overrides = [f'zarr_path={data}', f'action_key={action_key}',
+                                 'horizon=3', 'n_obs_steps=1', 'n_action_steps=1',
+                                 'dataset.augmentation_cfg=null']
+                    if auxiliary:
+                        overrides.append('use_aux_ee=true')
+                    cfg = load_policy_config(method, overrides)
+                    cfg.dataset.split_manifest = manifest
+                    dataset, description = build_dataset(cfg)
+                    self.assertEqual(description['normalization_dims']['action'], width)
+                    affine = fit_normalizer(dataset, cfg.normalization,
+                                            feature_dims=description['normalization_dims'])['action']
+                    scale, offset = torch.full((width,), 0.5), torch.full((width,), -2.0)
+                    if action_key == 'action_ee':
+                        scale[3:9], offset[3:9] = 1, 0
+                    torch.testing.assert_close(affine.scale, scale, rtol=0, atol=0)
+                    torch.testing.assert_close(affine.offset, offset, rtol=0, atol=0)
 
 
 if __name__ == '__main__':
