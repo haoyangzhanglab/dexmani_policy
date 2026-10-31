@@ -37,8 +37,8 @@ class ContactCoordinationEncoder(nn.Module):
         object_points = observations["object_pointcloud"]
         joint_state = observations["joint_state"]
         batch_size = robot_points.shape[0]
-        robot_pc = self.encoder_robot(robot_points.flatten(0, 1))["global_token"].unflatten(0, (batch_size, -1))
-        object_pc = self.encoder_object(object_points.flatten(0, 1))["global_token"].unflatten(0, (batch_size, -1))
+        robot_pc = self.encoder_robot(robot_points.flatten(0, 1)).unflatten(0, (batch_size, -1))
+        object_pc = self.encoder_object(object_points.flatten(0, 1)).unflatten(0, (batch_size, -1))
         robot_embedding = robot_pc + self.transformer_robot(robot_pc, object_pc)
         object_embedding = object_pc + self.transformer_object(object_pc, robot_pc)
         joint_hand = self.hand_projection(joint_state[:, :, 7:19])

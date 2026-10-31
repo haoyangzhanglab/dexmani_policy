@@ -105,7 +105,7 @@ class InterActDexChecks(unittest.TestCase):
             torch.testing.assert_close(original_loss, torch.tensor(55 / 19))
             self.assertEqual(metrics, {})
 
-    def test_fusion_keeps_finger_correspondence_and_missing_identity(self):
+    def test_fusion_keeps_finger_correspondence_and_valid_zero_force(self):
         fusion = GatedTactileFusion()
         relation = dict(hand_query=torch.randn(2, 6, 192), relation_update=torch.randn(2, 6, 192),
                         geometry_descriptor=torch.randn(2, 6, 7))
@@ -116,20 +116,10 @@ class InterActDexChecks(unittest.TestCase):
         after = fusion(relation, tactile=changed)["interaction_tokens"]
         torch.testing.assert_close(before[:, [1, 2, 4, 5]], after[:, [1, 2, 4, 5]], rtol=0, atol=0)
         self.assertGreater((before[:, [0, 3]] - after[:, [0, 3]]).abs().sum().item(), 0)
-        base = relation["hand_query"] + relation["relation_update"]
-        for valid in (torch.zeros(2, 5, dtype=torch.bool), torch.tensor([[True, False, True, False, True]] * 2)):
-            tactile = force.masked_fill(~valid[..., None], float("nan")).requires_grad_()
-            with torch.autocast("cpu", dtype=torch.bfloat16):
-                result = fusion(relation, tactile=tactile, tactile_valid=valid, return_intermediate=True)
-            body_valid = torch.cat((valid.any(1, keepdim=True), valid), 1)
-            torch.testing.assert_close(result["interaction_tokens"][~body_valid], base[~body_valid], rtol=0, atol=0)
-            result["interaction_tokens"].square().mean().backward()
-            self.assertTrue(torch.isfinite(tactile.grad).all())
-            self.assertTrue((tactile.grad[~valid] == 0).all())
-        torch.testing.assert_close(fusion(relation)["interaction_tokens"], base, rtol=0, atol=0)
-        zeros = fusion(relation, tactile=torch.zeros_like(force), return_intermediate=True)
-        self.assertTrue(zeros["tactile_valid"].all())
-        self.assertTrue((zeros["gate"] > 0).all())
+        zeros = fusion(relation, tactile=torch.zeros_like(force))["interaction_tokens"]
+        self.assertTrue(torch.isfinite(zeros).all())
+        zeros.square().mean().backward()
+        self.assertGreater(fusion.fusion_mlp[-1].weight.grad.abs().sum().item(), 0)
 
     def test_force_offsets_preserve_episode_boundaries_and_zero_labels(self):
         class Store:
@@ -294,6 +284,79 @@ class InterActDexChecks(unittest.TestCase):
             validate_config(cfg)
             self.assertEqual(list(cfg.dataset.future_force_offsets), list(cfg.future_force_offsets))
             self.assertEqual(list(cfg.agent.future_force_offsets), list(cfg.future_force_offsets))
+
+    def test_single_camera_quality_and_outside_frustum(self):
+        from dexmani_policy.agents.obs_encoder.pointcloud.feature_alignment import FeatureAlignment, build_patch_correspondence
+        from dexmani_policy.agents.obs_encoder.pointcloud.projection import PointProjection
+
+        indices = torch.tensor([[[0, 1]]])
+        projection = PointProjection(torch.tensor([[[0., 0.], [2., 2.]]]), torch.tensor([[0.37, 1.]]))
+        geometry = build_patch_correspondence(indices, projection, (2, 2))
+        torch.testing.assert_close(geometry["coverage"], torch.tensor([[0.5]]))
+        torch.testing.assert_close(geometry["confidence"], torch.tensor([[0.37]]))
+        torch.testing.assert_close(geometry["pool_weight"], torch.full((1, 1, 4), 0.25))
+        fusion = FeatureAlignment(8, 12)
+        tokens = torch.randn(1, 1, 12)
+        outside = PointProjection(torch.full((1, 2, 2), 2.), torch.ones(1, 2))
+        actual = fusion(tokens, torch.randn(1, 2, 2, 8), outside, indices)
+        torch.testing.assert_close(actual, tokens, rtol=0, atol=0)
+
+    def test_check_data_rejects_fp32_overflow_and_empty_cloud(self):
+        from dexmani_policy.datasets.tools.check_data import check_data
+
+        with tempfile.TemporaryDirectory() as directory:
+            group = zarr.open_group(directory, mode="w")
+            group.create_dataset("meta/episode_ends", data=np.array([2]))
+            group.create_dataset("data/point_cloud", data=np.full((2, 4, 3), 1e100, dtype=np.float64))
+            with self.assertRaisesRegex(ValueError, "Nonfinite data:.*field=point_cloud.*row=0"):
+                check_data(directory)
+            del group["data/point_cloud"]
+            group.create_dataset("data/point_cloud", shape=(2, 0, 3), dtype=np.float32)
+            with self.assertRaisesRegex(ValueError, "Empty data field"):
+                check_data(directory)
+
+    def test_fresh_identity_pointcloud_records_consumed_channels(self):
+        from dexmani_policy.training.common.data import build_dataset, fit_normalizer
+
+        with tempfile.TemporaryDirectory() as directory:
+            group = zarr.open_group(directory, mode="w")
+            group.attrs.update(dt=0.0625, physics_dt=1 / 240, frame_skip=15, action_dim=19,
+                               action_space="joint", obs_alignment="obs[t]_before_action[t]")
+            group.create_dataset("meta/episode_ends", data=np.array([3, 6]))
+            group.create_dataset("data/action", data=np.zeros((6, 19), dtype=np.float32))
+            for key, values in self.batch()["obs"].items():
+                group.create_dataset(f"data/{key}", data=values.flatten(0, 1).numpy())
+            for channels in (3, 6):
+                model, cfg, _ = self.make_policy(
+                    f"zarr_path={directory}", f"agent.pc_dim={channels}", "dataset.augmentation_cfg=null",
+                )
+                dataset, description = build_dataset(cfg)
+                dims = description["normalization_dims"]
+                self.assertEqual(dims["point_cloud"], channels)
+                model.configure_normalizer(dims, {})
+                model.load_normalizer(fit_normalizer(dataset, cfg.normalization, feature_dims=dims))
+                self.assertNotIn("point_cloud", model.normalizer.fields)
+                obs = {key: value.unsqueeze(0) for key, value in dataset[0]["obs"].items()}
+                self.assertEqual(model.preprocess(obs)["point_cloud"].shape[-1], channels)
+                self.assertTrue(torch.isfinite(model.encode_observation(obs)).all())
+
+    def test_runtime_converts_uint8_hwc_and_rejects_other_layouts(self):
+        from types import SimpleNamespace
+        from dexmani_policy.common.image_util import preprocess_rgb_eval
+        from dexmani_policy.deployment.runtime import PolicyRuntime
+
+        recipe = dict(resize_hw=None, center_crop_hw=None, keep_uint8=True)
+        info = SimpleNamespace(observation_fields=("rgb",), n_obs_steps=2, rgb_preprocessing=recipe)
+        runtime = PolicyRuntime(nn.Linear(1, 1), info, seed=7)
+        rgb = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)[:, :, ::-1]
+        actual = runtime.prepare_observations({"rgb": rgb})["rgb"]
+        expected = preprocess_rgb_eval(rgb.copy(), **recipe).unsqueeze(0)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertEqual(actual.dtype, torch.float32)
+        self.assertEqual(tuple(actual.shape), (1, 2, 3, 4, 5))
+        for wrong in (rgb.transpose(0, 3, 1, 2), rgb.astype(np.float32), np.zeros((2, 0, 5, 3), np.uint8)):
+            with self.assertRaisesRegex(ValueError, "RGB input requires"):
+                runtime.prepare_observations({"rgb": wrong})
 
 
 if __name__ == "__main__":

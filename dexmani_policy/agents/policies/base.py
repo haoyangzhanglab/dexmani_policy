@@ -110,18 +110,15 @@ class BasePolicy(nn.Module):
     def preprocess(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
-            if torch.is_tensor(value):
-                # Runners may supply XYZRGB even when the policy consumes only XYZ.
-                if key in POINT_CLOUD_FIELDS and self.normalization_dims.get(key) == 3:
-                    value = value[..., :3]
-                if key in self.normalizer.fields:
-                    value = self.normalizer[key].normalize(value)
-                probability = self.modality_dropout_probs.get(key, 0.0)
-                if self.training and probability > 0:
-                    mask = torch.rand(value.shape[0], device=value.device) > probability
-                    value = value * mask.view(-1, *([1] * (value.ndim - 1)))
-                value = value.flatten(0, 1)
-            result[key] = value
+            if key in POINT_CLOUD_FIELDS:
+                value = value[..., : self.normalization_dims[key]]
+            if key in self.normalizer.fields:
+                value = self.normalizer[key].normalize(value)
+            probability = self.modality_dropout_probs.get(key, 0.0)
+            if self.training and probability > 0:
+                mask = torch.rand(value.shape[0], device=value.device) > probability
+                value = value * mask.view(-1, *([1] * (value.ndim - 1)))
+            result[key] = value.flatten(0, 1)
         return result
 
     def encode_observation(self, obs_dict: dict) -> torch.Tensor:

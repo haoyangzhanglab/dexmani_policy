@@ -70,7 +70,7 @@ class GeometricPatchEmbedding(nn.Module):
             # Concatenate in FP32 to avoid mixed-dtype addmm in Torch 2.4 Inductor.
             pooled = torch.cat((member.amax(dim=2).float(), weighted, moments), dim=-1)
 
-        return self.projection(pooled.to(member.dtype)), radius
+        return self.projection(pooled.to(member.dtype))
 
 
 class GlobalTransformerBlock(nn.Module):
@@ -164,23 +164,12 @@ class Sparse3DEncoder(nn.Module):
 
     def encode_patches(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
         """Sample once and encode local geometry, absolute position and shared 3D RoPE."""
-        if (
-            pointcloud.ndim != 3
-            or pointcloud.shape[0] == 0
-            or pointcloud.shape[-1] < self.input_channels
-        ):
-            raise ValueError("pointcloud must be nonempty [B,N,C] with enough channels")
-        if not pointcloud.is_floating_point():
-            raise ValueError("pointcloud must be floating point")
-        if not torch.isfinite(pointcloud[..., : self.input_channels]).all():
-            raise ValueError("pointcloud must contain only finite observed points")
-
         xyz = pointcloud[..., :3].float().contiguous()
         with (
             torch.no_grad(),
             torch.autocast(device_type=pointcloud.device.type, enabled=False),
         ):
-            centers, center_indices, neighbors = sample_point_patches(
+            centers, _, neighbors = sample_point_patches(
                 xyz,
                 self.num_patches,
                 self.group_size,
@@ -191,36 +180,25 @@ class Sparse3DEncoder(nn.Module):
 
         relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)
         attributes = index_points(pointcloud[..., 3 : self.input_channels], neighbors)
-        tokens, radius = self.patch_embedding(relative_xyz, attributes)
+        tokens = self.patch_embedding(relative_xyz, attributes)
         # Preserve absolute metric position as content alongside relative geometry/RoPE.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)
         return {
             "tokens": tokens,
             "xyz": centers,
-            "mask": torch.ones(centers.shape[:2], device=xyz.device, dtype=torch.bool),
-            "center_indices": center_indices,
             "neighbor_indices": neighbors,
-            "patch_radius": radius,
             "relative_xyz": relative_xyz,
             "rope_cos": cos,
             "rope_sin": sin,
         }
 
-    def forward(
-        self, pointcloud: torch.Tensor, *, return_geometry: bool = False
-    ) -> dict[str, torch.Tensor]:
+    def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
         patches = self.encode_patches(pointcloud)
-        outputs = {
+        return {
             "tokens": self.encode_global(patches["tokens"], patches["rope_cos"], patches["rope_sin"]),
             "xyz": patches["xyz"],
-            "mask": patches["mask"],
         }
-        if return_geometry:
-            outputs.update({key: patches[key] for key in (
-                "center_indices", "neighbor_indices", "patch_radius",
-            )})
-        return outputs
 
     @property
     def out_dim(self) -> int:

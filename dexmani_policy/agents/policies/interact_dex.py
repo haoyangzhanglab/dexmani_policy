@@ -39,7 +39,6 @@ class InterActDexObservationEncoder(nn.Module):
         super().__init__()
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
         self.num_points = num_points
-        self.use_coord_only = pc_dim == 3
         self.tactile_source = tactile_source
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
@@ -70,13 +69,13 @@ class InterActDexObservationEncoder(nn.Module):
         if obs["joint_state"].shape[0] % self.n_obs_steps:
             raise ValueError("Flattened observation frames must be divisible by n_obs_steps")
         pc = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points, self.use_coord_only,
+            obs["point_cloud"], self.num_points,
             self.pc_encoder.fps_random_config, training=self.training,
         )
         patches = self.pc_encoder(pc)
         scene = self.scene_projection(self.scene_aggregator(
             patches["tokens"], patches["xyz"],
-        )["scene_token"])
+        ))
         hand = self.hand_state(obs["joint_state"], obs["eef_pose"], obs["fingertip_xyz"])
         relation = self.hand_scene(
             pc, patches, hand["anchor_xyz"], hand["hand_tokens"],

@@ -99,18 +99,6 @@ def check_tactile(device):
         reference_grad, = torch.autograd.grad((expected * probe).mean(), x)
         new_grad, = torch.autograd.grad((actual * probe).mean(), x)
         torch.testing.assert_close(reference_grad, new_grad, rtol=1e-5, atol=1e-6)
-    for all_missing in (False, True):
-        valid = torch.ones(2, 5, dtype=torch.bool, device=device)
-        valid[:, 1:] = False
-        if all_missing:
-            valid.zero_()
-        x = torch.randn(2, 5, 120, 3, device=device).masked_fill(~valid[..., None, None], float("nan"))
-        x.requires_grad_()
-        with torch.autocast(device.type, dtype=torch.bfloat16):
-            tokens = encoder(x, tactile_valid=valid)
-        tokens.float().square().sum().backward()
-        assert torch.isfinite(tokens).all() and x.grad is not None and torch.isfinite(x.grad).all()
-        assert (tokens[~valid] == 0).all() and (x.grad[~valid] == 0).all()
     config = encoder.effective_config.copy()
     config.pop("_target_")
     restored = XHandPatchEncoder(**config).to(device)
@@ -353,7 +341,7 @@ def check_codebook_pipeline(device):
         extrinsics = torch.eye(4, device=device)[:3]
         obs = dict(
             joint_state=torch.randn(2, 2, 19, device=device), point_cloud=xyz,
-            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device),
+            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device).permute(0, 1, 4, 2, 3).float().div_(255),
             camera_intrinsic=intrinsics.flatten().expand(2, 2, -1).clone(),
             camera_extrinsic=extrinsics.flatten().expand(2, 2, -1).clone(),
         )

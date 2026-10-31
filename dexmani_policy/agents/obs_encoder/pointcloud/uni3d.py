@@ -188,17 +188,14 @@ class Uni3DEncoder(nn.Module):
         return self.embed_dim
 
     def forward(self, pcd):
-        if pcd.ndim != 3 or (pcd.shape[-1] != 3 and pcd.shape[-1] < 6):
+        if pcd.ndim != 3 or pcd.shape[-1] not in (3, 6):
             raise ValueError(
                 "Uni3D point cloud must have shape [B,N,C] with C=3 (XYZ) or "
-                "C>=6 (first six channels are XYZRGB); keep internal six-channel features "
-                "even for XYZ input, which is padded with zero RGB."
+                "C=6 (XYZRGB); XYZ input is padded with zero RGB."
             )
         if pcd.shape[-1] == 3:
             colors = torch.zeros_like(pcd)
             pcd = torch.cat([pcd, colors], dim=-1)
-        elif pcd.shape[-1] > 6:
-            pcd = pcd[..., :6]
 
         if self.training:
             pcd = random_point_dropout(pcd, max_dropout_ratio=0.8)

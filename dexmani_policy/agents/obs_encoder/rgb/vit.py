@@ -104,9 +104,7 @@ class ViTEncoder(nn.Module):
         return self.proj(features)
 
     def forward(self, rgb: torch.Tensor) -> dict[str, torch.Tensor]:
-        leading_shape = rgb.shape[:-3]
-        flat_rgb = rgb.reshape(-1, *rgb.shape[-3:])
-        outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
+        outputs = self.backbone(pixel_values=rgb, return_dict=True)
         patch_tokens = self.project_features(outputs.last_hidden_state[:, self.num_prefix_tokens :])
         if self.global_token_type == "avg":
             global_token = patch_tokens.mean(dim=1)
@@ -118,6 +116,6 @@ class ViTEncoder(nn.Module):
             global_token = self.project_features(outputs.pooler_output)
 
         return {
-            "patch_tokens": patch_tokens.reshape(*leading_shape, *patch_tokens.shape[1:]),
-            "global_token": global_token.reshape(*leading_shape, *global_token.shape[1:]),
+            "patch_tokens": patch_tokens,
+            "global_token": global_token,
         }

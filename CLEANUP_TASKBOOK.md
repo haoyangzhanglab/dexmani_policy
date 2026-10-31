@@ -85,7 +85,7 @@
 | [x] | M2 配置、数据与归一化 | P1 | 组装一次，Policy 持有 affine，Dataset 无回指/缓存 | M1 |
 | [x] | M3 初始化与 DQ 状态 | P1/P2 | fresh/restore 分开；码本只持运行必需状态 | M2 |
 | [x] | M4 续训与预训练生命周期 | P1/P2 | 同目录续训、完整恢复、按需导出/诊断 | M2、M3 |
-| [ ] | M5 内部观测接口与封装 | P2 | 明确 Tensor 布局、收窄内部协议、展平固定壳层 | M2；相关路径需 M3 |
+| [x] | M5 内部观测接口与封装 | P2 | 明确 Tensor 布局、收窄内部协议、展平固定壳层 | M2；相关路径需 M3 |
 | [ ] | M6 评测与部署 | P1/P2 | 简单评测函数、显式选模、同源部署配置 | M3、M4；公开接口切换需实际消费者 |
 | [ ] | M7 工具与文档收尾 | P2/P3 | 远程脚本、smoke、依赖职责和日常文档收敛 | 对应前序批次 |
 
@@ -293,6 +293,8 @@ M4 完成：原目录latest续训及显式运行参数入口上线；退出overr
 - 此批不改变 protected decoder，不以改测试期望的方式掩盖科研语义变化。
 
 **主要文件**：`agents/policies/base.py`、`agents/obs_encoder/{spatial,xhand_tactile}.py`、`agents/obs_encoder/{rgb,pointcloud,interaction}/`、`common/image_util.py`、`datasets/{demonstration,transforms}.py`、`datasets/tools/check_data.py`、`deployment/runtime.py`、`env_runner/sim_runner.py`。
+
+M5 完成：内部Tensor/CHW FP32 RGB、PointNet输出、单相机与五指输入明确；无producer缺测/诊断/恒真mask/sentinel协议退出；CordViP展平；数据准备检查目标FP32 finite及非空。固定权重输出/梯度、PointNet ties、Scene消融/空邻域、单相机quality/coverage与双线性梯度、RGB量化/半像素变换、现用增强对照通过。实际fresh identityPC列数补齐并覆盖真实Zarr组装回归；InterAct14项（含FP32溢出/空云/Runtime布局与负stride）及agent_checks CPU8组通过。CUDA与真实闭环未验证。
 
 ### M6：评测用函数和记录，部署用同一个事实来源
 

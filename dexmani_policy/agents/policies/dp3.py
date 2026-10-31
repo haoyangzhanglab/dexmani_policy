@@ -38,7 +38,6 @@ class DP3ObservationEncoder(nn.Module):
         self.pc_encoder = encoder_cls(input_channels=pc_dim, output_channels=pc_out_dim)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
-        self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
@@ -47,13 +46,12 @@ class DP3ObservationEncoder(nn.Module):
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
-            self.use_coord_only,
             self.fps_random_config,
             training=self.training,
         )
         features = torch.cat(
             [
-                self.pc_encoder(pc)["global_token"],
+                self.pc_encoder(pc),
                 self.state_mlp(obs["joint_state"]),
             ],
             dim=-1,

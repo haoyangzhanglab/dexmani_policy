@@ -88,8 +88,7 @@ class ResNetEncoder(nn.Module):
         return self
 
     def forward(self, rgb: torch.Tensor) -> dict[str, torch.Tensor]:
-        leading_shape = rgb.shape[:-3]
-        flat_rgb = rgb.reshape(-1, *rgb.shape[-3:]).to(memory_format=torch.channels_last)
+        flat_rgb = rgb.to(memory_format=torch.channels_last)
         feature_map = self.backbone(flat_rgb)
         feature_map = self.proj(feature_map)
 
@@ -97,6 +96,6 @@ class ResNetEncoder(nn.Module):
         global_token = feature_map.mean(dim=(-2, -1))
 
         return {
-            "patch_tokens": patch_tokens.reshape(*leading_shape, *patch_tokens.shape[1:]),
-            "global_token": global_token.reshape(*leading_shape, *global_token.shape[1:]),
+            "patch_tokens": patch_tokens,
+            "global_token": global_token,
         }

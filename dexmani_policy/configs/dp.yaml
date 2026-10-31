@@ -37,8 +37,6 @@ dataset:
     saturation: 0.2
     hue: 0.05
     grayscale_prob: 0.1
-    noise_std: 0.0
-    blur_prob: 0.0
     prob: 0.25
 
   augmentation_cfg:

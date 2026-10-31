@@ -26,6 +26,8 @@ class Augmentation:
     """In-place transform; the dataset applies probability gating to owned sample arrays."""
 
     def __init__(self, prob=1.0):
+        if not np.isfinite(prob) or not 0 <= prob <= 1:
+            raise ValueError("augmentation probability must be finite in [0,1]")
         self.prob = prob
 
     def augment(self, x):
@@ -44,14 +46,9 @@ class PointColorJitter(Augmentation):
 
     @staticmethod
     def make_range(value, center, symmetric=False):
-        if symmetric:
-            if isinstance(value, (int, float)):
-                return [-abs(value), abs(value)]
-            return [value[0], value[1]]
-        if isinstance(value, (int, float)):
-            value = abs(value)
-            return [max(0.0, center - value), center + value]
-        return [value[0], value[1]]
+        if not isinstance(value, (int, float)) or not np.isfinite(value) or value < 0:
+            raise ValueError("color strengths must be finite non-negative scalars")
+        return [-value, value] if symmetric else [max(0.0, center - value), center + value]
 
     def augment(self, x):
         rgb = x[..., -3:].reshape(-1, 3)
@@ -183,6 +180,8 @@ class PointCoordinateNoise(Augmentation):
         super().__init__(prob=prob)
         self.noise_std = float(noise_std)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
+        if not np.isfinite((self.noise_std, self.clip_range)).all() or min(self.noise_std, self.clip_range) < 0:
+            raise ValueError("noise_std/clip_range must be finite and non-negative")
 
     def augment(self, x):
         if self.noise_std <= 0:
@@ -192,22 +191,6 @@ class PointCoordinateNoise(Augmentation):
         xyz += clipped_gaussian_noise(xyz.shape, self.noise_std, self.clip_range, x.dtype)
 
 
-class PointColorNoise(Augmentation):
-    """Clipped Gaussian noise on the last RGB channels, clamped to [0, 1]."""
-
-    def __init__(self, noise_std=0.01, clip_range=None, prob=1.0):
-        super().__init__(prob=prob)
-        self.noise_std = float(noise_std)
-        self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
-
-    def augment(self, x):
-        if self.noise_std <= 0:
-            return
-        rgb = x[..., -3:]
-        rgb += clipped_gaussian_noise(rgb.shape, self.noise_std, self.clip_range, x.dtype)
-        np.clip(rgb, 0.0, 1.0, out=rgb)
-
-
 class StateNoise(Augmentation):
     """Noise is applied in raw state units."""
 
@@ -215,13 +198,15 @@ class StateNoise(Augmentation):
         super().__init__(prob=prob)
         self.noise_std = float(noise_std)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
+        if not np.isfinite((self.noise_std, self.clip_range)).all() or min(self.noise_std, self.clip_range) < 0:
+            raise ValueError("noise_std/clip_range must be finite and non-negative")
 
     def augment(self, x):
         x += clipped_gaussian_noise(x.shape, self.noise_std, self.clip_range, x.dtype)
 
 
 class ImageAugmentation:
-    """Color jitter, grayscale, pixel noise and blur on float32 observation windows."""
+    """Color jitter and grayscale on float32 observation windows."""
 
     def __init__(
         self,
@@ -230,15 +215,15 @@ class ImageAugmentation:
         saturation=0.3,
         hue=0.08,
         grayscale_prob=0.2,
-        noise_std=0.0,
-        noise_prob=1.0,
-        blur_kernel=3,
-        blur_sigma=(0.1, 2.0),
-        blur_prob=0.2,
         prob=1.0,
     ):
         import torchvision.transforms.v2 as v2
 
+        if any(not isinstance(value, (int, float)) or not np.isfinite(value) or value < 0
+               for value in (brightness, contrast, saturation, hue)):
+            raise ValueError("color strengths must be finite non-negative scalars")
+        if not np.isfinite((grayscale_prob, prob)).all() or not 0 <= grayscale_prob <= 1 or not 0 <= prob <= 1:
+            raise ValueError("RGB augmentation probabilities must be finite in [0,1]")
         operations = []
         if prob > 0:
             if any((brightness, contrast, saturation, hue)):
@@ -247,12 +232,6 @@ class ImageAugmentation:
                 ))
             if grayscale_prob > 0:
                 operations.append(v2.RandomGrayscale(p=grayscale_prob))
-            if noise_std > 0 and noise_prob > 0:
-                operations.append(v2.RandomApply([v2.GaussianNoise(mean=0.0, sigma=noise_std)], p=noise_prob))
-            if blur_kernel > 0 and blur_prob > 0:
-                operations.append(v2.RandomApply([
-                    v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma),
-                ], p=blur_prob))
         self.transform = v2.Compose(operations) if operations else torch.nn.Identity()
         if operations and 0 < prob < 1:
             self.transform = v2.RandomApply([self.transform], p=prob)
@@ -266,7 +245,6 @@ class ImageAugmentation:
 AUGMENTATION_SPECS = (
     ("pc", PointCoordinateNoise, "coord_noise", "point_cloud"),
     ("pc", PointColorJitter, "color", "point_cloud"),
-    ("pc", PointColorNoise, "color_noise", "point_cloud"),
     ("pc", PointDropout, "dropout", "point_cloud"),
     ("state", StateNoise, "noise", "joint_state"),
 )

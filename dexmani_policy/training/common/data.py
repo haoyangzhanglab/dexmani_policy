@@ -72,7 +72,10 @@ def build_dataset(cfg):
         raise ValueError(
             "Canonical checkpoint resume requires source_id in both the dataset and saved split"
         )
-    dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
+    dims = {
+        key: int(buffer[key].shape[-1]) for key, mode in spec.items()
+        if key != "action" and (mode != "identity" or key in POINT_CLOUD_FIELDS)
+    }
     for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
     if dataset.pc_dim is not None:

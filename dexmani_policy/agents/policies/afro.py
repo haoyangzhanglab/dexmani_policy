@@ -24,7 +24,7 @@ class AFROObservationEncoder(nn.Module):
         return self.visual.out_dim + self.state.out_dim
 
     def forward(self, obs):
-        features = torch.cat((self.visual(obs["point_cloud"][..., :3])["global_token"], self.state(obs["joint_state"])), -1)
+        features = torch.cat((self.visual(obs["point_cloud"]), self.state(obs["joint_state"])), -1)
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 

@@ -13,23 +13,16 @@ __all__ = ["XHandForceEncoder", "XHandTaxelEncoder", "XHandPatchEncoder"]
 
 def prepare_tactile_input(
     x: torch.Tensor,
-    tactile_valid: torch.Tensor | None,
     input_shape: tuple[int, ...],
     input_key: str,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Mask missing fingers before encoding; valid inputs must be finite and normalized."""
+    """Inputs are five finite, normalized finger observations, including valid zero force."""
     feature_dims = len(input_shape)
     if x.ndim not in (feature_dims + 1, feature_dims + 2) or x.shape[-feature_dims:] != input_shape:
         raise ValueError(
             f"{input_key}: expected [B,{input_shape}] or [B,T,{input_shape}], got {tuple(x.shape)}"
         )
-
-    if tactile_valid is not None:
-        mask_shape = (*x.shape[:-feature_dims], input_shape[0])
-        if tactile_valid.shape != mask_shape or tactile_valid.dtype != torch.bool:
-            raise ValueError(f"tactile_valid must be bool {mask_shape}")
-        x = torch.where(tactile_valid.reshape(*mask_shape, *((1,) * (feature_dims - 1))), x, 0.0)
 
     return x.to(dtype=dtype)
 
@@ -52,14 +45,12 @@ class XHandForceEncoder(nn.Module):
             nn.Linear(64, 64),
         )
 
-    def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = prepare_tactile_input(
-            x, tactile_valid, self.input_shape, self.input_key, self.net[0].weight.dtype
+            x, self.input_shape, self.input_key, self.net[0].weight.dtype
         )
         features = self.net(x)
 
-        if tactile_valid is not None:
-            features = torch.where(tactile_valid[..., None], features, 0.0)
         return features
 
     @property
@@ -93,9 +84,9 @@ class XHandTaxelEncoder(nn.Module):
             nn.AdaptiveAvgPool1d(1),
         )
 
-    def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = prepare_tactile_input(
-            x, tactile_valid, self.input_shape, self.input_key, self.net[0].weight.dtype
+            x, self.input_shape, self.input_key, self.net[0].weight.dtype
         )
         batch_shape = x.shape[:-3]
         fingers = x.reshape(-1, 120, 3).transpose(1, 2)
@@ -103,8 +94,6 @@ class XHandTaxelEncoder(nn.Module):
             self.net(fingers).squeeze(-1).reshape(*batch_shape, self.num_tokens, self.frame_dim)
         )
 
-        if tactile_valid is not None:
-            features = torch.where(tactile_valid[..., None], features, 0.0)
         return features
 
     @property
@@ -232,8 +221,8 @@ class XHandPatchEncoder(nn.Module):
                 (mean_force, peak_force, activity_fraction[..., None], strength[..., None]), dim=-1
             )
 
-    def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
-        x = prepare_tactile_input(x, tactile_valid, self.input_shape, self.input_key, torch.float32)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = prepare_tactile_input(x, self.input_shape, self.input_key, torch.float32)
         batch_shape = x.shape[:-3]
         descriptors = self._patch_descriptors(x)
         patch_features = self.patch_mlp(descriptors)
@@ -250,8 +239,6 @@ class XHandPatchEncoder(nn.Module):
         tokens = self.token_norm((attention_weights[..., None] * patch_features.float()).sum(dim=2))
         features = tokens.reshape(*batch_shape, self.num_tokens, self.frame_dim)
 
-        if tactile_valid is not None:
-            features = torch.where(tactile_valid[..., None], features, 0.0)
         return features
 
     @property

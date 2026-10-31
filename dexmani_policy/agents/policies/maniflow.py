@@ -33,7 +33,6 @@ class ManiFlowObservationEncoder(nn.Module):
         self.pc_encoder = PointNetDense(input_channels=pc_dim, **pc_encoder_config)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
-        self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
 
@@ -47,7 +46,6 @@ class ManiFlowObservationEncoder(nn.Module):
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
-            self.use_coord_only,
             self.fps_random_config,
             training=self.training,
         )

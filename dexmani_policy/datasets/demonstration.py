@@ -113,8 +113,8 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 raise ValueError("Stored RGB must have shape (T, H, W, 3) and dtype uint8")
         for key in POINT_CLOUD_FIELDS.intersection(sensor_modalities):
             shape = self.episode_store[key].shape
-            if len(shape) != 3:
-                raise ValueError(f"Stored {key} must have shape [T,N,C]")
+            if len(shape) != 3 or shape[1] == 0:
+                raise ValueError(f"Stored {key} must have shape [T,N>0,C]")
             if pc_dim is not None and shape[-1] < pc_dim:
                 raise ValueError(f"Stored {key} does not satisfy configured pc_dim")
         self.augmentation_cfg = augmentation_cfg
@@ -229,8 +229,13 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 self.random_keep_points,
             )
 
-        if self.rgb_preprocess_size is not None and "rgb" in data["obs"]:
-            data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"], self.rgb_preprocess_size)
+        if "rgb" in data["obs"]:
+            if self.rgb_preprocess_size is not None:
+                data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"], self.rgb_preprocess_size)
+            else:
+                data["obs"]["rgb"] = preprocess_rgb_eval(
+                    data["obs"]["rgb"], resize_hw=None, center_crop_hw=None, keep_uint8=self.rgb_keep_uint8,
+                )
 
         return dict_apply(data, torch.as_tensor)
 
@@ -254,7 +259,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             config = (augmentation.get(section) or {}).get(key)
             if config:
                 if (
-                    section == "pc" and key in {"color", "color_noise"}
+                    section == "pc" and key == "color"
                     and (self.pc_dim or self.episode_store["point_cloud"].shape[-1]) < 6
                 ):
                     if config.get("prob", 1) > 0:

@@ -65,9 +65,9 @@ class AFROPretrain(nn.Module):
             points = self.normalizer["point_cloud"].normalize(points)
         batch_size, frames = points.shape[:2]
         points = points.flatten(0, 1)
-        online = self.visual(points)["global_token"].reshape(batch_size, frames, 64)
+        online = self.visual(points).reshape(batch_size, frames, 64)
         with torch.no_grad():
-            teacher = self.teacher(points)["global_token"].reshape(batch_size, frames, 64)
+            teacher = self.teacher(points).reshape(batch_size, frames, 64)
         losses, metrics = [], {}
         for name, current, following, target in (
             ("forward", online[:, :-1], online[:, 1:], teacher[:, 1:]),

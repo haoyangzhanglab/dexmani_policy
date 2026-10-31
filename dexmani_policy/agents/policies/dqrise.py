@@ -156,16 +156,12 @@ class DQRISEPolicy(BasePolicy):
 
         arm_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]
-        hand_pred, discrete_idx = self.hand_codebook.decode(idx_pred)
+        hand_pred, _ = self.hand_codebook.decode(idx_pred)
         hand_pred = hand_pred.to(arm_pred.dtype)
 
         normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)
-        return {
-            **self.format_action_output(prediction),
-            "pred_code_index": discrete_idx[:, self.action_start_index :],
-            "pred_code_continuous": idx_pred[:, self.action_start_index :],
-        }
+        return self.format_action_output(prediction)
 
     def extra_repr(self) -> str:
         return (

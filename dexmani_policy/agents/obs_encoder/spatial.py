@@ -82,18 +82,18 @@ class SpatialObservationEncoder(nn.Module):
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         points = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points, self.pc_encoder.input_channels == 3,
+            obs["point_cloud"], self.num_points,
             self.pc_encoder.fps_random_config, training=self.training,
         )
         patches = self.pc_encoder.encode_patches(points)
 
         rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
         patch_grid = tuple(size // self.rgb_encoder.patch_size for size in rgb.shape[-2:])
-        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)[:, None]
+        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
         projection = project_points(
-            points[..., :3], obs["camera_intrinsic"].reshape(-1, 1, 3, 3),
-            obs["camera_extrinsic"].reshape(-1, 1, 3, 4),
-            image_transform[:, None], (rgb.shape[-2], rgb.shape[-1]),
+            points[..., :3], obs["camera_intrinsic"].reshape(-1, 3, 3),
+            obs["camera_extrinsic"].reshape(-1, 3, 4),
+            image_transform, (rgb.shape[-2], rgb.shape[-1]),
         )
 
         member_weight = None
@@ -107,7 +107,7 @@ class SpatialObservationEncoder(nn.Module):
             tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
         tokens = self.alignment(
             tokens, image_grid, projection, patches["neighbor_indices"], member_weight=member_weight,
-        )["tokens"]
+        )
         if self.fusion_stage == "pre_global":
             tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
 

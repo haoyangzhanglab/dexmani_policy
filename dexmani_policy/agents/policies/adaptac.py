@@ -45,7 +45,6 @@ class AdapTacObservationEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.num_points = num_points
-        self.use_coord_only = pc_dim == 3
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
@@ -73,7 +72,6 @@ class AdapTacObservationEncoder(nn.Module):
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
-            self.use_coord_only,
             self.pc_encoder.fps_random_config,
             training=self.training,
         )
