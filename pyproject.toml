@@ -15,7 +15,6 @@ dependencies = [
     "diffusers",
     "zarr>=2.18,<3",
     "numcodecs",
-    "numba",
     "tqdm",
     "transformers",
     "timm",

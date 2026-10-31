@@ -1,8 +1,7 @@
-from typing import Literal, cast
+from typing import Literal
 
 import torch
 import torch.nn as nn
-from omegaconf import OmegaConf
 from transformers import AutoConfig, AutoModel, SiglipVisionConfig, SiglipVisionModel
 
 from .lora import apply_lora
@@ -26,13 +25,12 @@ class ViTEncoder(nn.Module):
         self.kind = kind
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        if OmegaConf.is_config(architecture):
-            architecture = cast(dict, OmegaConf.to_container(architecture, resolve=True))
         if architecture is None:
             raise ValueError("ViTEncoder requires an explicit architecture; resolve it before construction")
         if kind == "dino":
-            config = AutoConfig.for_model(**dict(architecture))
+            config = AutoConfig.for_model(**architecture)
         elif kind == "siglip":
+            # HF from_dict mutates its input; preserve the caller's architecture.
             config = SiglipVisionConfig.from_dict(dict(architecture))
             config.vision_use_head = global_token_type == "pooler"
         else:

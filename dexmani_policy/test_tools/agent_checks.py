@@ -1,15 +1,20 @@
-"""Focused numerical and synthetic policy checks: python -m dexmani_policy.test_tools.agent_checks."""
+"""Numerical, sampling and synthetic policy checks: python -m dexmani_policy.test_tools.agent_checks."""
 
 import argparse
 import copy
 import io
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from unittest.mock import patch
 
+import hydra
+import numpy as np
+from omegaconf import OmegaConf
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+import zarr
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
@@ -20,13 +25,62 @@ from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
+from dexmani_policy.agents.policies.dp import DPPolicy
 from dexmani_policy.agents.policies.dp3 import DP3Policy
 from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.pytorch_util import get_rng_state
+from dexmani_policy.datasets.episode_store import EpisodeStore
+from dexmani_policy.datasets.sampler import SequenceSampler, window_indices
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
+
+
+def check_sampler(_device):
+    ends = np.array([1, 4, 9], dtype=np.int64)
+    mask = np.array([True, False, True])
+    expected = np.array([
+        [0, 1, 3], [0, 1, 2], [0, 1, 1], [0, 1, 0],
+        [4, 5, 3], [4, 6, 2], [4, 7, 1], [4, 8, 0],
+        [5, 9, 0], [6, 9, 0], [7, 9, 0], [8, 9, 0],
+    ], dtype=np.int64)
+    actual = window_indices(ends, 4, mask, 3, 3)
+    assert actual.dtype == np.int64
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(window_indices(ends[:1], 1, mask[:1]), [[0, 1, 0]])
+    np.testing.assert_array_equal(
+        window_indices(ends, 4, np.ones(3, dtype=bool)), [[4, 8, 0], [5, 9, 0]],
+    )
+    for episode_ends, horizon, selected in (
+        (ends, 4, np.zeros(3, dtype=bool)),
+        (ends, 32, mask),
+        (ends[:0], 1, mask[:0]),
+    ):
+        empty = window_indices(episode_ends, horizon, selected)
+        assert empty.shape == (0, 3) and empty.dtype == np.int64
+
+    rows = np.array([
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+        [4, 4, 4, 4], [4, 4, 4, 5], [4, 4, 5, 6], [4, 5, 6, 7],
+        [5, 6, 7, 8], [6, 7, 8, 8], [7, 8, 8, 8], [8, 8, 8, 8],
+    ])
+    values = np.arange(9 * 4, dtype=np.float32).reshape(9, 4)
+    with tempfile.TemporaryDirectory(prefix="dexmani-sampler-check-") as directory:
+        group = zarr.open_group(directory, mode="w")
+        group.create_dataset("meta/episode_ends", data=ends)
+        for key in ("action", "state"):
+            group.create_dataset(f"data/{key}", data=values, chunks=(3, 4))
+        sampler = SequenceSampler(
+            EpisodeStore(directory), 4, 3, 3, episode_mask=mask,
+            fields={"action": slice(1, 4, 2), "state": None}, field_horizons={"state": 2},
+        )
+        assert len(sampler) == len(rows)
+        for index, expected_rows in enumerate(rows):
+            np.testing.assert_array_equal(sampler.sample_source_rows(index), expected_rows)
+            sample = sampler.sample_sequence(index)
+            np.testing.assert_array_equal(sample["action"], values[expected_rows, 1:4:2])
+            np.testing.assert_array_equal(sample["state"], values[expected_rows[:2]])
 
 
 def check_time(device):
@@ -100,9 +154,21 @@ def check_tactile(device):
         reference_grad, = torch.autograd.grad((expected * probe).mean(), x)
         new_grad, = torch.autograd.grad((actual * probe).mean(), x)
         torch.testing.assert_close(reference_grad, new_grad, rtol=1e-5, atol=1e-6)
-    config = encoder.effective_config.copy()
-    config.pop("_target_")
-    restored = XHandPatchEncoder(**config).to(device)
+    with patch.object(XHandPatchEncoder, "__init__", autospec=True,
+                      side_effect=XHandPatchEncoder.__init__) as constructor:
+        policy = hydra.utils.instantiate({
+            "_target_": "dexmani_policy.agents.policies.adaptac.AdapTacPolicy",
+            "horizon": 4, "n_obs_steps": 1, "n_action_steps": 2, "action_dim": 19,
+            "tactile_source": "real", "tactile_encoder": encoder.effective_config,
+            "pc_dim": 3, "num_points": 16, "feature_dim": 16, "state_out_dim": 8,
+            "pc_encoder_config": dict(channels=24, num_patches=4, group_size=4, depth=1, num_heads=4),
+            "down_dims": [16, 32], "diffusion_step_embed_dim": 32,
+            "force_predictor_config": dict(n_layer=1, n_head=4, n_emb=16),
+            "fusion_num_heads": 4,
+        }, _convert_="all")
+    assert type(constructor.call_args.kwargs["region_ids"]) is list
+    restored = policy.obs_encoder.tactile_encoder.to(device)
+    assert isinstance(restored, XHandPatchEncoder)
     restored.load_state_dict(encoder.state_dict(), strict=True)
 
 
@@ -138,6 +204,7 @@ def check_rgb(device):
     assert hasattr(pooler.backbone.vision_model, "head")
     with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
         assert torch.isfinite(pooler(rgb)["global_token"]).all()
+    assert "attn_implementation" not in architecture
 
     from transformers import Dinov2Config, Dinov2Model, SiglipVisionConfig, SiglipVisionModel
     from dexmani_policy.training.common.config import load_policy_config, prepare_training
@@ -152,12 +219,30 @@ def check_rgb(device):
             source_model = model_class(config).to(dtype=torch.bfloat16)
             with tempfile.TemporaryDirectory(prefix="dexmani-rgb-source-") as directory:
                 source_model.save_pretrained(directory)
-                cfg = load_policy_config("dp")
+                cfg = load_policy_config("dp", [
+                    "horizon=8", "n_action_steps=3", "agent.down_dims=[16,32]",
+                    "agent.diffusion_step_embed_dim=32",
+                ])
                 cfg.initialization.rgb = directory
                 cfg.agent.rgb_backbone_name = kind
-                cfg.agent.rgb_backbone_config = {"tune_mode": mode}
+                cfg.agent.rgb_backbone_config = {"tune_mode": mode, "out_dim": 16, "image_size": [32, 32]}
                 prepare_training(cfg)
-                model = ViTEncoder(kind, **cfg.agent.rgb_backbone_config, out_dim=16)
+                plain = cast(dict[str, Any], OmegaConf.to_container(cfg.agent, resolve=True))
+                plain.pop("_target_")
+                rng = torch.get_rng_state()
+                reference = DPPolicy(**plain)
+                initialized_rng = torch.get_rng_state()
+                torch.set_rng_state(rng)
+                with patch.object(ViTEncoder, "__init__", autospec=True,
+                                  side_effect=ViTEncoder.__init__) as constructor:
+                    policy = hydra.utils.instantiate(cfg.agent, _convert_="all")
+                assert type(constructor.call_args.kwargs["architecture"]) is dict
+                assert torch.equal(torch.get_rng_state(), initialized_rng)
+                expected_state, actual_state = reference.state_dict(), policy.state_dict()
+                assert list(actual_state) == list(expected_state)
+                for key in expected_state:
+                    torch.testing.assert_close(actual_state[key], expected_state[key], rtol=0, atol=0)
+                model = policy.obs_encoder.backbone
                 model.initialize_weights(directory)
                 base = model.backbone.get_base_model() if mode == "lora" else model.backbone
                 source_state = source_model.state_dict()
@@ -165,7 +250,7 @@ def check_rgb(device):
                     if ".lora_" not in key:
                         torch.testing.assert_close(value, source_state[key.replace(".base_layer.", ".")], rtol=0, atol=0)
             # The source directory is gone: structure and parameters alone must restore offline.
-            restored = ViTEncoder(kind, **model.effective_config)
+            restored = ViTEncoder(model.kind, **model.effective_config)
             restored.load_state_dict(model.state_dict(), strict=True)
             model.to(device).eval()
             restored.to(device).eval()
@@ -274,14 +359,14 @@ def check_codebook_pipeline(device):
     manifest = dict(source_id="agent-check", episode_ends=[10, 19], episode_ids=["train", "val"],
                     train_indices=[0], val_indices=[1])
     with tempfile.TemporaryDirectory(prefix="dexmani-codebook-check-") as directory:
-        checkpoint, artifact = Path(directory) / "vq.pt", Path(directory) / "codebook.npz"
+        vq_checkpoint, artifact = Path(directory) / "vq.pt", Path(directory) / "codebook.npz"
         torch.save(dict(
             model_config=model.model_config, model_state_dict=model.state_dict(), epoch=1,
             metrics={"val_lookup_mse": metrics["lookup_mse"]},
             normalizer_state_dict={"fields.hand.scale": torch.ones(12), "fields.hand.offset": torch.zeros(12)},
             split_metadata=dict(split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
-        ), checkpoint)
-        table, metadata = export_codebook(checkpoint, artifact)
+        ), vq_checkpoint)
+        table, metadata = export_codebook(vq_checkpoint, artifact)
         loaded_table = HandStateCodebook(
             model.hand_dim, num_groups=model.num_groups, codebook_size=model.codebook_size,
         )
@@ -391,8 +476,7 @@ def check_codebook_pipeline(device):
                 obs, generator=torch.Generator(device=device).manual_seed(1024),
             )["future_actions"]
             torch.testing.assert_close(actual_prediction, expected_prediction, rtol=0, atol=0)
-        checkpoint.model_state = dict(checkpoint.model_state)
-        checkpoint.ema_model_state = dict(checkpoint.ema_model_state)
+        assert checkpoint.ema_model_state is not None
         key = next(iter(checkpoint.model_state))
         del checkpoint.model_state[key]
         del checkpoint.ema_model_state[key]
@@ -475,7 +559,7 @@ def main():
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_time, check_precision, check_tactile, check_rgb, check_vq,
+    for check in (check_sampler, check_time, check_precision, check_tactile, check_rgb, check_vq,
                   check_codebook, check_codebook_pipeline, check_policies):
         check(device)
         print(f"PASS {check.__name__} ({device})", flush=True)

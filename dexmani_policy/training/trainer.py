@@ -33,7 +33,7 @@ class PolicyTrainer:
         if cfg.get("resume_from") is not None and checkpoint is None:
             raise ValueError("Resume requires the checkpoint loaded by the training entry point")
         device = torch.device(cfg.training.device)
-        model = hydra.utils.instantiate(cfg.agent)
+        model = hydra.utils.instantiate(cfg.agent, _convert_="all")
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
         if data_description["action_start_index"] != model.action_start_index:
             raise ValueError("Dataset/policy action_start_index mismatch")

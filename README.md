@@ -136,7 +136,7 @@ python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>
 
 `test_tools/smoke_test.py` 每次接收一个配置，调用正式 `prepare_training/run_training` 短训、保存，再用 `prepare_resume` 在原目录恢复。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，不在 smoke 中建立第二套配置或扫描流程。
 
-`python -m dexmani_policy.test_tools.agent_checks --device cuda` 提供无需数据集或预训练权重的 agents 数值回归与合成短训；也支持 `--device cpu`，点云检查使用实际 PyTorch3D 后端。覆盖及组件计时边界见[项目架构](docs/项目架构.md#agents-优化依据与验证)。
+`python -m dexmani_policy.test_tools.agent_checks --device cuda` 提供无需外部数据集或预训练权重的数值回归与合成短训，也覆盖 Policy 普通配置容器、嵌套 tactile 构造及临时 Zarr 的窗口、padding、列切片和字段 horizon；支持 `--device cpu`，点云检查使用实际 PyTorch3D 后端。覆盖及组件计时边界见[项目架构](docs/项目架构.md#agents-优化依据与验证)。
 
 默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 

@@ -1,10 +1,8 @@
-import numba
 import numpy as np
 
 from dexmani_policy.datasets.episode_store import EpisodeStore
 
 
-@numba.jit(nopython=True)
 def window_indices(
     episode_ends: np.ndarray,
     sequence_length: int,
@@ -32,12 +30,12 @@ def window_indices(
         min_start = -pad_before
         max_start = episode_length - sequence_length + pad_after
 
-        for idx in range(min_start, max_start + 1):
-            buffer_start_idx = max(idx, 0) + start_idx
-            buffer_end_idx = min(idx + sequence_length, episode_length) + start_idx
-            sample_start_idx = buffer_start_idx - (idx + start_idx)
-            indices[cursor] = (buffer_start_idx, buffer_end_idx, sample_start_idx)
-            cursor += 1
+        window_starts = np.arange(min_start, max_start + 1, dtype=np.int64)
+        next_cursor = cursor + len(window_starts)
+        indices[cursor:next_cursor, 0] = np.maximum(window_starts, 0) + start_idx
+        indices[cursor:next_cursor, 1] = np.minimum(window_starts + sequence_length, episode_length) + start_idx
+        indices[cursor:next_cursor, 2] = np.maximum(-window_starts, 0)
+        cursor = next_cursor
 
     return indices
 

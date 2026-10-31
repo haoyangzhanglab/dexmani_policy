@@ -56,7 +56,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
 
     rng_state = get_rng_state()
     try:
-        agent = hydra.utils.instantiate(cfg["agent"])
+        agent = hydra.utils.instantiate(cfg["agent"], _convert_="all")
     finally:
         set_rng_state(rng_state)
 
