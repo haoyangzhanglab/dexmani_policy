@@ -127,6 +127,7 @@ class InterActDexPolicy(BasePolicy):
         num_inference_steps: int = 10,
         future_force_loss_weight: float = 0.0,
         future_force_offsets: tuple[int, ...] = (1, 4, 8, 13),
+        time_shift_alpha: float = 1.0,
     ) -> None:
         future_force_loss_weight = float(future_force_loss_weight)
         if not math.isfinite(future_force_loss_weight) or future_force_loss_weight < 0:
@@ -167,7 +168,7 @@ class InterActDexPolicy(BasePolicy):
         action_decoder = RectifiedFlow(
             model=backbone,
             t_sample_mode="uniform",
-            time_shift_alpha=1.0,
+            time_shift_alpha=time_shift_alpha,
             num_inference_steps=num_inference_steps,
         )
         super().__init__(
@@ -189,6 +190,7 @@ class InterActDexPolicy(BasePolicy):
     def effective_config(self) -> dict:
         return {
             **super().effective_config,
+            "time_shift_alpha": self.action_decoder.time_shift_alpha,
             "future_force_loss_weight": self.future_force_loss_weight,
             "future_force_offsets": list(self.future_force_offsets),
         }

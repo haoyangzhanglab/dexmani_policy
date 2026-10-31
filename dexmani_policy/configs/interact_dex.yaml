@@ -61,6 +61,7 @@ agent:
   p_drop_attn: 0.1
   qkv_bias: false
   qk_norm: false
+  time_shift_alpha: 1.0  # Training only; >1 shifts uniform samples toward noise (t=0).
   num_inference_steps: 10
 
 optimizer:

@@ -284,7 +284,7 @@ class PolicyTrainer:
     def train(self, *, max_updates=None):
         if max_updates is not None:
             positive_int(max_updates, "max_updates")
-        torch.set_float32_matmul_precision("high")
+        torch.set_float32_matmul_precision("highest")
 
         stop_step = (
             self.total_train_steps

@@ -40,9 +40,11 @@ def policy_state_dict(model) -> dict:
 
 def restore_policy(checkpoint_path, *, use_ema, device):
     import hydra
+    import torch
 
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
+    torch.set_float32_matmul_precision("highest")
     checkpoint = load_checkpoint(checkpoint_path)
     cfg = checkpoint.effective_config
     state = checkpoint.ema_model_state if use_ema else checkpoint.model_state
