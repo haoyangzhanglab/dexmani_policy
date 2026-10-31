@@ -1,10 +1,39 @@
+import json
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.config import PROJECT_ROOT, positive_int
 from dexmani_policy.common.checkpoint import load_checkpoint
-from dexmani_policy.common.experiments import resolve_experiment, resolve_policy_checkpoint
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+
+
+def _resolve_checkpoint(experiment, selector):
+    directory = PROJECT_ROOT / Path(experiment).expanduser()
+    if not directory.is_dir():
+        directory = PROJECT_ROOT / "experiments" / experiment
+    directory = directory.resolve(strict=True)
+    selector = str(selector)
+    selection = None
+    if selector == "best":
+        selection = json.loads((directory / "best_ckpt.json").read_text())
+        path = directory / selection["ckpt_relpath"]
+    elif selector == "latest":
+        path = directory / "checkpoints/latest.pt"
+    elif selector.endswith("pct") and selector[:-3].isdigit():
+        target = int(selector[:-3])
+        matches = sorted(directory.glob(f"checkpoints/epoch=*-step=*-milestone={target:02d}pct.pt"))
+        if not matches:
+            raise FileNotFoundError(f"No {target}% milestone")
+        path = matches[0]
+    else:
+        path = Path(selector).expanduser()
+        if not path.is_absolute():
+            path = directory / "checkpoints" / path
+    path = path.resolve(strict=True)
+    checkpoint_dir = (directory / "checkpoints").resolve()
+    if not path.is_relative_to(checkpoint_dir) or not path.is_file():
+        raise ValueError(f"Checkpoint must be a file inside {checkpoint_dir}")
+    return directory, path, selection
 
 
 @dataclass(frozen=True)
@@ -47,8 +76,7 @@ class PolicyInfo:
 
 def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=None) -> PolicyInfo:
     # Read the checkpoint recipe without constructing a model.
-    directory = resolve_experiment(experiment)
-    path, selection = resolve_policy_checkpoint(directory, checkpoint)
+    directory, path, selection = _resolve_checkpoint(experiment, checkpoint)
     cfg = load_checkpoint(path, mmap=True).effective_config
     defaults = cfg["eval"] if selection is None else selection["inference"]
     if weights is None:

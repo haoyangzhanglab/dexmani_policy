@@ -131,6 +131,41 @@ class EvaluationChecks(unittest.TestCase):
         values = [candidate(0.5, None, 9), candidate(0.5, 8, 4), candidate(0.5, 8, 6)]
         self.assertIs(max(values, key=candidate_score), values[2])
 
+    def test_inspect_selectors_and_checkpoint_path_limits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / 'experiments/nested/run'
+            cfg = test_training_resume.TrainingResumeChecks().make_config(root, run)
+            run_training(cfg, max_updates=1)
+            latest = (run / 'checkpoints/latest.pt').resolve()
+            state = load_checkpoint(latest)
+            later = save_checkpoint(run / 'checkpoints/epoch=0002-step=00000002-milestone=20pct.pt',
+                                    replace(state, global_step=2))
+            first = save_checkpoint(run / 'checkpoints/epoch=0001-step=00000009-milestone=20pct.pt',
+                                    replace(state, global_step=9))
+            write_json(run / 'best_ckpt.json', {
+                'ckpt_relpath': str(later.relative_to(run)),
+                'inference': {'use_ema': True, 'inference_steps': 3},
+            })
+            outside = save_checkpoint(run / 'outside.pt', state)
+            (run / 'checkpoints/escape.pt').symlink_to(outside)
+            with patch('dexmani_policy.deployment.metadata.PROJECT_ROOT', root):
+                best = inspect_policy('nested/run')
+                self.assertEqual(best.checkpoint_path, later)
+                self.assertEqual(best.weights, 'ema')
+                self.assertEqual(best.inference_steps, 3)
+                self.assertEqual(inspect_policy('experiments/nested/run', 'latest').checkpoint_path,
+                                 latest)
+                self.assertEqual(inspect_policy(run, '020pct').checkpoint_path, first)
+                self.assertEqual(inspect_policy(run, later.name).checkpoint_path, later)
+                self.assertEqual(inspect_policy(run, later).checkpoint_path, later)
+                with self.assertRaisesRegex(FileNotFoundError, 'No 40% milestone'):
+                    inspect_policy(run, '40pct')
+                for selector in ('../outside.pt', 'escape.pt', outside):
+                    with self.subTest(selector=selector):
+                        with self.assertRaisesRegex(ValueError, 'inside'):
+                            inspect_policy(run, selector)
+
 
 if __name__ == '__main__':
     unittest.main()
