@@ -26,7 +26,7 @@ class ExperimentLogger:
                 kept = []
                 for line in lines:
                     step = json.loads(line)["step"]
-                    if step is None or step <= resume_step:
+                    if step <= resume_step:
                         kept.append(line)
                 if len(kept) != len(lines):
                     backup = path.with_name(f"metrics.{datetime.now():%Y%m%d_%H%M%S_%f}.jsonl.bak")
@@ -63,8 +63,8 @@ class ExperimentLogger:
             cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
             self.wandb_run.config.update(cfg_dict)
 
-    def log(self, data: dict[str, Any], step: int | None = None):
-        record = {"step": int(step) if step is not None else None, **data}
+    def log(self, data: dict[str, Any], step: int):
+        record = {"step": step, **data}
         self.metrics_file.write(json.dumps(record, ensure_ascii=False) + "\n")
         if self.wandb_run is not None:
             self.wandb_run.log(data, step=step)
@@ -112,36 +112,16 @@ def count_params(module) -> tuple[int, int]:
 
 
 def print_param_count(agent) -> None:
-    total, _ = count_params(agent)
-    fields = agent.consumed_observation_fields
-    if fields:
-        print(f"[Modalities] {', '.join(fields)}")
-    print(f"[{type(agent).__name__}] Parameter Count")
-    print(f"  Total: {total / 1e6:.2f} M")
-
-    for name, child in agent.named_children():
-        t, tr = count_params(child)
-        frozen = t - tr
-        print(
-            f"  {name:<20}: {t / 1e6:.2f} M  "
-            f"(trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)"
-        )
+    total, trainable = count_params(agent)
+    print(f"[{type(agent).__name__}] parameters={total / 1e6:.2f} M, trainable={trainable / 1e6:.2f} M")
 
 
-def print_training_recipe(cfg, *, batches_per_epoch, samples_per_epoch):
+def print_training_recipe(cfg, *, batches_per_epoch):
     batch = cfg.dataloader.batch_size
     accumulation = cfg.training.loop.gradient_accumulation_steps
     updates = (batches_per_epoch + accumulation - 1) // accumulation
-    samples = min(samples_per_epoch, batches_per_epoch * batch)
-    tail = samples - (updates - 1) * accumulation * batch
     print(
         f"[Training] batch={batch}, accumulation={accumulation}, "
-        f"updates/epoch={updates}, last group samples={tail}, "
+        f"updates/epoch={updates}, "
         f"total updates={cfg.training.loop.total_train_steps}"
-    )
-    print(
-        f"[Optimizer] lr={cfg.optimizer.lr:g}, scheduler={cfg.training.lr_scheduler}, "
-        f"warmup={cfg.training.lr_warmup_steps}, EMA={cfg.training.use_ema}, "
-        f"bf16={cfg.training.get('use_bfloat16', False)}, "
-        f"compile={cfg.training.get('use_compile', False)}"
     )

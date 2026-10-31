@@ -44,8 +44,10 @@ class LinearNormalizer(nn.Module):
             raise ValueError(f"Unknown normalization mode: {mode}")
 
         count = 0
-        sum_squares = torch.zeros((), dtype=torch.float64)
-        max_abs = torch.zeros((), dtype=torch.float64)
+        if mode == "rms":
+            sum_squares = torch.zeros((), dtype=torch.float64)
+        elif mode == "max_abs":
+            max_abs = torch.zeros((), dtype=torch.float64)
         for chunk in chunks:
             values = torch.as_tensor(chunk, dtype=torch.float64)
             if not values.numel():
@@ -53,8 +55,10 @@ class LinearNormalizer(nn.Module):
             feature_shape = values.shape[-last_n_dims:]
             values = values.reshape(-1, feature_shape.numel())
             size = len(values)
-            if mode in {"rms", "max_abs"}:
+            if mode == "rms":
                 sum_squares += values.square().sum()
+                size = values.numel()
+            elif mode == "max_abs":
                 max_abs = torch.maximum(max_abs, values.abs().max())
                 size = values.numel()
             elif mode == "limits":
@@ -80,8 +84,7 @@ class LinearNormalizer(nn.Module):
             raise ValueError(f"Insufficient samples for {key} with mode={mode}")
 
         if mode in {"rms", "max_abs"}:
-            rms = (sum_squares / count).sqrt()
-            magnitude = rms if mode == "rms" else max_abs
+            magnitude = (sum_squares / count).sqrt() if mode == "rms" else max_abs
             scalar = torch.ones_like(magnitude) if magnitude == 0 else magnitude.reciprocal()
             scale = scalar.float().expand(feature_shape).clone()
             offset = torch.zeros_like(scale)
@@ -101,9 +104,6 @@ class LinearNormalizer(nn.Module):
         if not valid.all():
             raise ValueError(f"Cannot represent finite, invertible affine parameters for {key!r}")
         self.fields[key] = FieldNormalizer(scale, offset)
-        if mode in {"rms", "max_abs"}:
-            ratio = "n/a (all zero)" if rms == 0 else f"{max_abs / rms:.6g}"
-            print(f"[Normalizer] {key}: {mode}, scale={scalar:.6g}, RMS={rms:.6g}, max/RMS={ratio}")
 
     def __getitem__(self, key) -> FieldNormalizer:
         return self.fields[key]

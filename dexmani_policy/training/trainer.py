@@ -145,9 +145,7 @@ class PolicyTrainer:
         }
 
         print_param_count(model)
-        print_training_recipe(
-            self.cfg, batches_per_epoch=self.batches_per_epoch, samples_per_epoch=len(dataset)
-        )
+        print_training_recipe(self.cfg, batches_per_epoch=self.batches_per_epoch)
         self.logger = ExperimentLogger(**cfg.workspace, resume_step=None if checkpoint is None else checkpoint.global_step)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
@@ -255,7 +253,7 @@ class PolicyTrainer:
         )
         self.stop_requested = True
 
-    def log_step(self, group_metrics, samples, elapsed, data_wait, pbar):
+    def log_step(self, group_metrics, elapsed, pbar):
         metrics = {
             "train/lr": self.scheduler.get_last_lr()[0],
             "train/epoch": self.current_epoch,
@@ -266,12 +264,7 @@ class PolicyTrainer:
             )
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
         metrics = to_log_scalars(metrics)
-        metrics.update({
-            "train/step_time": elapsed,
-            "train/data_wait_time": data_wait,
-            "train/samples_per_sec": samples / elapsed,
-            "train/samples_per_step": samples,
-        })
+        metrics["train/step_time"] = elapsed
         pbar.set_postfix(
             loss=f"{metrics['train/loss']:.5f}",
             step=f"{self.global_step:,}",
@@ -323,19 +316,14 @@ class PolicyTrainer:
                     # Start before iterator creation, including the epoch's first data wait.
                     group_start_time = time.perf_counter()
                     iterator = iter(self.train_loader)
-                    group_data_wait = time.perf_counter() - group_start_time
                     for group_start in range(
                         start_batch, num_batches, self.gradient_accumulation_steps
                     ):
                         group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
                         record_group = (self.global_step + 1) % self.log_interval_steps == 0
                         group_metric_sums: dict[str, torch.Tensor | float] = {}
-                        group_samples = 0
                         for group_pos in range(group_size):
-                            data_wait_start = time.perf_counter()
                             batch = next(iterator)
-                            group_data_wait += time.perf_counter() - data_wait_start
-                            group_samples += batch["action"].shape[0]
                             log_dict = self.train_microbatch(
                                 batch, loss_divisor=group_size, log_metrics=record_group,
                             )
@@ -353,9 +341,7 @@ class PolicyTrainer:
                                 key: value / group_size
                                 for key, value in group_metric_sums.items()
                             }
-                            self.log_step(
-                                group_metrics, group_samples, group_elapsed, group_data_wait, pbar
-                            )
+                            self.log_step(group_metrics, group_elapsed, pbar)
 
                         pct = self.milestone_steps.get(self.global_step)
                         if pct is not None:
@@ -364,7 +350,6 @@ class PolicyTrainer:
                             break
                         # Exclude this update's logging/checkpoint work from the next one.
                         group_start_time = time.perf_counter()
-                        group_data_wait = 0.0
                     iterator = None
 
                     if self.stop_requested:

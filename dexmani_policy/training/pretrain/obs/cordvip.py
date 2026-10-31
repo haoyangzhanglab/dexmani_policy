@@ -123,7 +123,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                 current_epoch = epoch
                 step_start = time.perf_counter()
                 iterator = iter(loader)
-                data_wait = time.perf_counter() - step_start
                 for group_start in range(start_batch, batches_per_epoch, accumulation):
                     group_size = min(accumulation, batches_per_epoch - group_start)
                     record = (
@@ -134,9 +133,7 @@ def train(cfg, checkpoint=None, max_updates=None):
                     totals: dict[str, torch.Tensor] = {}
                     optimizer.zero_grad(set_to_none=True)
                     for _ in range(group_size):
-                        data_wait_start = time.perf_counter()
                         batch = next(iterator)
-                        data_wait += time.perf_counter() - data_wait_start
                         batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
                         loss, metrics = model(batch)
                         if not torch.isfinite(loss):
@@ -161,7 +158,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                                     'train/lr': scheduler.get_last_lr()[0],
                                     'train/epoch': current_epoch,
                                     'train/step_time': elapsed,
-                                    'train/data_wait_time': data_wait,
                                 }
                             ),
                             step,
@@ -171,7 +167,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                     if step % cfg.training.save_every_updates == 0:
                         save_run(model, optimizer, scheduler, cfg, step)
                     step_start = time.perf_counter()
-                    data_wait = 0.0
                 iterator = None
                 if stop_requested:
                     break

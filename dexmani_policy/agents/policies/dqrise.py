@@ -117,25 +117,13 @@ class DQRISEPolicy(BasePolicy):
         normed = self.normalizer["action"].normalize(batch["action"])
         arm_part = normed[..., : self.tcp_dim]
         hand_part = normed[..., self.tcp_dim :]
-        index, discrete_idx = self.hand_codebook.encode(hand_part)
+        index, _ = self.hand_codebook.encode(hand_part)
         index = index.to(arm_part.dtype)
 
         flow_target = torch.cat([arm_part, index], dim=-1)
         action_loss, loss_dict = self.action_decoder.compute_loss(
             condition, flow_target, log_metrics=log_metrics, **kwargs,
         )
-
-        if not log_metrics:
-            return action_loss, loss_dict
-
-        with torch.no_grad():
-            num_codes = self.hand_codebook.num_codes
-            counts = torch.zeros(num_codes, device=discrete_idx.device, dtype=torch.float32)
-            counts.scatter_add_(0, discrete_idx.flatten(), counts.new_ones(discrete_idx.numel()))
-            probabilities = counts / counts.sum().clamp_min(1.0)
-            entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
-            loss_dict["batch_nn_code_entropy"] = entropy
-            loss_dict["batch_nn_code_used_1pct"] = (probabilities > 0.01).sum()
 
         return action_loss, loss_dict
 

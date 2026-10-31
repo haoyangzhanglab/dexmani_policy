@@ -71,23 +71,19 @@ def prepare_hand_data(cfg):
 
 
 @torch.no_grad()
-def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
-    """Evaluate a fixed model's runtime lookup and optional VQ reconstruction."""
+def evaluate_vq(vqvae, loader, device, *, chunk_size=4096):
+    """Evaluate a fixed model's runtime lookup error."""
     chunk_size = codebook_chunk_size(vqvae.codebook_size ** vqvae.num_groups, chunk_size)
     training = vqvae.training
     vqvae.eval()
     try:
         prototypes, _ = build_hand_prototypes(vqvae)
-        sums = torch.zeros(3, device=device, dtype=torch.float64)
         lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
         count = 0
         for (batch,) in loader:
             batch = batch.to(device, non_blocking=True)
             n = batch.shape[0]
             count += n
-            if reconstruction:
-                recon_loss, commitment_loss, _, recon_mse = vqvae(batch)
-                sums += torch.stack((recon_loss, commitment_loss, recon_mse)).double() * n
             for values in batch.float().split(chunk_size):
                 distances = codebook_distances(values, prototypes)
                 lookup_sum += distances.amin(-1).double().square().sum()
@@ -96,10 +92,7 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
         lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
         if not np.isfinite(lookup_mse):
             raise FloatingPointError("Non-finite lookup_mse during VQ evaluation")
-        metrics = {"lookup_mse": lookup_mse}
-        if reconstruction:
-            metrics.update(zip(("enc", "vq", "mse"), (sums / count).tolist()))
-        return metrics
+        return {"lookup_mse": lookup_mse}
     finally:
         vqvae.train(training)
 
@@ -209,9 +202,7 @@ def train(cfg):
         train_total = (
             recipe.enc_loss_weight * train_metrics["enc"] + recipe.vq_loss_weight * train_metrics["vq"]
         )
-        selection_metrics = evaluate_vq(
-            vqvae, selection_loader, device, reconstruction=has_validation
-        )
+        selection_metrics = evaluate_vq(vqvae, selection_loader, device)
         metrics = {
             "train_enc": train_metrics["enc"],
             "train_vq": train_metrics["vq"],
@@ -228,12 +219,6 @@ def train(cfg):
             metrics["train_vq"],
             metrics["train_mse"],
         )
-        if has_validation:
-            metrics.update({f"val_{key}": selection_metrics[key] for key in ("enc", "vq", "mse")})
-            logger.info(
-                "validation | recon %.5f commitment %.5f recon_mse %.5f",
-                metrics["val_enc"], metrics["val_vq"], metrics["val_mse"],
-            )
         logger.info("%s %.7f", selection_metric, metrics[selection_metric])
         with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps({"epoch": epoch, **metrics}, allow_nan=False) + "\n")

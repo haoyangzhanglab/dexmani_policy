@@ -268,7 +268,7 @@ def check_codebook_pipeline(device):
     rows = torch.randn(19, 12).clamp(-1, 1)
     loader = DataLoader(TensorDataset(rows), batch_size=7)
     before = {key: value.clone() for key, value in model.state_dict().items()}
-    metrics = evaluate_vq(model, loader, device, reconstruction=False, chunk_size=5)
+    metrics = evaluate_vq(model, loader, device, chunk_size=5)
     assert model.training
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, before[key], rtol=0, atol=0)

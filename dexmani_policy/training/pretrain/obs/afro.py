@@ -146,7 +146,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                 current_epoch = epoch
                 step_start = time.perf_counter()
                 for index, batch in enumerate(loader, start=start_batch):
-                    data_wait = time.perf_counter() - step_start
                     batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
                     optimizer.zero_grad(set_to_none=True)
                     loss, metrics = model(batch)
@@ -166,7 +165,7 @@ def train(cfg, checkpoint=None, max_updates=None):
                     if step == 1 or step % cfg.training.loop.log_interval_steps == 0 or step == stop_step:
                         logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
                                                  | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch,
-                                                    "train/step_time": elapsed, "train/data_wait_time": data_wait}), step)
+                                                    "train/step_time": elapsed}), step)
                     if step >= stop_step or stop_requested:
                         break
                     step_start = time.perf_counter()
