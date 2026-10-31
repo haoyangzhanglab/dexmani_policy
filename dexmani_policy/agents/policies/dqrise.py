@@ -119,14 +119,11 @@ class DQRISEPolicy(BasePolicy):
         arm_part = normed[..., : self.tcp_dim]
         hand_part = normed[..., self.tcp_dim :]
         index, _ = self.hand_codebook.encode(hand_part)
-        index = index.to(arm_part.dtype)
 
         flow_target = torch.cat([arm_part, index], dim=-1)
-        action_loss, loss_dict = self.action_decoder.compute_loss(
+        return self.action_decoder.compute_loss(
             condition, flow_target, log_metrics=log_metrics, **kwargs,
         )
-
-        return action_loss, loss_dict
 
     @torch.no_grad()
     def predict_action_from_condition(
@@ -140,13 +137,12 @@ class DQRISEPolicy(BasePolicy):
             raise NotImplementedError("DQ-RISE does not support RTC")
         reduced_action = self.action_decoder.predict_action(
             condition, (condition.shape[0], self.horizon, self.flow_action_dim),
-            inference_steps=inference_steps, generator=generator,
+            inference_steps=inference_steps, dtype=torch.float32, generator=generator,
         )
 
         arm_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]
         hand_pred, _ = self.hand_codebook.decode(idx_pred)
-        hand_pred = hand_pred.to(arm_pred.dtype)
 
         normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)

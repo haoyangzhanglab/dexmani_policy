@@ -82,7 +82,7 @@ class HandStateCodebook(nn.Module):
         """Round continuous indices half-up before looking up normalized hand states."""
         if not torch.isfinite(continuous).all():
             raise ValueError("Continuous hand indices must be finite before quantization")
-        scaled = (continuous.clamp(-1.0, 1.0) + 1.0) * 0.5 * (self.num_codes - 1)
+        scaled = (continuous.float().clamp(-1.0, 1.0) + 1.0) * 0.5 * (self.num_codes - 1)
         indices = torch.floor(scaled + 0.5).long().clamp(0, self.num_codes - 1)
         return self.sorted_hand_poses[indices], indices
 
