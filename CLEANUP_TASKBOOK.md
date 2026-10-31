@@ -86,7 +86,7 @@
 | [x] | M3 初始化与 DQ 状态 | P1/P2 | fresh/restore 分开；码本只持运行必需状态 | M2 |
 | [x] | M4 续训与预训练生命周期 | P1/P2 | 同目录续训、完整恢复、按需导出/诊断 | M2、M3 |
 | [x] | M5 内部观测接口与封装 | P2 | 明确 Tensor 布局、收窄内部协议、展平固定壳层 | M2；相关路径需 M3 |
-| [ ] | M6 评测与部署 | P1/P2 | 简单评测函数、显式选模、同源部署配置 | M3、M4；公开接口切换需实际消费者 |
+| [~] | M6 评测与部署 | P1/P2 | 简单评测函数、显式选模、同源部署配置 | M3、M4；公开接口切换需实际消费者 |
 | [ ] | M7 工具与文档收尾 | P2/P3 | 远程脚本、smoke、依赖职责和日常文档收敛 | 对应前序批次 |
 
 实施起点 `c1ce1c177ffb677d2e8ec0d878d3b5062eabb3a4`，分支 `cleanup/research-workflow`，起始工作区干净。M0：InterAct 10 项、agent_checks CPU 8 组、10 方法配置解析、相关 shell 语法基线通过；配方与保护文件 hash 保存在 `/tmp/dexmani-cleanup-baseline`。数据与 policy conda 环境存在；CUDA 不可用，未验证 CUDA/仿真/硬件。Real 源码存在且有用户改动，公开迁移另列待验证。
@@ -327,6 +327,8 @@ M5 完成：内部Tensor/CHW FP32 RGB、PointNet输出、单相机与五指输�
 - 如执行 M6b，Real、PolicyRuntime、`best` 选择调用和同步脚本必须在同一可用版本切换；缺消费者验证时不能宣称部署兼容完成。
 
 **主要文件**：`evaluate.py`、`eval_pipeline.py`、`select_checkpoint.py`、`evaluation/{protocol,selection,rollout,artifacts,seeds}.py`、`common/experiments.py`、`deployment/{metadata,runtime}.py`、`scripts/eval/`、`scripts/remote/sync_down.sh`。
+
+M6a 完成：直接checkpoint评测与显式同run候选共用rollout；protocol/merge/test_request链退出；inspect从同一checkpoint读取，公开字段/动作窗口保持。编排2项回归（相同预算、seed隔离、tie、显式EMA覆盖raw默认、唯一输出/失败记录、删除config.yaml后inspect）通过。M6b部分待迁移：Real源码存在且有用户改动，未完成跨仓实际联调，保留best/lock及同步发布链；因此selection输出仍在原run内，selection-only薄CLI暂保留。真实SimRunner已尝试，SAPIEN RenderSystem报Vulkan ErrorExtensionNotPresent，失败详情落盘后进程exit139；真实闭环未通过，CUDA不可用。
 
 ### M7：把工具和文档也变薄
 

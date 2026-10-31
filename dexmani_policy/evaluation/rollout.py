@@ -3,65 +3,71 @@ import traceback
 from contextlib import closing
 from pathlib import Path
 
-from dexmani_policy.common.checkpoint import restore_policy
+from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
+from dexmani_policy.common.config import positive_int, require_tactile_source
+from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.env_runner.sim_runner import SimRunner
-from dexmani_policy.evaluation.artifacts import (
-    create_run_directory,
-    runtime_provenance,
-    write_failure,
-    write_json,
-)
+from dexmani_policy.evaluation.artifacts import create_run_directory, runtime_provenance, write_failure, write_json
 from dexmani_policy.evaluation.metrics import summarize_episodes
-from dexmani_policy.evaluation.protocol import EvalProtocol
+from dexmani_policy.evaluation.seeds import validate_seed_pool, validate_evaluation_seed
 
 
-def evaluate_policy(request: EvalProtocol, *, output_root, output_dir=None) -> tuple[dict, Path]:
-    directory = create_run_directory(output_root, output_dir)
+def load_seed_pool(cfg):
+    task = cfg["env_runner"]
+    if task.get("eval_seeds") is not None:
+        return validate_seed_pool(task["eval_seeds"])
+    from dexmani_sim import DATA_DIR
+    return [int(value) for value in (DATA_DIR / "eval_seeds" / f"{task['task_name']}.txt").read_text().split()]
+
+
+def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_steps=None,
+                    seeds, seed=1024, device="cuda:0", video=True, output_dir=None):
+    """Run one checkpoint with explicit evaluation settings and one result directory."""
+    checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
+    cfg = load_checkpoint(checkpoint, mmap=True).effective_config
+    weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
+    if weights not in {"raw", "ema"}:
+        raise ValueError("weights must be raw or ema")
+    inference_steps = positive_int(cfg["eval"]["inference_steps"] if inference_steps is None
+                                   else inference_steps, "inference_steps")
+    action_steps = positive_int(cfg["agent"]["n_action_steps"] if action_steps is None
+                                else action_steps, "action_steps")
+    future_steps = cfg["agent"]["horizon"] - cfg["policy_metadata"]["action_start_index"]
+    if action_steps > future_steps:
+        raise ValueError(f"action_steps must not exceed future_steps ({future_steps})")
+    seeds = validate_seed_pool(list(seeds))
+    if not seeds:
+        raise ValueError("Evaluation seeds must be nonempty")
+    validate_evaluation_seed(seed)
+    if require_tactile_source(cfg["dataset"]["sensor_modalities"], cfg.get("tactile_source")) == "real":
+        raise ValueError("Simulation evaluation requires sim-source tactile observations")
+    options = dict(cfg["env_runner"])
+    options.pop("eval_seeds", None)
+    options.update(n_obs_steps=cfg["agent"]["n_obs_steps"],
+                   sensor_modalities=cfg["dataset"]["sensor_modalities"],
+                   rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
+    directory = create_run_directory(checkpoint.parent.parent / "eval_dexsim", output_dir)
     path = directory / "result_details.json"
-    record = {
-        "request": vars(request).copy(),
-        "status": "running",
-        "episodes": [],
-        "statistics": None,
-    }
+    record = dict(status="running", checkpoint=str(checkpoint), weights=weights,
+                  inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
+                  seed=seed, device=str(device), video=video, runner_options=options,
+                  episodes=[], statistics=None)
     write_json(path, record, overwrite=False)
-
     try:
-        render_mode = (request.runner_options.get("env_kwargs") or {}).get("render_mode")
+        render_mode = (options.get("env_kwargs") or {}).get("render_mode")
         if render_mode == "human" and not os.environ.get("DISPLAY"):
             raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
-
-        set_seed(request.config["eval"]["seed"])
+        set_seed(seed)
         record["runtime"] = runtime_provenance()
-        agent = restore_policy(
-            request.checkpoint, use_ema=request.use_ema, device=request.device
-        )
-        if "global_step" in request.source and request.source["global_step"] != agent.checkpoint_step:
-            raise ValueError("Selected global_step differs from checkpoint state")
+        agent = restore_policy(checkpoint, use_ema=weights == "ema", device=device)
         record["global_step"] = agent.checkpoint_step
         record["runtime"]["parameter_dtypes"] = sorted({str(p.dtype) for p in agent.parameters()})
-        record["runtime"]["device"] = str(next(agent.parameters()).device)
-        if str(request.device).startswith("cuda"):
-            import torch
-
-            record["runtime"]["device_name"] = torch.cuda.get_device_name(request.device)
-
-        runner = SimRunner(**request.runner_options)
-        with closing(
-            runner.run(
-                agent,
-                seeds=request.seeds,
-                inference_steps=request.inference_steps,
-                action_steps=request.action_steps,
-                video_save_dir=(
-                    directory / "videos" / runner.task_name
-                    if request.config["eval"]["video"]["enabled"] else None
-                ),
-            )
-        ) as episodes:
+        from dexmani_policy.env_runner.sim_runner import SimRunner
+        runner = SimRunner(**options)
+        with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
+                                action_steps=action_steps,
+                                video_save_dir=directory / "videos" / runner.task_name if video else None)) as episodes:
             record["episodes"].extend(episodes)
-
         record["statistics"] = summarize_episodes(record["episodes"])
         record["status"] = "completed"
         write_json(path, record)
@@ -69,10 +75,5 @@ def evaluate_policy(request: EvalProtocol, *, output_root, output_dir=None) -> t
         record.update(status="failed", error=traceback.format_exc(), statistics=None)
         write_failure(path, record)
         raise
-
-    stats = record["statistics"]
-    print(
-        f"{stats['n_success']}/{stats['n_valid_episodes']}; success_rate={stats['success_rate']:.1%}, "
-        f"avg_steps={stats['avg_steps']}; {path}"
-    )
+    print(f"{record['statistics']}; {path}")
     return record, path

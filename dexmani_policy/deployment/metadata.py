@@ -1,7 +1,8 @@
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from dexmani_policy.common.config import load_experiment_config, positive_int
+from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.experiments import resolve_experiment, resolve_policy_checkpoint
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
@@ -45,10 +46,10 @@ class PolicyInfo:
 
 
 def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=None) -> PolicyInfo:
-    # Inspect model inputs without importing Torch or constructing a model.
+    # Read the checkpoint recipe without constructing a model.
     directory = resolve_experiment(experiment)
-    cfg = load_experiment_config(directory)
     path, selection = resolve_policy_checkpoint(directory, checkpoint)
+    cfg = load_checkpoint(path, mmap=True).effective_config
     defaults = cfg["eval"] if selection is None else selection["inference"]
     if weights is None:
         if type(defaults["use_ema"]) is not bool:

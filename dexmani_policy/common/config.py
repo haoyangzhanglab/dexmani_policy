@@ -79,12 +79,6 @@ def assemble_policy_config(cfg):
     return cfg
 
 
-def load_experiment_config(experiment_dir):
-    return OmegaConf.to_container(
-        OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True
-    )
-
-
 def read_split_manifest(value):
     if isinstance(value, (str, Path)):
         return json.loads(Path(value).expanduser().read_text())
