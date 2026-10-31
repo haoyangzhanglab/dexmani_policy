@@ -14,9 +14,9 @@ from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 
 def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
     """Assemble the train affine once, inheriting complete fields before fitting the rest."""
-    if not dataset.training:
-        raise ValueError("Normalizer fitting requires the training dataset")
     if isinstance(dataset, ObservationPretrainDataset):
+        if not dataset.training:
+            raise ValueError("Normalizer fitting requires the training dataset")
         if set(spec) != dataset.normalization_fields.keys():
             raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
     expected_shapes = normalization_feature_shapes(feature_dims)
@@ -49,15 +49,6 @@ def build_dataset(cfg):
     spec = cfg.normalization
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
-    # DemonstrationDataset 已核对 split 与数据身份一致；resume 额外拒绝双方都没有 ID。
-    if (
-        cfg.get("resume_from") is not None
-        and buffer.attrs.get("format") == "dexmani.real.canonical"
-        and buffer.attrs.get("source_id") is None
-    ):
-        raise ValueError(
-            "Canonical checkpoint resume requires source_id in both the dataset and saved split"
-        )
     dims = {
         key: int(buffer[key].shape[-1]) for key, mode in spec.items()
         if key != "action" and (mode != "identity" or key in POINT_CLOUD_FIELDS)

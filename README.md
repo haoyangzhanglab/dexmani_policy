@@ -171,7 +171,7 @@ source_id: <实际 Canonical source_id>
 
 Git 已跟踪的模板可用对应提交和路径恢复；不同处理阶段使用不同版本时分别记录仓库、SHA 和模板路径。未提交的代码或自定义模板应随实验手动归档，或先提交再记录。缺少历史记录时如实注明未知，不猜测补写。修改加工算法或模板后须重新导出数据。
 
-Canonical 数据的 checkpoint resume 要求数据与保存的 split 都有非空 `source_id`。原样搬迁保留 ID，可继续 resume；重新导出的数据获得新 ID，不能复用旧 normalizer。旧数据仍可从头训练、指定 split 或读取评价；需要可靠 resume 时请显式重新导出并开始新实验。
+Canonical 数据的 `source_id` 可选；已有 ID 必须保留，并与保存的 split 一致，一方缺失或 ID 不同仍拒绝 resume。双方均无 ID 的旧数据，在 episode 边界、episode/trial 身份与实际划分匹配时可续训，由研究者保证使用同一份未改写的数据。同结构但内容不同的数据在双方无 ID 时无法区分，`source_id` 本身也只是 producer 标签，不是内容哈希。原样搬迁保留已有身份；重新导出数据应开启新实验，不能靠删除 ID 绕过匹配或复用旧 normalizer。
 
 ## 文档
 

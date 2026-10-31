@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 
 from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
-from dexmani_policy.common.config import positive_int, require_tactile_source
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.io_util import write_failure, write_json
 from dexmani_policy.common.pytorch_util import set_seed
@@ -52,8 +52,6 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
         if not seeds:
             raise ValueError("Evaluation seeds must be nonempty")
         validate_evaluation_seed(seed)
-    if require_tactile_source(cfg["dataset"]["sensor_modalities"], cfg.get("tactile_source")) == "real":
-        raise ValueError("Simulation evaluation requires sim-source tactile observations")
     options = dict(cfg["env_runner"])
     options.pop("eval_seeds", None)
     options.update(n_obs_steps=cfg["agent"]["n_obs_steps"],

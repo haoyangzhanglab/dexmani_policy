@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import math
 from collections.abc import Callable
 from pathlib import Path
@@ -97,7 +96,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self.training = True
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -118,8 +116,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 raise ValueError(f"Stored {key} must have shape [T,N>0,C]")
             if pc_dim is not None and shape[-1] < pc_dim:
                 raise ValueError(f"Stored {key} does not satisfy configured pc_dim")
-        self.augmentation_cfg = augmentation_cfg
-        self.build_augmentors()
+        self.build_augmentors(augmentation_cfg)
         if {"point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"} <= set(sensor_modalities):
             if rgb_preprocess_size is not None:
                 raise ValueError("Calibrated RGB must stay raw in Dataset; resize in the encoder ImageProcessor")
@@ -177,22 +174,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             fields=self.consumed_fields, field_horizons={key: self.obs_horizon for key in self.sensor_modalities},
         )
 
-    def get_validation_dataset(self):
-        if not self.training:
-            return self
-        if not self.val_mask.any():
-            return None
-
-        val_set = copy.copy(self)
-        val_set.training = False
-        val_set.sampler = self.build_sampler(self.val_mask)
-        if not len(val_set.sampler):
-            return None
-        val_set.augmentation_cfg = None
-        val_set.augmentors = {}
-        val_set.random_keep_points = None
-        return val_set
-
     def __len__(self):
         return len(self.sampler)
 
@@ -202,23 +183,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             "obs": {m: sample[m] for m in self.sensor_modalities},
             "action": action,
         }
-
-    def preprocess_rgb(self, rgb, resize_hw: tuple[int, int]):
-        if not self.training:
-            return preprocess_rgb_eval(
-                rgb,
-                resize_hw=resize_hw,
-                center_crop_hw=self.rgb_random_crop_size,
-                keep_uint8=self.rgb_keep_uint8,
-                float_spatial_before_uint8=self.rgb_color_aug is not None,
-            )
-        return preprocess_rgb_train(
-            rgb,
-            resize_hw=resize_hw,
-            random_crop_hw=self.rgb_random_crop_size,
-            keep_uint8=self.rgb_keep_uint8,
-            color_augmentation=self.rgb_color_aug,
-        )
 
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx)
@@ -232,7 +196,13 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
         if "rgb" in data["obs"]:
             if self.rgb_preprocess_size is not None:
-                data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"], self.rgb_preprocess_size)
+                data["obs"]["rgb"] = preprocess_rgb_train(
+                    data["obs"]["rgb"],
+                    resize_hw=self.rgb_preprocess_size,
+                    random_crop_hw=self.rgb_random_crop_size,
+                    keep_uint8=self.rgb_keep_uint8,
+                    color_augmentation=self.rgb_color_aug,
+                )
             else:
                 data["obs"]["rgb"] = preprocess_rgb_eval(
                     data["obs"]["rgb"], resize_hw=None, center_crop_hw=None, keep_uint8=self.rgb_keep_uint8,
@@ -240,9 +210,9 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
         return dict_apply(data, torch.as_tensor)
 
-    def build_augmentors(self):
+    def build_augmentors(self, augmentation_cfg):
         self.augmentors: dict[str, list[Any]] = {}
-        augmentation = self.augmentation_cfg or {}
+        augmentation = augmentation_cfg or {}
         pc_cfg = augmentation.get("pc") or {}
         self.random_keep_points = pc_cfg.get("random_keep_points")
         if self.random_keep_points is not None:

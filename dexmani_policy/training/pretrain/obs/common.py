@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics
 
@@ -92,7 +91,6 @@ def save_run(model, optimizer, scheduler, cfg, step):
 def restore_run(model, optimizer, scheduler, checkpoint, *, device) -> int:
     # The optimizer already owns these Parameters, so restore their values in place.
     model.load_state_dict(checkpoint["model_state"], strict=True)
-    validate_normalizer_state(model.normalizer)
     optimizer.load_state_dict(checkpoint["optimizer_state"])
     scheduler.load_state_dict(checkpoint["scheduler_state"])
     set_rng_state(checkpoint["rng_state"], device)
@@ -130,6 +128,8 @@ def main():
     args = parser.parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     cfg = OmegaConf.create(checkpoint["effective_config"])
+    model: torch.nn.Module
+    encoder: torch.nn.Module
     if args.method == "afro":
         from dexmani_policy.training.pretrain.obs.afro import AFROPretrain
 
@@ -141,7 +141,6 @@ def main():
         model = CordViPPretrain(cfg.normalization, **cfg.model)
         encoder = model.obs_encoder
     model.load_state_dict(checkpoint["model_state"], strict=True)
-    validate_normalizer_state(model.normalizer)
     export_encoder(model, encoder, args.output)
 
 

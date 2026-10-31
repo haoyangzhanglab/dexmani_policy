@@ -20,8 +20,7 @@ from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
 from dexmani_policy.agents.action_decoders.backbones.sat import SAT
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
-from dexmani_policy.agents.hand_prior.artifacts import load_codebook
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder

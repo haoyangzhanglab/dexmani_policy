@@ -8,8 +8,9 @@ import torch
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.hand_prior.artifacts import load_codebook
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_hand_coordinates
+from dexmani_policy.agents.hand_prior.codebook import (
+    HandStateCodebook, load_codebook, validate_hand_coordinates,
+)
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 

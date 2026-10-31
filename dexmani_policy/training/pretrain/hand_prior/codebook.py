@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from dexmani_policy.agents.hand_prior.artifacts import save_codebook
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.io_util import atomic_path
@@ -72,9 +72,19 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output, overwrite=overwrite) as temporary:
-        save_codebook(
-            temporary, codebook, metadata, hand_affine={"scale": scale, "offset": offset},
-        )
+        payload = {
+            "sorted_hand_poses": codebook.sorted_hand_poses.detach().cpu().numpy(),
+            "hand_normalizer_scale": scale.numpy(),
+            "hand_normalizer_offset": offset.numpy(),
+            "pose_space": np.asarray("normalized"),
+            "hand_dim": np.asarray(codebook.hand_dim),
+            "num_groups": np.asarray(codebook.num_groups),
+            "codebook_size": np.asarray(codebook.codebook_size),
+            "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True, allow_nan=False)),
+        }
+        # An open file prevents NumPy from silently appending a second suffix.
+        with open(temporary, "wb") as file:
+            np.savez(file, **payload)
     return codebook, metadata
 
 

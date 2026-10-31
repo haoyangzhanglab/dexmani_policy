@@ -19,8 +19,6 @@ def validate_evaluation_seed(seed):
 
 
 def validate_seed_pool(pool):
-    if not isinstance(pool, list):
-        raise ValueError("Seeds must be a list")
     if any(type(seed) is not int or not 0 <= seed < 2**32 for seed in pool):
         raise ValueError("Seed pool requires integer seeds in [0, 2**32)")
     if len(set(pool)) != len(pool):
