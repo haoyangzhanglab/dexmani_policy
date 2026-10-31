@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from dexmani_policy.agents.modules import build_mlp
 
-from .ops import index_points, sample_point_patches, load_pointcloud_ops
+from .ops import index_points, sample_point_patches
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,6 @@ class PointNetPatchEmbedding(nn.Module):
         fps_random_config=None,
     ):
         super().__init__()
-        load_pointcloud_ops()
         self.num_patches = num_patches
         self.patch_size = patch_size
         self.fps_random_config = dict(fps_random_config or {})
