@@ -12,10 +12,10 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
-    DiffusionForceHead,
-    ForceGuidedAttentionFusion,
-    ForcePredictionTransformer,
-    VisuoTactileInteraction,
+    ForceDiffusion,
+    ForceGuidedFusion,
+    ForceTransformer,
+    VisuoTactileAttention,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
@@ -49,7 +49,7 @@ class AdapTacObservationEncoder(nn.Module):
         self.tactile_encoder = tactile_encoder
         if (tactile_encoder.num_tokens, tactile_encoder.out_dim) != (5, 64):
             raise ValueError("AdapTac requires five ordered 64D tactile tokens")
-        self.interaction = VisuoTactileInteraction(
+        self.interaction = VisuoTactileAttention(
             self.pc_encoder.out_dim, self.tactile_encoder.out_dim, self.tactile_encoder.num_tokens,
         )
         self.tactile_projection = nn.Linear(
@@ -149,8 +149,8 @@ class AdapTacPolicy(BasePolicy):
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
         self.force_dim = 15
-        self.force_predictor = DiffusionForceHead(
-            ForcePredictionTransformer(
+        self.force_predictor = ForceDiffusion(
+            ForceTransformer(
                 horizon=self.future_steps,
                 cond_dim=2 * feature_dim,
                 force_dim=self.force_dim,
@@ -159,7 +159,7 @@ class AdapTacPolicy(BasePolicy):
             num_training_steps,
             force_num_inference_steps,
         )
-        self.force_fusion = ForceGuidedAttentionFusion(
+        self.force_fusion = ForceGuidedFusion(
             visual_dim=feature_dim,
             tactile_dim=feature_dim,
             guide_dim=self.force_dim * (n_obs_steps + self.future_steps),
@@ -173,11 +173,6 @@ class AdapTacPolicy(BasePolicy):
     @property
     def consumed_observation_fields(self):
         return tuple(dict.fromkeys((*self.obs_encoder.consumed_observation_fields, "finger_tactile_force")))
-
-    @property
-    def inference_metadata(self):
-        return {**super().inference_metadata,
-                "consumed_observation_fields": list(self.consumed_observation_fields)}
 
     def current_force(self, preprocessed: dict) -> torch.Tensor:
         return preprocessed["finger_tactile_force"].float().reshape(-1, self.n_obs_steps, self.force_dim)

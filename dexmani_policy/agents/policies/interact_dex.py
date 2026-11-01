@@ -6,17 +6,16 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.agents.action_decoders.backbones.interact_dex import InterActDiTX
+from dexmani_policy.agents.action_decoders.backbones.ditx import CoupledDiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.obs_encoder.interaction.gated_tactile_fusion import GatedTactileFusion
-from dexmani_policy.agents.obs_encoder.interaction.hand_history import HandHistoryEncoder
-from dexmani_policy.agents.obs_encoder.interaction.hand_scene import HandSceneEncoder
-from dexmani_policy.agents.obs_encoder.interaction.scene_aggregator import SceneAggregator
+from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
+    HandHistoryEncoder, HandSceneFusion, SceneTokenizer,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder, _rotation_6d_to_matrix
 from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
-from dexmani_policy.common.config import positive_int, require_tactile_source, validate_future_force_offsets
+from dexmani_policy.common.config import require_tactile_source, validate_future_force_offsets
 
 
 class InterActDexObservationEncoder(nn.Module):
@@ -32,37 +31,30 @@ class InterActDexObservationEncoder(nn.Module):
         pc_dim: int,
         num_points: int,
         n_obs_steps: int,
-        history_mixer: bool = True,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
+        self.n_obs_steps = n_obs_steps
         self.num_points = num_points
         self.tactile_source = tactile_source
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
         self.hand_state = HandStateEncoder(token_dim=self.obs_token_dim)
-        self.hand_scene = HandSceneEncoder(
-            token_channels=self.obs_token_dim, scene_channels=self.pc_encoder.out_dim,
-        )
-        self.tactile_fusion = GatedTactileFusion(
-            token_channels=self.obs_token_dim, tactile_encoder=tactile_encoder,
-        )
-        self.scene_aggregator = SceneAggregator(token_channels=self.pc_encoder.out_dim)
+        self.hand_scene = HandSceneFusion(self.pc_encoder.out_dim, tactile_encoder)
+        self.scene_tokenizer = SceneTokenizer(self.pc_encoder.out_dim)
         self.scene_projection = nn.Linear(self.pc_encoder.out_dim, self.obs_token_dim)
-        self.hand_history = HandHistoryEncoder(n_obs_steps) if history_mixer else None
+        self.hand_history = HandHistoryEncoder(n_obs_steps)
 
     @property
     def effective_config(self) -> dict:
         return {
             "pc_encoder_config": self.pc_encoder.effective_config,
             "fps_random_config": self.pc_encoder.fps_random_config,
-            "tactile_encoder": self.tactile_fusion.tactile_encoder.effective_config,
+            "tactile_encoder": self.hand_scene.tactile_encoder.effective_config,
             "tactile_source": self.tactile_source,
             "n_obs_steps": self.n_obs_steps,
-            "history_mixer": self.hand_history is not None,
         }
 
     def forward(self, obs: dict) -> torch.Tensor:
@@ -71,28 +63,23 @@ class InterActDexObservationEncoder(nn.Module):
             self.pc_encoder.fps_random_config, training=self.training,
         )
         patches = self.pc_encoder(pc)
-        scene = self.scene_projection(self.scene_aggregator(
+        scene = self.scene_projection(self.scene_tokenizer(
             patches["tokens"], patches["xyz"],
         ))
         hand = self.hand_state(obs["joint_state"], obs["eef_pose"], obs["fingertip_xyz"])
-        relation = self.hand_scene(
-            pc, patches, hand["anchor_xyz"], hand["hand_tokens"],
-            rotation_world_from_eef=hand["rotation_world_from_eef"],
-            query_context=scene.mean(dim=1),
-        )
         tactile = obs["finger_tactile_force"]
         if self.tactile_source == "sim":
             # The scalar RMS/MaxAbs affine commutes with this world-to-EEF rotation.
             with torch.autocast(device_type=tactile.device.type, enabled=False):
                 tactile = tactile.float() @ hand["rotation_world_from_eef"].float()
-        # Fusion already includes both the hand and scene residuals.
-        interaction = self.tactile_fusion(
-            relation, tactile=tactile,
+        interaction = self.hand_scene(
+            pc, patches, hand["anchor_xyz"], hand["hand_tokens"],
+            rotation_world_from_eef=hand["rotation_world_from_eef"],
+            query_context=scene.mean(dim=1), tactile=tactile,
         )
         scene = scene.unflatten(0, (-1, self.n_obs_steps))
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps))
-        if self.hand_history is not None:
-            interaction = self.hand_history(interaction)
+        interaction = self.hand_history(interaction)
         # Each frame contains six body tokens followed by twelve scene tokens.
         return torch.cat((interaction, scene), dim=2).flatten(1, 2).float()
 
@@ -111,7 +98,6 @@ class InterActDexPolicy(BasePolicy):
         pc_dim: int = 6,
         state_dim: int = 19,
         num_points: int = 1024,
-        history_mixer: bool = True,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         timestep_embed_dim: int = 128,
@@ -151,11 +137,10 @@ class InterActDexPolicy(BasePolicy):
             pc_dim=pc_dim,
             num_points=num_points,
             n_obs_steps=n_obs_steps,
-            history_mixer=history_mixer,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
         )
-        backbone = InterActDiTX(
+        backbone = CoupledDiTX(
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,

@@ -1,5 +1,3 @@
-"""Visuo-tactile interaction, future-force diffusion and force-guided fusion."""
-
 import torch
 from torch import nn
 
@@ -10,43 +8,42 @@ from dexmani_policy.agents.action_decoders.backbones.modules import (
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 
 
-class ForcePredictionTransformer(nn.Module):
+class ForceTransformer(nn.Module):
     def __init__(
         self,
         horizon: int,
         cond_dim: int,
         force_dim: int,
-        n_layer: int = 8,
-        n_head: int = 4,
-        n_emb: int = 256,
-        p_drop_emb: float = 0.0,
-        p_drop_attn: float = 0.3,
+        depth: int = 8,
+        num_heads: int = 4,
+        embed_dim: int = 256,
+        dropout: float = 0.3,
     ) -> None:
         super().__init__()
-        self.input_emb = nn.Linear(force_dim, n_emb)
-        self.pos_emb = nn.Parameter(torch.zeros(1, horizon, n_emb))
-        self.drop = nn.Dropout(p_drop_emb)
-        self.time_emb = SinusoidalTimestepEmbedding(n_emb)
-        self.cond_obs_emb = nn.Linear(cond_dim, n_emb)
-        self.cond_pos_emb = nn.Parameter(torch.zeros(1, 2, n_emb))
-        self.encoder = nn.Sequential(
-            nn.Linear(n_emb, 4 * n_emb), nn.Mish(), nn.Linear(4 * n_emb, n_emb)
+        self.input_emb = nn.Linear(force_dim, embed_dim)
+        self.pos_emb = nn.Parameter(torch.zeros(1, horizon, embed_dim))
+        self.time_emb = SinusoidalTimestepEmbedding(embed_dim)
+        self.cond_obs_emb = nn.Linear(cond_dim, embed_dim)
+        self.cond_pos_emb = nn.Parameter(torch.zeros(1, 2, embed_dim))
+        self.condition_mlp = nn.Sequential(
+            nn.Linear(embed_dim, 4 * embed_dim), nn.Mish(), nn.Linear(4 * embed_dim, embed_dim)
         )
         decoder_layer = nn.TransformerDecoderLayer(
-            d_model=n_emb,
-            nhead=n_head,
-            dim_feedforward=4 * n_emb,
-            dropout=p_drop_attn,
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=4 * embed_dim,
+            dropout=dropout,
             activation="gelu",
             batch_first=True,
             norm_first=True,
         )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=n_layer)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=depth)
         self.register_buffer(
-            "mask", torch.full((horizon, horizon), float("-inf")).triu(1),
+            "causal_mask", torch.full((horizon, horizon), float("-inf")).triu(1),
+            persistent=False,
         )
-        self.ln_f = nn.LayerNorm(n_emb)
-        self.head = nn.Linear(n_emb, force_dim)
+        self.ln_f = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, force_dim)
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -60,7 +57,7 @@ class ForcePredictionTransformer(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             nn.init.zeros_(module.bias)
             nn.init.ones_(module.weight)
-        elif isinstance(module, ForcePredictionTransformer):
+        elif isinstance(module, ForceTransformer):
             nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
             nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
 
@@ -69,13 +66,13 @@ class ForcePredictionTransformer(nn.Module):
         time_emb = self.time_emb(timesteps).unsqueeze(1)
         input_emb = self.input_emb(x)
         cond_embeddings = torch.cat((time_emb, self.cond_obs_emb(context)), dim=1)
-        memory = self.encoder(self.drop(cond_embeddings + self.cond_pos_emb))
-        x = self.drop(input_emb + self.pos_emb)
-        x = self.decoder(tgt=x, memory=memory, tgt_mask=self.mask)
+        memory = self.condition_mlp(cond_embeddings + self.cond_pos_emb)
+        x = input_emb + self.pos_emb
+        x = self.decoder(tgt=x, memory=memory, tgt_mask=self.causal_mask)
         return self.head(self.ln_f(x))
 
 
-class DiffusionForceHead(Diffusion):
+class ForceDiffusion(Diffusion):
     def __init__(
         self,
         model: nn.Module,
@@ -106,11 +103,12 @@ class DiffusionForceHead(Diffusion):
             context=condition,
         )
         prediction = prediction.float()
-        loss = ((prediction - force).square() * valid[..., None]).sum() / (force.shape[-1] * valid.float().sum())
+        error = (prediction - force).square() * valid[..., None]
+        loss = error.sum() / (force.shape[-1] * valid.float().sum())
         return loss, prediction
 
 
-class ForceGuidedAttentionFusion(nn.Module):
+class ForceGuidedFusion(nn.Module):
     def __init__(
         self,
         visual_dim: int,
@@ -124,13 +122,16 @@ class ForceGuidedAttentionFusion(nn.Module):
         self.visual_proj = nn.Linear(visual_dim, hidden_dim)
         self.tactile_proj = nn.Linear(tactile_dim, hidden_dim)
         self.force_proj = nn.Linear(guide_dim, hidden_dim)
-        self.cross_attn = nn.TransformerDecoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim,
-            dropout=dropout,
-            batch_first=True,
+        self.cross_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=dropout, batch_first=True,
         )
+        self.attn_norm = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.ffn_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self, visual_feat: torch.Tensor, tactile_feat: torch.Tensor, force_guide: torch.Tensor,
@@ -139,11 +140,12 @@ class ForceGuidedAttentionFusion(nn.Module):
         tactile = self.tactile_proj(tactile_feat)
         query = self.force_proj(force_guide).unsqueeze(1)
         memory = torch.stack([visual, tactile], dim=1)
-        attended_feat = self.cross_attn(tgt=query, memory=memory)
-        return attended_feat.squeeze(1)
+        update = self.cross_attn(query, memory, memory, need_weights=False)[0]
+        query = self.attn_norm(query + self.dropout(update))
+        return self.ffn_norm(query + self.dropout(self.ffn(query))).squeeze(1)
 
 
-class VisuoTactileInteraction(nn.Module):
+class VisuoTactileAttention(nn.Module):
     def __init__(self, visual_dim: int, tactile_dim: int, num_fingers: int) -> None:
         super().__init__()
         self.visual_norm = nn.LayerNorm(visual_dim)

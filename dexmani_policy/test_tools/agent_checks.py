@@ -16,22 +16,32 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import zarr
 
-from dexmani_policy.agents.action_decoders.action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, DiTX
+from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, CoupledDiTX, DiTX
+from dexmani_policy.agents.action_decoders.backbones.one_way_transformer import OneWayTransformer
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
+from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
+from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
+    ForceDiffusion, ForceGuidedFusion, ForceTransformer, VisuoTactileAttention,
+)
+from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
+    HandHistoryEncoder, HandSceneFusion, SceneTokenizer, _sample_region_seeds,
+)
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
-from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
+from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder, XHandPatchEncoder
 from dexmani_policy.agents.policies.dp import DPPolicy
 from dexmani_policy.agents.policies.dp3 import DP3Policy
 from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
+from dexmani_policy.common.config import validate_observation_fields
+from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.common.pytorch_util import get_rng_state
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler, window_indices
 from dexmani_policy.training.common.optimization import build_optimizer
+from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
 
@@ -163,13 +173,253 @@ def check_tactile(device):
             "pc_dim": 3, "num_points": 16, "feature_dim": 16, "state_out_dim": 8,
             "pc_encoder_config": dict(channels=24, num_patches=4, group_size=4, depth=1, num_heads=4),
             "down_dims": [16, 32], "diffusion_step_embed_dim": 32,
-            "force_predictor_config": dict(n_layer=1, n_head=4, n_emb=16),
+            "force_predictor_config": dict(depth=1, num_heads=4, embed_dim=16),
             "fusion_num_heads": 4,
         }, _convert_="all")
     assert type(constructor.call_args.kwargs["region_ids"]) is list
     restored = policy.obs_encoder.tactile_encoder.to(device)
     assert isinstance(restored, XHandPatchEncoder)
     restored.load_state_dict(encoder.state_dict(), strict=True)
+
+
+def check_interaction(device):
+    scene = SceneTokenizer(24).to(device)
+    for patch_count in (12, 24):
+        points = torch.zeros(2, patch_count, 3, device=device)
+        seeds = _sample_region_seeds(points, 12)
+        assert all(row.unique().numel() == 12 for row in seeds)
+        tokens = torch.randn(2, patch_count, 24, device=device, requires_grad=True)
+        for bf16 in (False, True):
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+                output = scene(tokens, points)
+            assert output.shape == (2, 12, 24) and torch.isfinite(output).all()
+            grad, = torch.autograd.grad((output * torch.randn_like(output)).sum(), tokens)
+            assert torch.isfinite(grad).all() and grad.abs().sum() > 0
+
+    model = HandSceneFusion(24, XHandForceEncoder()).to(device).eval()
+    points = torch.randn(2, 64, 3, device=device) * 0.03
+    anchors = torch.randn(2, 6, 3, device=device) * 0.02
+    patches = dict(tokens=torch.randn(2, 12, 24, device=device), xyz=points[:, :12])
+    hand = torch.randn(2, 6, 192, device=device)
+    rotation = torch.eye(3, device=device).expand(2, -1, -1)
+    context = torch.randn(2, 192, device=device)
+    tactile = torch.randn(2, 5, 3, device=device)
+    kwargs = dict(rotation_world_from_eef=rotation, query_context=context, tactile=tactile)
+    output = model(points, patches, anchors, hand, **kwargs)
+    changed = tactile.clone()
+    changed[:, 2] += 2
+    finger_output = model(points, patches, anchors, hand, **{**kwargs, "tactile": changed})
+    torch.testing.assert_close(output[:, [1, 2, 4, 5]], finger_output[:, [1, 2, 4, 5]])
+    assert (output[:, [0, 3]] - finger_output[:, [0, 3]]).abs().sum() > 0
+
+    rotation = torch.tensor([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]], device=device)
+    shift = torch.tensor([0.2, -0.1, 0.3], device=device)
+    rotated = model(
+        points @ rotation.T + shift,
+        {**patches, "xyz": patches["xyz"] @ rotation.T + shift},
+        anchors @ rotation.T + shift, hand,
+        **{**kwargs, "rotation_world_from_eef": rotation.expand(2, -1, -1)},
+    )
+    torch.testing.assert_close(output, rotated, rtol=1e-5, atol=1e-6)
+
+    geometry_inputs = []
+    hook = model.geometry_projection.register_forward_pre_hook(
+        lambda _, args: geometry_inputs.append(args[0].detach())
+    )
+    for bf16 in (False, True):
+        model.zero_grad(set_to_none=True)
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+            empty = model(points + 10, patches, anchors, hand, **kwargs)
+        assert empty.dtype == torch.float32 and torch.isfinite(empty).all()
+        assert torch.count_nonzero(geometry_inputs[-1][..., :32]) == 0
+        (empty * torch.randn_like(empty)).mean().backward()
+        assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+    hook.remove()
+
+    history = HandHistoryEncoder(4).to(device).eval()
+    tokens = torch.randn(2, 4, 6, 192, device=device)
+    changed = tokens.clone()
+    changed[:, 2:] += torch.randn_like(changed[:, 2:])
+    for bf16 in (False, True):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+            original, perturbed = history(tokens), history(changed)
+        torch.testing.assert_close(original[:, :2], perturbed[:, :2], rtol=0, atol=0)
+
+
+def check_force_interaction(device):
+    interaction = VisuoTactileAttention(24, 64, 5).to(device).eval()
+    visual = torch.randn(2, 12, 24, device=device, requires_grad=True)
+    tactile = torch.randn(2, 5, 64, device=device, requires_grad=True)
+    v, t = interaction(visual, tactile)
+    vg, = torch.autograd.grad((t * torch.randn_like(t)).mean(), visual, retain_graph=True)
+    tg, = torch.autograd.grad((v * torch.randn_like(v)).mean(), tactile)
+    assert vg.abs().sum() > 0 and tg.abs().sum() > 0
+
+    predictor = ForceDiffusion(ForceTransformer(4, 32, 15, depth=1, embed_dim=32, dropout=0)).to(device)
+    fusion = ForceGuidedFusion(16, 16, 75, hidden_dim=32, num_heads=4, dropout=0).to(device)
+    noisy = torch.randn(2, 4, 15, device=device)
+    changed = noisy.clone()
+    changed[:, 2:] += 10
+    condition = torch.randn(2, 1, 32, device=device)
+    torch.testing.assert_close(
+        predictor.model(noisy, 3, condition)[:, :2],
+        predictor.model(changed, 3, condition)[:, :2], rtol=0, atol=0,
+    )
+    valid = torch.tensor([[True, True, False, False], [True, False, False, False]], device=device)
+    force = torch.zeros(2, 4, 15, device=device)
+    for bf16 in (False, True):
+        predictor.zero_grad(set_to_none=True)
+        fusion.zero_grad(set_to_none=True)
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+            loss, prediction = predictor.compute_loss_and_prediction(
+                torch.randn(2, 1, 32, device=device), force, valid,
+            )
+            guide = torch.cat((torch.zeros(2, 1, 15, device=device), prediction), 1).flatten(1)
+            output = fusion(torch.randn(2, 16, device=device), torch.randn(2, 16, device=device), guide)
+        torch.testing.assert_close(loss, prediction[valid].square().mean())
+        target_grad, = torch.autograd.grad(loss, prediction, retain_graph=True)
+        assert torch.count_nonzero(target_grad[~valid]) == 0
+        assert target_grad[valid].abs().sum() > 0
+        (output * torch.randn_like(output)).sum().backward()
+        assert predictor.model.head.weight.grad.abs().sum() > 0
+        assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in predictor.parameters())
+        assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in fusion.parameters())
+
+
+def check_token_decoders(device):
+    coupled = CoupledDiTX(
+        horizon=8, action_dim=19, n_obs_steps=2, obs_token_dim=16,
+        hidden_dim=32, n_head=4, n_layers=2, p_drop_attn=0, interaction_horizon=3,
+    ).to(device).eval()
+    # Zero-initialized gates and readout would hide a broken attention mask.
+    for block in coupled.ditx_blocks:
+        torch.nn.init.normal_(block.adaln_modulation[-1].weight, std=0.1)
+    torch.nn.init.normal_(coupled.final_layer.ffn_final.fc2.weight, std=0.1)
+    actions = torch.randn(2, 8, 19, device=device)
+    context = torch.randn(2, 18, 16, device=device)
+    timestep = torch.rand(2, device=device)
+    outside = actions.clone()
+    outside[:, [0, 4, 5, 6, 7]] += 3
+    changed_body = context.clone()
+    changed_body.unflatten(1, (2, 9))[:, -1, :6] += 2
+    auxiliary = OneWayTransformer(
+        horizon=8, action_dim=28, n_obs_steps=2, obs_token_dim=48, pc_pe_dim=32,
+        embedding_dim=32, depth=2, num_heads=4, mlp_dim=64,
+        use_aux_ee=True, joint_dim=19, ee_dim=9,
+    ).to(device).eval()
+    joint_ee = torch.randn(2, 8, 28, device=device)
+    changed_ee = joint_ee.clone()
+    changed_ee[..., 19:] += 3
+    observations = torch.randn(2, 8, 48, device=device)
+    for bf16 in (False, True):
+        with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+            velocity, features = coupled(actions, timestep, context, return_features=True)
+            perturbed, perturbed_features = coupled(outside, timestep, context, return_features=True)
+            cached_kv = coupled.prepare_context_kv(context)
+            cached = coupled(actions, timestep, context, context_kv=cached_kv, return_features=True)
+            dynamic = coupled(actions, timestep, changed_body, context_kv=cached_kv, return_features=True)
+            prediction = auxiliary(joint_ee, timestep, observations)
+            perturbed_ee = auxiliary(changed_ee, timestep, observations)
+        torch.testing.assert_close(velocity[:, 1:4], perturbed[:, 1:4], rtol=0, atol=0)
+        torch.testing.assert_close(features[:, 8:], perturbed_features[:, 8:], rtol=0, atol=0)
+        assert (velocity[:, 4:] - perturbed[:, 4:]).abs().sum() > 0
+        torch.testing.assert_close(cached, (velocity, features), rtol=0, atol=0)
+        assert (dynamic[1][:, 8:] - features[:, 8:]).abs().sum() > 0
+        torch.testing.assert_close(prediction[..., :19], perturbed_ee[..., :19], rtol=0, atol=0)
+        assert (prediction[..., 19:] - perturbed_ee[..., 19:]).abs().sum() > 0
+
+
+def check_policy_roundtrips(device):
+    for method, auxiliary in (("cordvip", False), ("adaptac", False), ("interact_dex", False),
+                              ("sat", False), ("r3d", False), ("r3d", True)):
+        overrides = ["horizon=8", "n_action_steps=2", "agent.num_inference_steps=2"]
+        if method != "r3d":
+            overrides += ["agent.pc_dim=3"]
+        if method in ("interact_dex", "sat"):
+            overrides += ["agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=4",
+                          "agent.timestep_embed_dim=32"]
+        elif method == "r3d":
+            overrides += [f"use_aux_ee={str(auxiliary).lower()}", "agent.embedding_dim=32",
+                          "agent.depth=1", "agent.num_heads=4", "agent.mlp_dim=64",
+                          "agent.timestep_embed_dim=32", "agent.num_training_steps=10",
+                          "agent.pc_encoder_config.embed_dim=32", "agent.pc_encoder_config.num_group=4",
+                          "agent.pc_encoder_config.group_size=8", "agent.pc_encoder_config.drop_path_rate=0",
+                          "agent.fps_random_config.use_random=false"]
+        else:
+            overrides += ["agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=32",
+                          "agent.num_training_steps=10"]
+        if method not in ("cordvip", "r3d"):
+            overrides += ["agent.num_points=32", "agent.pc_encoder_config.channels=24",
+                          "agent.pc_encoder_config.num_patches=12", "agent.pc_encoder_config.group_size=8",
+                          "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4",
+                          "agent.fps_random_config.use_random=false"]
+        if method == "adaptac":
+            overrides += ["agent.feature_dim=32", "agent.state_out_dim=8", "agent.force_num_inference_steps=2",
+                          "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=32"]
+        if method == "sat":
+            overrides += ["agent.rgb_backbone_config.image_size=[28,28]",
+                          "+agent.rgb_backbone_config.architecture={model_type:dinov2,hidden_size:24,"
+                          "intermediate_size:48,num_hidden_layers:1,num_attention_heads:4,image_size:28,patch_size:14}"]
+        cfg = load_policy_config(method, overrides)
+        agent_cfg = OmegaConf.to_container(cfg.agent, resolve=True)
+        policy = hydra.utils.instantiate(agent_cfg, _convert_="all")
+        validate_observation_fields(policy, cfg.dataset.sensor_modalities)
+        shapes = dict(joint_state=(19,), point_cloud=(32, 3), hand_pointcloud=(32, 3),
+                      object_pointcloud=(32, 3), finger_tactile_force=(5, 3),
+                      eef_pose=(9,), fingertip_xyz=(5, 3), rgb=(3, 28, 28),
+                      camera_intrinsic=(9,), camera_extrinsic=(12,))
+        if method == "r3d":
+            shapes["point_cloud"] = (32, 6)
+        obs = {key: torch.randn(2, cfg.n_obs_steps, *shapes[key], device=device)
+               for key in cfg.dataset.sensor_modalities}
+        if "eef_pose" in obs:
+            obs["eef_pose"][..., 3:] = torch.tensor([1., 0., 0., 0., 1., 0.], device=device)
+        if method == "sat":
+            obs["rgb"] = torch.randint(256, obs["rgb"].shape, device=device, dtype=torch.uint8)
+            obs["point_cloud"][..., 2] = obs["point_cloud"][..., 2].abs() + 1
+            intrinsic = torch.tensor([[20., 0., 13.5], [0., 20., 13.5], [0., 0., 1.]], device=device)
+            obs["camera_intrinsic"] = intrinsic.flatten().expand(2, cfg.n_obs_steps, -1)
+            obs["camera_extrinsic"] = torch.eye(4, device=device)[:3].flatten().expand(2, cfg.n_obs_steps, -1)
+        dims = {key: (3 if key == "rgb" else value.shape[-1]) for key, value in obs.items()}
+        dims["action"] = cfg.action_dim
+        normalizer_shapes = {key: shape for key, shape in normalization_feature_shapes(dims).items()
+                             if cfg.normalization[key] != "identity"}
+        policy.configure_normalizer(dims, normalizer_shapes)
+        policy.to(device)
+        optimizer = build_optimizer(policy, **cfg.optimizer)
+        batch = dict(obs=obs, action=torch.randn(2, cfg.horizon, cfg.action_dim, device=device))
+        if method in ("adaptac", "interact_dex"):
+            count = 1 if method == "interact_dex" else policy.future_steps
+            valid = torch.ones(2, count, dtype=torch.bool, device=device)
+            valid[1, -1] = False
+            batch.update(future_force=torch.randn(2, count, 5, 3, device=device), future_force_valid=valid)
+        for _ in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16):
+                loss, _ = policy.compute_loss(batch)
+            loss.backward()
+            assert torch.isfinite(loss)
+            assert all(torch.isfinite(p.grad).all() for p in policy.parameters() if p.grad is not None)
+            optimizer.step()
+        policy.eval()
+        saved_agent = {**agent_cfg, **policy.effective_config}
+        with tempfile.TemporaryDirectory(prefix="dexmani-policy-check-") as directory:
+            path = Path(directory) / "model.pt"
+            save_checkpoint(path, Checkpoint(
+                2, policy.state_dict(), None, optimizer.state_dict(), {}, get_rng_state(device),
+                dict(agent=saved_agent, normalization_dims=dims, normalizer_shapes=normalizer_shapes),
+            ))
+            # Deployment restores all parameters in FP32, including the frozen RGB encoder.
+            policy.float()
+            with torch.no_grad():
+                expected = policy.predict_action(obs, generator=torch.Generator(device=device).manual_seed(11))
+            assert expected["future_actions"].shape == (2, policy.future_steps, policy.control_action_dim)
+            restored = restore_policy(path, use_ema=False, device=device)
+            torch.testing.assert_close(restored.state_dict(), policy.state_dict(), rtol=0, atol=0)
+            with torch.no_grad():
+                actual = restored.predict_action(obs, generator=torch.Generator(device=device).manual_seed(11))
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        print(f"PASS policy roundtrip: {method}, auxiliary={auxiliary} ({device})", flush=True)
 
 
 def check_rgb(device):
@@ -562,7 +812,8 @@ def main():
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_sampler, check_time, check_precision, check_tactile, check_rgb, check_vq,
+    for check in (check_sampler, check_time, check_precision, check_tactile, check_interaction,
+                  check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb, check_vq,
                   check_codebook, check_codebook_pipeline, check_policies):
         check(device)
         print(f"PASS {check.__name__} ({device})", flush=True)

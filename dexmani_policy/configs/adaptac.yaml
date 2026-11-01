@@ -66,11 +66,10 @@ agent:
   force_num_inference_steps: 20
   force_loss_weight: 1.0
   force_predictor_config:
-    n_layer: 8
-    n_head: 4
-    n_emb: 256
-    p_drop_emb: 0.0
-    p_drop_attn: 0.3
+    depth: 8
+    num_heads: 4
+    embed_dim: 256
+    dropout: 0.3
   fusion_num_heads: 8
   fusion_dropout: 0.1
 

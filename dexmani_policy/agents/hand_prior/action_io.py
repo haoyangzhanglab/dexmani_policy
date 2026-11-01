@@ -3,8 +3,8 @@
 import torch
 from torch import nn
 
-from .backbones.ditx import DiTXOutput
-from .backbones.modules import initialize_linear
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTXOutput
+from dexmani_policy.agents.action_decoders.backbones.modules import initialize_linear
 
 
 class SATActionIO(nn.Module):

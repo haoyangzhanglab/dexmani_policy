@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dexmani_policy.agents.action_decoders.action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 

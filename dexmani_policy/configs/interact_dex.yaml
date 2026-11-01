@@ -30,7 +30,6 @@ dataset:
 agent:
   _target_: dexmani_policy.agents.policies.interact_dex.InterActDexPolicy
   future_force_loss_weight: 0.1
-  history_mixer: true
   pc_dim: 6
   state_dim: 19
   num_points: 1024

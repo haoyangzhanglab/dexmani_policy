@@ -1,4 +1,4 @@
-"""R3D one-way attention keeps geometric position separate from observation features."""
+"""One-way attention updates queries while keeping context tokens fixed."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from .modules import TimestepMLP, add_temporal_embedding, batch_timesteps
 
 
-class ProjectedAttention(nn.Module):
+class MultiheadAttention(nn.Module):
     def __init__(self, embedding_dim: int, num_heads: int, downsample_rate: int = 1):
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -23,12 +23,12 @@ class ProjectedAttention(nn.Module):
         self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
 
-    def split_heads(self, x: torch.Tensor) -> torch.Tensor:
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
         x = x.reshape(B, N, self.num_heads, C // self.num_heads)
         return x.transpose(1, 2)
 
-    def merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
         B, N_heads, N_tokens, C_per_head = x.shape
         x = x.transpose(1, 2)
         return x.reshape(B, N_tokens, N_heads * C_per_head)
@@ -40,19 +40,17 @@ class ProjectedAttention(nn.Module):
         v: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self.split_heads(self.q_proj(q))
-        k = self.split_heads(self.k_proj(k))
-        v = self.split_heads(self.v_proj(v))
+        q = self._split_heads(self.q_proj(q))
+        k = self._split_heads(self.k_proj(k))
+        v = self._split_heads(self.v_proj(v))
 
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
-        out = self.merge_heads(out)
+        out = self._merge_heads(out)
         return self.out_proj(out)
 
 
-class R3DBlock(nn.Module):
-    """SAM-style action self-attention and one-way observation cross-attention."""
-
+class OneWayAttentionBlock(nn.Module):
     def __init__(
         self,
         embedding_dim: int,
@@ -62,10 +60,10 @@ class R3DBlock(nn.Module):
         attention_downsample_rate: int = 2,
     ):
         super().__init__()
-        self.self_attn = ProjectedAttention(embedding_dim, num_heads)
+        self.self_attn = MultiheadAttention(embedding_dim, num_heads)
         self.norm1 = nn.LayerNorm(embedding_dim)
 
-        self.cross_attn = ProjectedAttention(
+        self.cross_attn = MultiheadAttention(
             embedding_dim, num_heads, downsample_rate=attention_downsample_rate
         )
         self.norm2 = nn.LayerNorm(embedding_dim)
@@ -92,7 +90,7 @@ class R3DBlock(nn.Module):
         return queries
 
 
-class R3DTransformer(nn.Module):
+class OneWayTransformer(nn.Module):
     def __init__(
         self,
         horizon: int,
@@ -151,7 +149,7 @@ class R3DTransformer(nn.Module):
         nn.init.normal_(self.temporal_pe_obs, std=0.02)
 
         self.layers = nn.ModuleList(
-            R3DBlock(
+            OneWayAttentionBlock(
                 embedding_dim,
                 num_heads,
                 mlp_dim,

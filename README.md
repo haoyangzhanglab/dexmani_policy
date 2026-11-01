@@ -68,11 +68,9 @@ DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)�
 
 ## SAT / DQ-RISE / DexLatent dense observation
 
-三种策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一标准 uniform flow matching、10 步 Euler 和 `Nobs=2,H=16,C=8`。SAT 采用“SAT 动作表示 + 6 层 768D DiTX 的本地适配”：`SATActionIO` 参照[官方动作表示](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)拼接关节轨迹与身份，形成 19 个 token，经公共 DiTX 后读出 `[B,16,19]` 动作速度；Flow 始终在归一化动作坐标中训练与积分。DQ 使用普通时间 token 输入输出，预测 7D arm 和连续码本索引后 lookup。三者共享 6 层、768D DiTX 层型与主干配置，但表示维度、token 数、输入输出头和量化机制不同，不是“只交换 token 轴”的消融，也不能直接横比 Flow MSE。新 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
+三种策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一标准 uniform flow matching、10 步 Euler 和 `Nobs=2,H=16,C=8`。SAT 采用“SAT 动作表示 + 6 层 768D DiTX 的本地适配”：`SATActionIO` 参照[官方动作表示](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)拼接关节轨迹与身份，形成 19 个 token，经公共 DiTX 后读出 `[B,16,19]` 动作速度；Flow 始终在归一化动作坐标中训练与积分。DQ 使用普通时间 token 输入输出，预测 7D arm 和连续码本索引后 lookup。三者共享 6 层、768D DiTX 层型与主干配置，但表示维度、token 数、输入输出头和量化机制不同，不是“只交换 token 轴”的消融，也不能直接横比 Flow MSE。默认 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
 
 DexLatent 使用同一观测及普通时间 token DiTX，内部预测 7D arm + 32D hand latent，对外保持 19D 绝对关节动作。官方 XHand E/D 冻结并使用 FP32 确定性 mean，保留官方 URDF 尺度；内部 latent limits 只拟合训练真实动作行。原始权重只在 fresh 初始化读取，完整策略内嵌先验和统计。训练、恢复、离线推理命令及预训练来源差异见 [手部动作表示](docs/手部动作表示.md#dexlatent-连续手部表示)。
-
-新 SAT 主干与旧专用 SAT checkpoint 不兼容，需要重新训练；不提供权重迁移，也不宣称完整复现原论文网络或实验结果。
 
 ```bash
 bash scripts/utils/download_pretrained.sh dexlatent  # 仅准备 DINOv2-small 和官方 DexLatent 权重。
@@ -90,7 +88,7 @@ bash scripts/training/train.sh sat 'task_name=<task>' agent.rgb_backbone_config.
 
 ## InterAct-Dex 动作耦合交互状态预测
 
-`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `InterActDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。使用 `tactile=force`，通过 `tactile_source=sim`（默认）或 `tactile_source=real` 选择来源，分别使用各来源训练数据的 aggregate 触觉统计。
+`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `CoupledDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。使用 `tactile=force`，通过 `tactile_source=sim`（默认）或 `tactile_source=real` 选择来源，分别使用各来源训练数据的 aggregate 触觉统计。
 
 ```bash
 bash scripts/training/train.sh interact_dex tactile=force 'zarr_path=<sim_zarr>'
@@ -102,14 +100,16 @@ InterAct-Dex 包含以下四部分：
 
 1. **动作耦合的力残差监督**：单元素 `future_force_offsets=[4]` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为13。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
 2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
-3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistory 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
-4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandScene 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。
+3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistoryEncoder 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
+4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandSceneFusion 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。
 
 力目标使用原始 batch：sim 先作世界系力差，再使用 query 时刻的末端旋转；real 直接作 SDK 通道差值。残差乘已有触觉 normalizer 的 scale，不另拟合统计。共享 `768→128→3` 力 head 的末层零初始化。
 
 标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。权重为0时使用普通 Dataset，无需未来标签，但六个交互 token 仍参与动作生成。训练只编码一次观测并执行一次 Flow forward；推理跳过力 head，每次 velocity evaluation 重建交互状态，仅积分 FP32 动作。保持768维、8层、8 heads、10步 Euler，以及 `future_actions[B,13,19]` 输出。
 
-新结构需要重新训练；旧观测端预测头的 checkpoint 使用对应旧代码恢复。新 checkpoint 沿用完整配置、optimizer、EMA 和 strict load。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-动作耦合交互状态预测)。
+完整 checkpoint 保存配置、optimizer、EMA 和归一化统计，按当前模型结构严格加载。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-动作耦合交互状态预测)。
+
+interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.py` 组织。InterAct-Dex 固定使用场景聚合与因果历史编码；AdapTac 的力引导融合使用 cross-attention＋FFN。
 
 ## AdapTac 触觉实验
 

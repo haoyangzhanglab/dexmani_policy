@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
+from dexmani_policy.agents.action_decoders.backbones.one_way_transformer import OneWayTransformer
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
@@ -94,7 +94,7 @@ class R3DPolicy(BasePolicy):
             fps_random_config=fps_random_config,
         )
 
-        backbone = R3DTransformer(
+        backbone = OneWayTransformer(
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,

@@ -1,1 +1,1 @@
-"""Hand state codebooks and continuous latent priors."""
+"""Action representations, hand state codebooks and continuous latent priors."""
