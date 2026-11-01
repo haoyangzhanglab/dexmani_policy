@@ -9,7 +9,7 @@ def read_future_force(store, query, offsets):
     episode_ends = store.episode_ends
     end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
     target_rows = query + np.asarray(offsets, dtype=np.int64)
-    # The terminal query uses the final real row as fill, with no valid supervision.
+    # Targets past the episode end use the final real row as invalid fill.
     rows = np.minimum(target_rows, end - 1)
     force = store.read(
         "finger_tactile_force",

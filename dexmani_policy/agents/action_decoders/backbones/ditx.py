@@ -111,7 +111,7 @@ class DiTXBlock(nn.Module):
             nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True)
         )
 
-    def forward(self, x, time_c, context_c, *, context_kv=None):
+    def forward(self, x, time_c, context_c, *, context_kv=None, attn_mask=None):
         (
             shift_msa,
             scale_msa,
@@ -125,7 +125,9 @@ class DiTXBlock(nn.Module):
         ) = self.adaln_modulation(time_c).chunk(9, dim=-1)
 
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        self_attn_output = self.self_attn(normed_x, normed_x, normed_x, need_weights=False)[0]
+        self_attn_output = self.self_attn(
+            normed_x, normed_x, normed_x, attn_mask=attn_mask, need_weights=False,
+        )[0]
         x = x + gate_msa.unsqueeze(1) * self_attn_output
 
         normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
@@ -240,6 +242,15 @@ class DiTX(nn.Module):
         context_c = self.embed_context(context)
         return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
 
+    def _run_blocks(self, x, time_c, context_c, *, context_kv=None, attn_mask=None):
+        for index, block in enumerate(self.ditx_blocks):
+            x = block(
+                x, time_c, context_c,
+                context_kv=None if context_kv is None else context_kv[index],
+                attn_mask=attn_mask,
+            )
+        return x
+
     def forward(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
         return_features: bool = False,
@@ -257,13 +268,7 @@ class DiTX(nn.Module):
             x = x + self.input_pos_embed.to(dtype=x.dtype)
         else:
             x = self.action_io.encode(x)
-        for index, block in enumerate(self.ditx_blocks):
-            x = block(
-                x,
-                time_c,
-                context_c,
-                context_kv=None if context_kv is None else context_kv[index],
-            )
+        x = self._run_blocks(x, time_c, context_c, context_kv=context_kv)
         if self.action_io is None:
             return self.final_layer(x, return_features=return_features)
         return self.action_io.decode_velocity(x, return_features=return_features)

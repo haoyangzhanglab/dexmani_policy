@@ -8,7 +8,7 @@ policy_name: interact-dex
 horizon: 16
 n_obs_steps: 4
 n_action_steps: 4
-future_force_offsets: [1, 4, 8, 13]
+future_force_offsets: [4]
 
 normalization:
   joint_state: limits

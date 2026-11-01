@@ -26,11 +26,9 @@ def positive_int(value: int, name: str) -> int:
     return value
 
 
-def validate_future_force_offsets(values) -> tuple[int, ...]:
-    offsets = tuple(positive_int(value, "future_force_offset") for value in values)
-    if not offsets or tuple(sorted(set(offsets))) != offsets:
-        raise ValueError("future_force_offsets must be nonempty, positive and strictly increasing")
-    return offsets
+def validate_future_force_offsets(values) -> tuple[int]:
+    offset, = values
+    return (positive_int(offset, "future_force_offset"),)
 
 
 def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start_index) -> None:
