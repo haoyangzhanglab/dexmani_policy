@@ -1,16 +1,23 @@
 import argparse
+import time
 from collections.abc import Callable
 from pathlib import Path
 
+import hydra
 import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
+from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_policy_config
-from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
-from dexmani_policy.training.common.logging import accumulate_metrics
+from dexmani_policy.training.common.data import (
+    build_train_loader, close_data_loader, epoch_position, fit_normalizer,
+)
+from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
+from dexmani_policy.training.common.optimization import build_scheduler
 
 
 def load_run(method):
@@ -26,8 +33,6 @@ def load_run(method):
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args()
-    if args.max_updates is not None:
-        positive_int(args.max_updates, "max_updates")
     checkpoint = None
     if args.resume_from is not None:
         if args.config is not None or args.output_dir is not None or args.overrides:
@@ -43,7 +48,6 @@ def load_run(method):
         if args.output_dir is not None:
             cfg.workspace.output_dir = args.output_dir
     with open_dict(cfg):
-        cfg.resume_from = args.resume_from
         cfg.workspace.wandb_enabled = not args.no_wandb
     if args.device is not None:
         cfg.training.device = args.device
@@ -52,7 +56,6 @@ def load_run(method):
             parser.error("--num-workers must be nonnegative")
         cfg.dataloader.num_workers = args.num_workers
     if args.log_interval is not None:
-        positive_int(args.log_interval, "--log-interval")
         cfg.training.loop.log_interval_steps = args.log_interval
     if args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
@@ -65,13 +68,18 @@ def load_run(method):
     return cfg, checkpoint, args.max_updates
 
 
-def export_encoder(model, encoder, output_path):
+def export_encoder(state, output_path):
+    payload = {
+        f"{name}_state": {
+            key.removeprefix(f"{name}."): value.detach().cpu()
+            for key, value in state.items() if key.startswith(f"{name}.")
+        }
+        for name in ("encoder", "normalizer")
+    }
+    if not payload["encoder_state"]:
+        raise ValueError("Checkpoint has no encoder.* parameters")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "encoder_state": {key: value.detach().cpu() for key, value in encoder.state_dict().items()},
-        "normalizer_state": {key: value.detach().cpu() for key, value in model.normalizer.state_dict().items()},
-    }
     with atomic_path(output_path) as temporary:
         torch.save(payload, temporary)
 
@@ -120,28 +128,161 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
         set_rng_state(rng_state, device)
 
 
+def train(method, cfg, checkpoint=None, max_updates=None):
+    if max_updates is not None:
+        positive_int(max_updates, "max_updates")
+    positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
+    positive_int(cfg.training.loop.log_interval_steps, "training.loop.log_interval_steps")
+    is_afro = method == "afro"
+    if is_afro:
+        positive_int(cfg.training.num_epochs, "training.num_epochs")
+        positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
+        if cfg.training.loop.get("gradient_accumulation_steps", 1) != 1:
+            raise ValueError("AFRO VICReg requires accumulation=1")
+        with open_dict(cfg.training.loop):
+            cfg.training.loop.gradient_accumulation_steps = 1
+    else:
+        positive_int(cfg.training.save_every_updates, "training.save_every_updates")
+        positive_int(cfg.training.loop.total_train_steps, "training.loop.total_train_steps")
+        positive_int(cfg.training.loop.gradient_accumulation_steps, "training.loop.gradient_accumulation_steps")
+
+    set_seed(cfg.training.seed)
+    dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
+    cfg.dataset.split_manifest = dataset.split_manifest
+    loader = build_train_loader(cfg, dataset)
+    batches_per_epoch = loader.batch_sampler.batches_per_epoch
+    accumulation = cfg.training.loop.gradient_accumulation_steps
+    model: torch.nn.Module
+    if is_afro:
+        from dexmani_policy.training.pretrain.obs.afro import AFRO
+
+        model = AFRO(cfg.normalization)
+        with open_dict(cfg.training.loop):
+            cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
+    else:
+        from dexmani_policy.training.pretrain.obs.cordvip import CordViP
+
+        model = CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
+    if checkpoint is None:
+        model.normalizer = fit_normalizer(
+            dataset, cfg.normalization,
+            feature_dims={key: field.scale.numel() for key, field in model.normalizer.fields.items()},
+        )
+    validation = dataset.get_validation_dataset()
+    device = torch.device(cfg.training.device)
+    model.to(device)
+    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
+    total = cfg.training.loop.total_train_steps
+    scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
+    step = 0
+    if checkpoint is not None:
+        step = restore_run(model, optimizer, scheduler, checkpoint, device=device)
+    epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
+    if checkpoint is not None:
+        print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
+    stop_step = total if max_updates is None else min(total, step + max_updates)
+    logger = ExperimentLogger(**cfg.workspace, resume_step=step if checkpoint is not None else None)
+    print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
+          f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
+    stop_requested = False
+
+    def request_stop(signum, frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    iterator = None
+    with training_signal_handlers(request_stop):
+        try:
+            logger.save_config(cfg)
+            while step < stop_step and not stop_requested:
+                epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
+                loader.batch_sampler.set_epoch(epoch, start_batch)
+                model.train()
+                current_epoch = epoch
+                iterator = iter(loader)
+                for group_start in range(start_batch, batches_per_epoch, accumulation):
+                    group_size = min(accumulation, batches_per_epoch - group_start)
+                    record = (
+                        step == 0
+                        or (step + 1) % cfg.training.loop.log_interval_steps == 0
+                        or step + 1 == stop_step
+                    )
+                    totals: dict[str, torch.Tensor] = {}
+                    if record:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        step_start = time.perf_counter()
+                    optimizer.zero_grad(set_to_none=True)
+                    for _ in range(group_size):
+                        batch = next(iterator)
+                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        loss, metrics = model(batch)
+                        if not torch.isfinite(loss):
+                            raise RuntimeError(f"Nonfinite {type(model).__name__} loss at step {step}")
+                        (loss / group_size).backward()
+                        if record:
+                            accumulate_metrics(totals, metrics)
+                    if is_afro:
+                        # AFRO updates the independent teacher before the online optimizer step.
+                        model.update_teacher(current_epoch)
+                    optimizer.step()
+                    scheduler.step()
+                    if record:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        elapsed = time.perf_counter() - step_start
+                    step += 1
+                    if group_start + group_size == batches_per_epoch:
+                        epoch = current_epoch + 1
+                    if record:
+                        logger.log(
+                            to_log_scalars(
+                                {"train/" + key: value / group_size for key, value in totals.items()}
+                                | {
+                                    "train/lr": scheduler.get_last_lr()[0],
+                                    "train/epoch": current_epoch,
+                                    "train/step_time": elapsed,
+                                }
+                            ),
+                            step,
+                        )
+                    if step >= stop_step or stop_requested:
+                        break
+                    if not is_afro and step % cfg.training.save_every_updates == 0:
+                        save_run(model, optimizer, scheduler, cfg, step)
+                if stop_requested:
+                    break
+                if (
+                    epoch > current_epoch
+                    and epoch % cfg.training.val_every_epochs == 0
+                    and validation is not None
+                ):
+                    metrics = evaluate(
+                        model, validation, cfg.dataloader.batch_size, device,
+                        stop_requested=lambda: stop_requested,
+                    )
+                    if metrics is not None:
+                        logger.log(to_log_scalars(metrics), step)
+                if (
+                    is_afro and epoch > current_epoch
+                    and epoch % cfg.training.save_every_epochs == 0
+                    and step < stop_step and not stop_requested
+                ):
+                    save_run(model, optimizer, scheduler, cfg, step)
+            save_run(model, optimizer, scheduler, cfg, step)
+            export_encoder(model.state_dict(), Path(cfg.workspace.output_dir) / "encoder.pt")
+            print(f"[{type(model).__name__}] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
+        finally:
+            close_resources(lambda: close_data_loader(loader, iterator), logger.close)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export an observation encoder from a resume checkpoint")
-    parser.add_argument("--method", required=True, choices=("afro", "cordvip"))
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    cfg = OmegaConf.create(checkpoint["effective_config"])
-    model: torch.nn.Module
-    encoder: torch.nn.Module
-    if args.method == "afro":
-        from dexmani_policy.training.pretrain.obs.afro import AFROPretrain
-
-        model = AFROPretrain(cfg.normalization)
-        encoder = model.visual
-    else:
-        from dexmani_policy.training.pretrain.obs.cordvip import CordViPPretrain
-
-        model = CordViPPretrain(cfg.normalization, **cfg.model)
-        encoder = model.obs_encoder
-    model.load_state_dict(checkpoint["model_state"], strict=True)
-    export_encoder(model, encoder, args.output)
+    export_encoder(checkpoint["model_state"], args.output)
 
 
 if __name__ == "__main__":

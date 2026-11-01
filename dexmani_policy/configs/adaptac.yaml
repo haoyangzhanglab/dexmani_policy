@@ -1,12 +1,11 @@
 defaults:
   - common
   - _self_
-  - tactile: sim_force
+  - tactile: force
 
 # AdapTac 扩展：分指未来力预测、池化前双向交互与力引导融合。
 
 policy_name: adaptac
-tactile_source: ???
 
 horizon: 20
 n_obs_steps: 1

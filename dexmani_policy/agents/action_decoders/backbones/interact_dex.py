@@ -34,10 +34,11 @@ class InterActDiTX(DiTX):
         # Rebuild dynamic states on every velocity evaluation, including cached inference.
         body = context.unflatten(1, (self.n_obs_steps, -1))[:, -1, :6]
         interaction = self.context_embedder(body)
-        interaction = interaction + self.future_body_embedding.to(interaction.dtype)
+        # Remove singleton batch axes so cat gradients match parameter strides for fused AdamW at B=1.
+        interaction = interaction + self.future_body_embedding.squeeze(0).to(interaction.dtype)
 
         actions = self.input_embedder(x)
-        actions = actions + self.input_pos_embed.to(actions.dtype)
+        actions = actions + self.input_pos_embed.squeeze(0).to(actions.dtype)
         hidden = torch.cat((actions, interaction), dim=1)
         hidden = self._run_blocks(
             hidden, time_c, context_c,

@@ -132,6 +132,11 @@ class InterActDexPolicy(BasePolicy):
             raise ValueError("future_force_loss_weight must be finite and non-negative")
         future_force_offsets = validate_future_force_offsets(future_force_offsets)
         interaction_horizon, = future_force_offsets
+        future_steps = horizon - (n_obs_steps - 1)
+        if interaction_horizon > future_steps:
+            raise ValueError(
+                f"future_force_offset K ({interaction_horizon}) exceeds available future actions ({future_steps})"
+            )
         if (action_dim, state_dim) != (19, 19):
             raise ValueError("InterActDex requires 19D joint state and actions")
         require_tactile_source(("finger_tactile_force",), tactile_source)
@@ -189,6 +194,10 @@ class InterActDexPolicy(BasePolicy):
             nn.init.zeros_(self.future_force_head[-1].bias)
 
     @property
+    def tactile_source(self) -> str:
+        return self.obs_encoder.tactile_source
+
+    @property
     def effective_config(self) -> dict:
         return {
             **super().effective_config,
@@ -214,7 +223,7 @@ class InterActDexPolicy(BasePolicy):
         with torch.autocast(device_type=force.device.type, enabled=False):
             current = batch["obs"]["finger_tactile_force"][:, -1:].float()
             delta = torch.where(valid[..., None, None], force.float() - current, 0.0)
-            if self.obs_encoder.tactile_source == "sim":
+            if self.tactile_source == "sim":
                 # Rotate the world-frame difference using only the query pose.
                 rotation = _rotation_6d_to_matrix(batch["obs"]["eef_pose"][:, -1, 3:].float())
                 delta = delta @ rotation[:, None]

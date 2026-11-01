@@ -100,7 +100,7 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         task_name=cfg["task_name"],
         observation_fields=tuple(dataset["sensor_modalities"]),
         n_obs_steps=agent["n_obs_steps"],
-        n_action_steps=agent["n_action_steps"],
+        n_action_steps=agent["n_action_steps"] if selection is None else defaults["action_steps"],
         horizon=agent["horizon"],
         action_start_index=metadata["action_start_index"],
         action_dim=agent["action_dim"],

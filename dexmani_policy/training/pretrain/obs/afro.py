@@ -1,31 +1,16 @@
-"""AFRO observation pretraining adapted from KolaKivy/AFRO."""
-# Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
-# Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
+# AFRO: KolaKivy/AFRO@283024a49e2c14bc030debf15383a4e7ee73836d.
 
-import time
-from pathlib import Path
-
-import hydra
 import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from torch import nn
 from torch.nn import functional as F
 
+from dexmani_policy.agents.action_decoders.backbones.dit import DiTBlock
+from dexmani_policy.agents.action_decoders.backbones.modules import DiTTimestepEmbedding, initialize_linear
+from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
-from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.common.pytorch_util import dict_apply, set_seed
-from dexmani_policy.training.common.data import (
-    build_train_loader, close_data_loader, epoch_position, fit_normalizer,
-)
-from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
-from dexmani_policy.training.common.optimization import build_scheduler
-from dexmani_policy.training.common import training_signal_handlers
-from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
-from dexmani_policy.training.pretrain.obs.common import (
-    evaluate, export_encoder, load_run, restore_run, save_run,
-)
+from dexmani_policy.training.pretrain.obs.common import load_run, train
 
 
 def vicreg_loss(prediction, target):
@@ -44,14 +29,64 @@ def vicreg_loss(prediction, target):
         return 25 * invariance + 25 * variance + covariance, invariance, variance, covariance
 
 
-class AFROPretrain(nn.Module):
+class ForwardDynamics(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        hidden_size=256,
+        depth=4,
+        num_heads=4,
+        mlp_ratio=4.0,
+        timestep_embed_dim=256,
+    ):
+        super().__init__()
+        self.noise_proj = nn.Linear(input_dim, hidden_size)
+        self.vis_proj = nn.Linear(input_dim, hidden_size)
+        self.act_proj = nn.Linear(16, hidden_size)
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.t_embedder = DiTTimestepEmbedding(hidden_size, frequency_embedding_size=timestep_embed_dim)
+        self.ca_proj = nn.Sequential(
+            nn.Linear(hidden_size * 3, hidden_size, bias=True),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size, bias=True),
+        )
+
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+        ])
+        self.output_layer = nn.Linear(hidden_size, input_dim)
+
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        self.apply(initialize_linear)
+        for block in self.blocks:
+            nn.init.zeros_(block.adaln_modulation[-1].weight)
+            nn.init.zeros_(block.adaln_modulation[-1].bias)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, z, t, vis, act):
+        x = self.noise_proj(z).unsqueeze(1) + self.pos_embed
+
+        t_emb = self.t_embedder(t)
+        v = self.vis_proj(vis)
+        a = self.act_proj(act)
+        c = self.ca_proj(torch.cat([t_emb, v, a], dim=-1))
+
+        for block in self.blocks:
+            x = block(x, c)
+
+        return self.output_layer(x[:, 0, :])
+
+
+class AFRO(nn.Module):
     def __init__(self, normalization):
         super().__init__()
-        self.visual = PointNet(3, 64, pooling="max")
+        self.encoder = PointNet(3, 64, pooling="max")
         self.teacher = PointNet(3, 64, pooling="max")
         self.teacher.requires_grad_(False)
-        self.idm = nn.Sequential(nn.Linear(64, 256), nn.GELU(), nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 16))
-        self.fdm = DiTFeaturePredictor(64)
+        self.idm = build_mlp([64, 256, 128, 16], activation=nn.GELU, normalize=False)
+        self.fdm = ForwardDynamics(64)
         self.normalizer = LinearNormalizer(
             {"point_cloud": (3,)} if normalization["point_cloud"] != "identity" else {}
         )
@@ -65,144 +100,45 @@ class AFROPretrain(nn.Module):
             points = self.normalizer["point_cloud"].normalize(points)
         batch_size, frames = points.shape[:2]
         points = points.flatten(0, 1)
-        online = self.visual(points).reshape(batch_size, frames, 64)
+        online = self.encoder(points).reshape(batch_size, frames, 64)
         with torch.no_grad():
             teacher = self.teacher(points).reshape(batch_size, frames, 64)
-        losses, metrics = [], {}
-        for name, current, following, target in (
-            ("forward", online[:, :-1], online[:, 1:], teacher[:, 1:]),
-            ("reverse", online[:, 1:], online[:, :-1], teacher[:, :-1]),
-        ):
-            latent = self.idm(following - current).reshape(-1, 16)
-            target = target.reshape(-1, 64)
+
+        current = torch.cat((online[:, :-1], online[:, 1:])).reshape(-1, 64)
+        following = torch.cat((online[:, 1:], online[:, :-1])).reshape(-1, 64)
+        latent = self.idm(following - current)
+        targets = (teacher[:, 1:].reshape(-1, 64), teacher[:, :-1].reshape(-1, 64))
+        noisy, timesteps = [], []
+        for target in targets:
             timestep = torch.randint(
                 0, self.noise_scheduler.config.num_train_timesteps, (len(target),), device=target.device,
             )
             noise = torch.randn_like(target)
-            prediction = self.fdm(self.noise_scheduler.add_noise(target, noise, timestep),
-                                  timestep, current.reshape(-1, 64), latent)
+            noisy.append(self.noise_scheduler.add_noise(target, noise, timestep))
+            timesteps.append(timestep)
+        predictions = self.fdm(torch.cat(noisy), torch.cat(timesteps), current, latent).chunk(2)
+
+        # VICReg statistics remain separate for the two prediction directions.
+        losses, metrics = [], {}
+        for name, prediction, target in zip(("forward", "reverse"), predictions, targets):
             loss, inv, var, cov = vicreg_loss(prediction, target)
             losses.append(loss)
-            metrics.update({f"{name}_{key}": value.detach()
-                            for key, value in zip(("invariance", "variance", "covariance"), (inv, var, cov))})
+            metrics.update({
+                f"{name}_{key}": value.detach()
+                for key, value in zip(("invariance", "variance", "covariance"), (inv, var, cov))
+            })
         loss = losses[0] + losses[1]
         return loss, {"loss": loss.detach(), **metrics}
 
     @torch.no_grad()
     def update_teacher(self, epoch):
         momentum = 0.996 + 0.004 * min(epoch, 300) / 300
-        for target, online in zip(self.teacher.parameters(), self.visual.parameters()):
+        for target, online in zip(self.teacher.parameters(), self.encoder.parameters()):
             target.mul_(momentum).add_(online, alpha=1 - momentum)
 
 
-def train(cfg, checkpoint=None, max_updates=None):
-    if cfg.training.loop.gradient_accumulation_steps != 1:
-        raise ValueError("AFRO VICReg requires accumulation=1; a smaller batch is an explicit recipe change")
-    positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
-    positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
-    set_seed(cfg.training.seed)
-    dataset = hydra.utils.instantiate(
-        cfg.dataset, frame_stride=cfg.model.frame_stride, _convert_="all",
-    )
-    cfg.dataset.split_manifest = dataset.split_manifest
-    loader = build_train_loader(cfg, dataset)
-    batches_per_epoch = loader.batch_sampler.batches_per_epoch
-    total = cfg.training.num_epochs * batches_per_epoch
-    cfg.training.loop.total_train_steps = total
-    model = AFROPretrain(cfg.normalization)
-    if checkpoint is None:
-        model.normalizer = fit_normalizer(
-            dataset, cfg.normalization, feature_dims={"point_cloud": 3},
-        )
-    validation = dataset.get_validation_dataset()
-    device = torch.device(cfg.training.device)
-    model.to(device)
-    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
-    scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
-    step = 0
-    if checkpoint is not None:
-        step = restore_run(model, optimizer, scheduler, checkpoint, device=device)
-    epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
-    if checkpoint is not None:
-        print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
-    stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace, resume_step=step if checkpoint is not None else None)
-    print(f"[AFRO] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
-          f"batch={cfg.dataloader.batch_size}, total_updates={total}")
-    stop_requested = False
-
-    def request_stop(signum, frame):
-        nonlocal stop_requested
-        stop_requested = True
-
-    iterator = None
-    with training_signal_handlers(request_stop):
-        try:
-            logger.save_config(cfg)
-            while step < stop_step and not stop_requested:
-                epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
-                loader.batch_sampler.set_epoch(epoch, start_batch)
-                model.train()
-                current_epoch = epoch
-                iterator = iter(loader)
-                for index in range(start_batch, batches_per_epoch):
-                    record = (
-                        step == 0
-                        or (step + 1) % cfg.training.loop.log_interval_steps == 0
-                        or step + 1 == stop_step
-                    )
-                    if record:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device)
-                        step_start = time.perf_counter()
-                    batch = next(iterator)
-                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                    optimizer.zero_grad(set_to_none=True)
-                    loss, metrics = model(batch)
-                    if not torch.isfinite(loss):
-                        raise RuntimeError(f"Nonfinite AFRO loss at step {step}")
-                    loss.backward()
-                    gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
-                    if not torch.stack(gradients).all():
-                        raise RuntimeError(f"Nonfinite AFRO gradient at step {step}")
-                    model.update_teacher(current_epoch)
-                    optimizer.step()
-                    scheduler.step()
-                    if record:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device)
-                        elapsed = time.perf_counter() - step_start
-                    step += 1
-                    if index + 1 == batches_per_epoch:
-                        epoch = current_epoch + 1
-                    if record:
-                        logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
-                                                 | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch,
-                                                    "train/step_time": elapsed}), step)
-                    if step >= stop_step or stop_requested:
-                        break
-                iterator = None
-                if stop_requested:
-                    break
-                if epoch > current_epoch:
-                    if epoch % cfg.training.val_every_epochs == 0 and validation is not None:
-                        metrics = evaluate(
-                            model, validation, cfg.dataloader.batch_size, device,
-                            stop_requested=lambda: stop_requested,
-                        )
-                        if metrics is not None:
-                            logger.log(to_log_scalars(metrics), step)
-                    if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
-                        save_run(model, optimizer, scheduler, cfg, step)
-            save_run(model, optimizer, scheduler, cfg, step)
-            export_encoder(model, model.visual, Path(cfg.workspace.output_dir) / "encoder.pt")
-            print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
-        finally:
-            close_resources(lambda: close_data_loader(loader, iterator), logger.close)
-
-
 def main():
-    train(*load_run("afro"))
+    train("afro", *load_run("afro"))
 
 
 if __name__ == "__main__":

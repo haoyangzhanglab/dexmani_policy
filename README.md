@@ -21,7 +21,7 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 ```bash
 python -m dexmani_policy.datasets.split --zarr-path INPUT --output split.json \
   --seed 42 --val-ratio 0.1 --max-train-episodes 100
-python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output OUTPUT
+python -m dexmani_policy.datasets.preprocess.contact_map --zarr-path INPUT --output OUTPUT
 ```
 
 接触标签生成需要 Open3D；数据划分及常规数据读取不加载它。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
@@ -64,7 +64,7 @@ FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测�
 
 主策略默认最多使用 100 个训练 episodes，在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。选点使用显式候选列表和相同评测预算。
 
-DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 需先导出 `encoder.pt`，流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
+DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 使用预训练初始化时先导出 `encoder.pt`，预训练与从头训练流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
 
 ## SAT / DQ-RISE / DexLatent dense observation
 
@@ -90,17 +90,17 @@ bash scripts/training/train.sh sat 'task_name=<task>' agent.rgb_backbone_config.
 
 ## InterAct-Dex 动作耦合交互状态预测
 
-`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `InterActDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。支持 `tactile=sim_force` 和 `tactile=real_force`，分别使用各来源训练数据的 aggregate 触觉统计。
+`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `InterActDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。使用 `tactile=force`，通过 `tactile_source=sim`（默认）或 `tactile_source=real` 选择来源，分别使用各来源训练数据的 aggregate 触觉统计。
 
 ```bash
-bash scripts/training/train.sh interact_dex tactile=sim_force 'zarr_path=<sim_zarr>'
+bash scripts/training/train.sh interact_dex tactile=force 'zarr_path=<sim_zarr>'
 python -m dexmani_policy.test_tools.smoke_test interact_dex \
-  --override tactile=real_force --override 'zarr_path=<real_zarr>'
+  --override tactile=force --override tactile_source=real --override 'zarr_path=<real_zarr>'
 ```
 
 InterAct-Dex 包含以下四部分：
 
-1. **动作耦合的力残差监督**：单元素 `future_force_offsets=[4]` 定义预测边界 K，与执行长度 `n_action_steps` 独立。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使首四个执行动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
+1. **动作耦合的力残差监督**：单元素 `future_force_offsets=[4]` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为13。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
 2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
 3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistory 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
 4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandScene 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。
@@ -113,20 +113,19 @@ InterAct-Dex 包含以下四部分：
 
 ## AdapTac 触觉实验
 
-只需一个 `tactile=...` override 切换来源和观测编码。基础配置声明 `tactile_source: ???`，preset 显式填入 `sim` 或 `real`；agent/dataset 引用同一顶层值。触觉输入不允许来源缺失、null 或非法值；`fingertip_xyz` 单独存在不要求来源。四种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
+通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 默认使用 sim，真实 aggregate 数据追加 `tactile_source=real`；`taxel`、`patch` 默认使用 real，目前仅支持真实 dense 数据。preset 声明默认 `tactile_source`，命令行可覆盖；agent/dataset 引用同一顶层值。触觉输入不允许来源缺失、null 或非法值；`fingertip_xyz` 单独存在不要求来源。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
 
 | preset | 来源 | 必需触觉输入 | encoder | 默认尺度 |
 | --- | --- | --- | --- | --- |
-| `sim_force`（默认） | sim | `finger_tactile_force [5,3]` | XHandForceEncoder | aggregate RMS |
-| `real_force` | real | `finger_tactile_force [5,3]` | XHandForceEncoder | aggregate RMS |
-| `real_taxel` | real | aggregate + `taxel_tactile_force [5,120,3]` | XHandTaxelEncoder | 两字段独立 RMS |
-| `real_patch` | real | aggregate + dense | XHandPatchEncoder | 两字段独立 RMS |
+| `force`（默认） | sim（默认）或 real | `finger_tactile_force [5,3]` | XHandForceEncoder | aggregate RMS |
+| `taxel` | real | aggregate + `taxel_tactile_force [5,120,3]` | XHandTaxelEncoder | 两字段独立 RMS |
+| `patch` | real | aggregate + dense | XHandPatchEncoder | 两字段独立 RMS |
 
 ```bash
-bash scripts/training/train.sh adaptac tactile=sim_force 'zarr_path=<sim_zarr>'
-bash scripts/training/train.sh adaptac tactile=real_force 'zarr_path=<real_zarr>'
-bash scripts/training/train.sh adaptac tactile=real_taxel 'zarr_path=<real_zarr>'
-bash scripts/training/train.sh adaptac tactile=real_patch 'zarr_path=<real_zarr>'
+bash scripts/training/train.sh adaptac tactile=force 'zarr_path=<sim_zarr>'
+bash scripts/training/train.sh adaptac tactile=force tactile_source=real 'zarr_path=<real_zarr>'
+bash scripts/training/train.sh adaptac tactile=taxel 'zarr_path=<real_zarr>'
+bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 ```
 
 任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可以覆盖 `normalization.finger_tactile_force=max_abs`、`normalization.taxel_tactile_force=max_abs`（dense 模式）及 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。
@@ -136,7 +135,7 @@ RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=
 ```bash
 # 实际数据短训、续训及保存恢复；按硬件资源设置 batch/worker
 python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 2 \
-  --override tactile=real_taxel --override 'zarr_path=<real_zarr>' \
+  --override tactile=taxel --override 'zarr_path=<real_zarr>' \
   --override 'task_name=<task>' adaptac
 
 # 正式续训由 checkpoint 拥有配方，不再次传 tactile 或 normalization override
@@ -149,7 +148,7 @@ python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>
 
 默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复使用同一 checkpoint 的实际配置与严格张量赋值，直接复用保存的 affine 与参数精度，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径仍以实验 checkpoints 目录解析；完整 `future_actions` 及 Runtime 返回接口保留。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复使用同一 checkpoint 的实际配置、保存的 affine 与严格张量赋值，部署参数统一转为 FP32，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径以实验 checkpoints 目录解析；默认 best 恢复选优时的执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。Runtime 返回完整未来动作窗口，由调用方按 `info.n_action_steps` 消费。
 
 训练将 Canonical 实际使用的数值配方保存到配置和 checkpoint，由公开 `PolicyInfo` 提供给 Real。非 Canonical 的训练、inspect 和纯策略推理不要求真机配方；设备入口负责拒绝缺失事实。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 
@@ -157,7 +156,7 @@ python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>
 
 future 标签从 query+1 的下一观测行开始，真实后继有效，重复末帧补齐后缀不计力损失或误差。零净力、力相消、reset 零值和合法 SDK hold 不代表无效；real 两通道有独立时间戳及有界 previous-valid hold，后继行不能解释为精确瞬时动作后真值。沿用现有数据时钟与 freshness 准入，不插值或补零修复。
 
-`real_taxel` 是基础 dense 选项；`real_patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 在 normalized dense 上计算 `w=||z||/(||z||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 只允许 RMS/MaxAbs。零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建 mask。
+`taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 在 normalized dense 上计算 `w=||z||/(||z||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 只允许 RMS/MaxAbs。零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建 mask。
 
 仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型和数据配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
 

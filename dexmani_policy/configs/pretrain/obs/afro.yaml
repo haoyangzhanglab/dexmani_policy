@@ -3,12 +3,11 @@ task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 normalization:
   point_cloud: limits
-model:
-  frame_stride: 2
 dataset:
   _target_: dexmani_policy.datasets.pretrain.afro.AFROPretrainDataset
   zarr_path: ${zarr_path}
   horizon: 33
+  frame_stride: 2
   pad_before: 0
   pad_after: 7
   seed: 42
@@ -33,8 +32,6 @@ training:
   val_every_epochs: 200
   save_every_epochs: 20
   loop:
-    total_train_steps: null
-    gradient_accumulation_steps: 1
     log_interval_steps: 100
 workspace:
   output_dir: experiments/pretrain/obs/afro/${task_name}/${run_id:}_seed${training.seed}

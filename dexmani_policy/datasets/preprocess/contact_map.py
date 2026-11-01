@@ -1,6 +1,9 @@
 """Build a self-contained CordViP Zarr with offline contact labels."""
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
+from multiprocessing import get_context
 from pathlib import Path
 import shutil
 import tempfile
@@ -8,6 +11,7 @@ import tempfile
 import numpy as np
 import zarr
 
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 
@@ -41,7 +45,12 @@ def compute_contact_map(object_points, object_normals, hand_points, *, gamma=1.0
     return contacts
 
 
-def generate(zarr_path, output):
+def frame_contact_map(object_points, hand_points):
+    return compute_contact_map(object_points, estimate_normals(object_points), hand_points).astype(np.float32)
+
+
+def generate(zarr_path, output, num_workers=1):
+    positive_int(num_workers, "num_workers")
     output = Path(output).expanduser()
     if output.exists():
         raise FileExistsError(f"Contact output already exists: {output}")
@@ -83,23 +92,29 @@ def generate(zarr_path, output):
             "contact_map", shape=(rows, buffer["object_pointcloud"].shape[1]),
             chunks=(CHUNK_ROWS, buffer["object_pointcloud"].shape[1]), dtype="float32",
         )
-        for start in range(0, rows, CHUNK_ROWS):
-            stop = min(start + CHUNK_ROWS, rows)
-            points = {}
-            for key in keys:
-                values = buffer[key][start:stop]
-                data[key][start:stop] = values
-                if key in keys[:2]:
-                    # Geometry uses FP32 floating XYZ; copied arrays keep their stored dtype.
-                    dtype = np.float32 if np.issubdtype(values.dtype, np.floating) else values.dtype
-                    xyz = np.asarray(values[..., :3], dtype=dtype)
-                    check_finite(buffer, key, start, xyz, slice(0, 3))
-                    points[key] = xyz
-            hands, objects = points["hand_pointcloud"], points["object_pointcloud"]
-            labels[start:stop] = np.stack([
-                compute_contact_map(obj, estimate_normals(obj), hand) for obj, hand in zip(objects, hands)
-            ]).astype(np.float32)
-            print(f"Contact rows {stop}/{rows}", flush=True)
+        # Open3D's OpenMP runtime cannot safely be inherited by forked workers.
+        workers = (
+            ProcessPoolExecutor(max_workers=num_workers, mp_context=get_context("spawn"))
+            if num_workers > 1 else nullcontext()
+        )
+        with workers as pool:
+            map_frames = map if pool is None else pool.map
+            for start in range(0, rows, CHUNK_ROWS):
+                stop = min(start + CHUNK_ROWS, rows)
+                points = {}
+                for key in keys:
+                    values = buffer[key][start:stop]
+                    data[key][start:stop] = values
+                    if key in keys[:2]:
+                        # Geometry uses FP32 floating XYZ; copied arrays keep their stored dtype.
+                        dtype = np.float32 if np.issubdtype(values.dtype, np.floating) else values.dtype
+                        xyz = np.asarray(values[..., :3], dtype=dtype)
+                        check_finite(buffer, key, start, xyz, slice(0, 3))
+                        points[key] = xyz
+                labels[start:stop] = np.stack(list(map_frames(
+                    frame_contact_map, points["object_pointcloud"], points["hand_pointcloud"],
+                )))
+                print(f"Contact rows {stop}/{rows}", flush=True)
         if output.exists():
             raise FileExistsError(f"Contact output already exists: {output}")
         temporary.rename(output)
@@ -113,8 +128,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zarr-path", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--num-workers", type=int, default=1)
     args = parser.parse_args()
-    generate(args.zarr_path, args.output)
+    generate(args.zarr_path, args.output, args.num_workers)
 
 
 if __name__ == "__main__":

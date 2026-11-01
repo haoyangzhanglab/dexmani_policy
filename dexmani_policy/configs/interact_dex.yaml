@@ -1,6 +1,6 @@
 defaults:
   - common
-  - tactile: sim_force
+  - tactile: force
   - _self_
 
 policy_name: interact-dex
