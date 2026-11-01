@@ -423,7 +423,7 @@ def check_codebook_pipeline(device):
         extrinsics = torch.eye(4, device=device)[:3]
         obs = dict(
             joint_state=torch.randn(2, 2, 19, device=device), point_cloud=xyz,
-            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device).permute(0, 1, 4, 2, 3).float().div_(255),
+            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device).permute(0, 1, 4, 2, 3).contiguous(),
             camera_intrinsic=intrinsics.flatten().expand(2, 2, -1).clone(),
             camera_extrinsic=extrinsics.flatten().expand(2, 2, -1).clone(),
         )

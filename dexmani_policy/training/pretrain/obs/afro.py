@@ -115,12 +115,13 @@ def train(cfg, checkpoint=None, max_updates=None):
             dataset, cfg.normalization, feature_dims={"point_cloud": 3},
         )
     validation = dataset.get_validation_dataset()
-    model.to(cfg.training.device)
+    device = torch.device(cfg.training.device)
+    model.to(device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
     if checkpoint is not None:
-        step = restore_run(model, optimizer, scheduler, checkpoint, device=cfg.training.device)
+        step = restore_run(model, optimizer, scheduler, checkpoint, device=device)
     epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
@@ -134,6 +135,7 @@ def train(cfg, checkpoint=None, max_updates=None):
         nonlocal stop_requested
         stop_requested = True
 
+    iterator = None
     with training_signal_handlers(request_stop):
         try:
             logger.save_config(cfg)
@@ -142,9 +144,19 @@ def train(cfg, checkpoint=None, max_updates=None):
                 loader.batch_sampler.set_epoch(epoch, start_batch)
                 model.train()
                 current_epoch = epoch
-                step_start = time.perf_counter()
-                for index, batch in enumerate(loader, start=start_batch):
-                    batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
+                iterator = iter(loader)
+                for index in range(start_batch, batches_per_epoch):
+                    record = (
+                        step == 0
+                        or (step + 1) % cfg.training.loop.log_interval_steps == 0
+                        or step + 1 == stop_step
+                    )
+                    if record:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        step_start = time.perf_counter()
+                    batch = next(iterator)
+                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                     optimizer.zero_grad(set_to_none=True)
                     loss, metrics = model(batch)
                     if not torch.isfinite(loss):
@@ -156,23 +168,26 @@ def train(cfg, checkpoint=None, max_updates=None):
                     model.update_teacher(current_epoch)
                     optimizer.step()
                     scheduler.step()
-                    elapsed = time.perf_counter() - step_start
+                    if record:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        elapsed = time.perf_counter() - step_start
                     step += 1
                     if index + 1 == batches_per_epoch:
                         epoch = current_epoch + 1
-                    if step == 1 or step % cfg.training.loop.log_interval_steps == 0 or step == stop_step:
+                    if record:
                         logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
                                                  | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch,
                                                     "train/step_time": elapsed}), step)
                     if step >= stop_step or stop_requested:
                         break
-                    step_start = time.perf_counter()
+                iterator = None
                 if stop_requested:
                     break
                 if epoch > current_epoch:
                     if epoch % cfg.training.val_every_epochs == 0 and validation is not None:
                         metrics = evaluate(
-                            model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                            model, validation, cfg.dataloader.batch_size, device,
                             stop_requested=lambda: stop_requested,
                         )
                         if metrics is not None:
@@ -183,7 +198,7 @@ def train(cfg, checkpoint=None, max_updates=None):
             export_encoder(model, model.visual, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
         finally:
-            close_resources(lambda: close_data_loader(loader), logger.close)
+            close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():

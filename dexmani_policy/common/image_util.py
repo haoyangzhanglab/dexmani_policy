@@ -39,15 +39,14 @@ def resize_image_transform(input_hw, output_hw, *, device=None) -> torch.Tensor:
     )
 
 
-def convert_rgb_output(value: torch.Tensor, *, keep_uint8: bool) -> torch.Tensor:
+def _convert_rgb_output(value: torch.Tensor, *, keep_uint8: bool) -> torch.Tensor:
+    """Finalize CPU quantization; floating-point spatial paths are already scaled to [0,1]."""
     import torch
 
     if value.dtype.is_floating_point:
         value = value.clamp_(0, 1)
         if keep_uint8:
             value = value.mul_(255).round_().to(torch.uint8)
-    if value.dtype == torch.uint8:
-        value = value.to(torch.float32).div_(255.0)
     return value.contiguous()
 
 
@@ -75,7 +74,7 @@ def preprocess_rgb_train(
         value = TVF.crop(value, top, left, height, width)
     if color_augmentation is not None:
         value = color_augmentation(value)
-    return convert_rgb_output(value, keep_uint8=keep_uint8)
+    return _convert_rgb_output(value, keep_uint8=keep_uint8)
 
 
 def preprocess_rgb_eval(
@@ -99,5 +98,5 @@ def preprocess_rgb_eval(
 
     if center_crop_hw is not None:
         value = TVF.center_crop(value, list(center_crop_hw))
-    value = convert_rgb_output(value, keep_uint8=keep_uint8)
-    return value.reshape(*leading_shape, *value.shape[-3:]).contiguous()
+    value = _convert_rgb_output(value, keep_uint8=keep_uint8)
+    return value.reshape(*leading_shape, *value.shape[-3:])

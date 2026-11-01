@@ -332,8 +332,6 @@ class PolicyTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
 
                     num_batches = self.batches_per_epoch
-                    # Start before iterator creation, including the epoch's first data wait.
-                    group_start_time = time.perf_counter()
                     iterator = iter(self.train_loader)
                     for group_start in range(
                         start_batch, num_batches, self.gradient_accumulation_steps
@@ -341,6 +339,11 @@ class PolicyTrainer:
                         group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
                         record_group = (self.global_step + 1) % self.log_interval_steps == 0
                         group_metric_sums: dict[str, torch.Tensor | float] = {}
+                        if record_group:
+                            # Time the full update from its first batch wait, excluding iterator creation.
+                            if self.device.type == "cuda":
+                                torch.cuda.synchronize(self.device)
+                            group_start_time = time.perf_counter()
                         for group_pos in range(group_size):
                             batch = next(iterator)
                             log_dict = self.train_microbatch(
@@ -350,9 +353,11 @@ class PolicyTrainer:
                                 accumulate_metrics(group_metric_sums, log_dict)
 
                         self.optimizer_step()
-                        group_elapsed = time.perf_counter() - group_start_time
-                        # Keep the final metric reduction outside the measured update.
                         if record_group:
+                            if self.device.type == "cuda":
+                                torch.cuda.synchronize(self.device)
+                            group_elapsed = time.perf_counter() - group_start_time
+                            # Keep the final metric reduction outside the measured update.
                             accumulate_metrics(group_metric_sums, log_dict)
                         self.global_step += 1
                         if record_group:
@@ -367,8 +372,6 @@ class PolicyTrainer:
                             self.save_checkpoint(f"milestone={pct:02d}pct")
                         if self.global_step >= stop_step or self.stop_requested:
                             break
-                        # Exclude this update's logging/checkpoint work from the next one.
-                        group_start_time = time.perf_counter()
                     iterator = None
 
                     if self.stop_requested:

@@ -94,13 +94,13 @@ class SinusoidalTimestepEmbedding(nn.Module):
         super().__init__()
         if dim <= 0 or dim % 2:
             raise ValueError("sinusoidal embedding dimension must be positive and even")
-        self.dim = dim
+        half_dim = dim // 2
+        frequency_step = math.log(POS_ENCODING_BASE) / max(half_dim - 1, 1)
+        frequencies = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -frequency_step)
+        self.register_buffer("frequencies", frequencies, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        half_dim = self.dim // 2
-        frequency_step = math.log(POS_ENCODING_BASE) / max(half_dim - 1, 1)
-        frequencies = torch.exp(torch.arange(half_dim, device=x.device) * -frequency_step)
-        angles = x[:, None] * frequencies[None, :]
+        angles = x[:, None] * self.frequencies[None, :]
         return torch.cat((angles.sin(), angles.cos()), dim=-1)
 
 
@@ -130,19 +130,15 @@ class DiTTimestepEmbedding(nn.Module):
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
-
-    @staticmethod
-    def timestep_embedding(t, dim, max_period=POS_ENCODING_BASE):
-        half = dim // 2
+        half = frequency_embedding_size // 2
         freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-        ).to(device=t.device)
-        args = t[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-        return embedding
+            -math.log(POS_ENCODING_BASE) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+        )
+        self.register_buffer("frequencies", freqs, persistent=False)
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        return self.mlp(t_freq)
+        args = t[:, None].float() * self.frequencies[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if self.frequency_embedding_size % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return self.mlp(embedding)

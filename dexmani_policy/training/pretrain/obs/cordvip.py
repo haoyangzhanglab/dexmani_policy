@@ -91,13 +91,14 @@ def train(cfg, checkpoint=None, max_updates=None):
             feature_dims={"hand_pointcloud": 3, "object_pointcloud": 3, "joint_state": 19},
         )
     validation = dataset.get_validation_dataset()
-    model.to(cfg.training.device)
+    device = torch.device(cfg.training.device)
+    model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
     scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
     if checkpoint is not None:
-        step = restore_run(model, optimizer, scheduler, checkpoint, device=cfg.training.device)
+        step = restore_run(model, optimizer, scheduler, checkpoint, device=device)
     epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
@@ -120,7 +121,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                 loader.batch_sampler.set_epoch(epoch, start_batch)
                 model.train()
                 current_epoch = epoch
-                step_start = time.perf_counter()
                 iterator = iter(loader)
                 for group_start in range(start_batch, batches_per_epoch, accumulation):
                     group_size = min(accumulation, batches_per_epoch - group_start)
@@ -131,9 +131,13 @@ def train(cfg, checkpoint=None, max_updates=None):
                     )
                     totals: dict[str, torch.Tensor] = {}
                     optimizer.zero_grad(set_to_none=True)
+                    if record:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        step_start = time.perf_counter()
                     for _ in range(group_size):
                         batch = next(iterator)
-                        batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
+                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         loss, metrics = model(batch)
                         if not torch.isfinite(loss):
                             raise RuntimeError(f'Nonfinite CordViP loss at step {step}')
@@ -145,7 +149,10 @@ def train(cfg, checkpoint=None, max_updates=None):
                         raise RuntimeError(f'Nonfinite CordViP gradient at step {step}')
                     optimizer.step()
                     scheduler.step()
-                    elapsed = time.perf_counter() - step_start
+                    if record:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        elapsed = time.perf_counter() - step_start
                     step += 1
                     if group_start + group_size == batches_per_epoch:
                         epoch = current_epoch + 1
@@ -165,7 +172,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                         break
                     if step % cfg.training.save_every_updates == 0:
                         save_run(model, optimizer, scheduler, cfg, step)
-                    step_start = time.perf_counter()
                 iterator = None
                 if stop_requested:
                     break
@@ -175,7 +181,7 @@ def train(cfg, checkpoint=None, max_updates=None):
                     and validation is not None
                 ):
                     metrics = evaluate(
-                        model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                        model, validation, cfg.dataloader.batch_size, device,
                         stop_requested=lambda: stop_requested,
                     )
                     if metrics is not None:

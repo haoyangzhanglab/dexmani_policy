@@ -31,7 +31,7 @@ IMAGE_PROCESSOR_PRESETS: dict[str, dict] = {
 
 
 class ImageProcessor(torch.nn.Module):
-    """Resize and normalize CHW float32 [0,1] RGB batches."""
+    """Convert CHW uint8 or float32 [0,1] RGB batches, then resize and normalize."""
 
     def __init__(
         self,
@@ -79,12 +79,6 @@ class ImageProcessor(torch.nn.Module):
             "interpolation": self.interpolation,
         }
 
-    def normalize(self, image_batch: torch.Tensor) -> torch.Tensor:
-        device, dtype = image_batch.device, image_batch.dtype
-        mean = self.image_mean.to(device=device, dtype=dtype).view(1, 3, 1, 1)
-        std = self.image_std.to(device=device, dtype=dtype).view(1, 3, 1, 1)
-        return image_batch.sub(mean).div_(std)
-
     def process_images(
         self,
         images: torch.Tensor,
@@ -92,6 +86,8 @@ class ImageProcessor(torch.nn.Module):
         return_transform: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Consume [BT,3,H,W]; transforms use half-pixel resizing."""
+        if images.dtype == torch.uint8:
+            images = images.to(torch.float32).div_(255.0)
         if return_transform:
             output_hw = self.image_size or images.shape[-2:]
             if self.interpolation == "nearest" and tuple(output_hw) != images.shape[-2:]:
@@ -106,5 +102,5 @@ class ImageProcessor(torch.nn.Module):
                 mode=self.interpolation,
                 align_corners=None if self.interpolation == "nearest" else False,
             )
-        images = self.normalize(images)
+        images = images.sub(self.image_mean.view(1, 3, 1, 1)).div_(self.image_std.view(1, 3, 1, 1))
         return (images, transform) if return_transform else images
