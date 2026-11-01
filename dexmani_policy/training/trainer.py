@@ -48,7 +48,7 @@ class PolicyTrainer:
             method = cfg.policy_name
             if method == "dp":
                 model.obs_encoder.backbone.initialize_weights(sources.get("rgb"))
-            elif method in {"sat", "dqrise"}:
+            elif method in {"sat", "dqrise", "dexlatent"}:
                 model.obs_encoder.rgb_encoder.initialize_weights(sources.get("rgb"))
             elif method == "r3d":
                 model.obs_encoder.pc_encoder.initialize_weights(sources.get("uni3d"))
@@ -56,6 +56,8 @@ class PolicyTrainer:
             hand_affine = None
             if method == "dqrise":
                 hand_affine = model.initialize_training(data_description, sources.get("codebook"))
+            elif method == "dexlatent":
+                hand_affine = model.hand_prior.initialize_weights(sources.get("dexlatent"))
             elif method in {"afro", "cordvip"}:
                 source = sources.get("encoder")
                 if source is None:
@@ -77,6 +79,8 @@ class PolicyTrainer:
                 normalizer["action"].scale[-model.hand_dim:].copy_(hand_affine["scale"])
                 normalizer["action"].offset[-model.hand_dim:].copy_(hand_affine["offset"])
             model.normalizer = normalizer
+            if method == "dexlatent":
+                model.fit_latent_normalizer(dataset)
 
         if model.requires_ema_for_loss and not cfg.training.use_ema:
             raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")

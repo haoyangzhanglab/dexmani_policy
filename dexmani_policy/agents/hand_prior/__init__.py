@@ -1,1 +1,1 @@
-"""Hand state quantization and runtime codebooks."""
+"""Hand state codebooks and continuous latent priors."""

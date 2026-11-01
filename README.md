@@ -56,7 +56,7 @@ python -m dexmani_policy.eval_pipeline \
 
 续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
-动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
+动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ/DexLatent 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ/DexLatent 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 
 FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测关闭随机起点、选点噪声和输出 shuffle。
 
@@ -64,17 +64,20 @@ FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测�
 
 DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 需先导出 `encoder.pt`，流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
 
-## SAT / DQ-RISE dense observation
+## SAT / DQ-RISE / DexLatent dense observation
 
-两策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一标准 uniform flow matching、10 步 Euler 和 `Nobs=2,H=16,C=8`。SAT 采用“SAT 动作表示 + 6 层 768D DiTX 的本地适配”：`SATActionIO` 参照[官方动作表示](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)拼接关节轨迹与身份，形成 19 个 token，经公共 DiTX 后读出 `[B,16,19]` 动作速度；Flow 始终在归一化动作坐标中训练与积分。DQ 使用普通时间 token 输入输出，预测 7D arm 和连续码本索引后 lookup。两者共享 6 层、768D DiTX 层型与主干配置，但表示维度、token 数、输入输出头和量化机制不同，不是“只交换 token 轴”的消融，也不能直接横比 Flow MSE。新 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
+三种策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一标准 uniform flow matching、10 步 Euler 和 `Nobs=2,H=16,C=8`。SAT 采用“SAT 动作表示 + 6 层 768D DiTX 的本地适配”：`SATActionIO` 参照[官方动作表示](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)拼接关节轨迹与身份，形成 19 个 token，经公共 DiTX 后读出 `[B,16,19]` 动作速度；Flow 始终在归一化动作坐标中训练与积分。DQ 使用普通时间 token 输入输出，预测 7D arm 和连续码本索引后 lookup。三者共享 6 层、768D DiTX 层型与主干配置，但表示维度、token 数、输入输出头和量化机制不同，不是“只交换 token 轴”的消融，也不能直接横比 Flow MSE。新 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
+
+DexLatent 使用同一观测及普通时间 token DiTX，内部预测 7D arm + 32D hand latent，对外保持 19D 绝对关节动作。官方 XHand E/D 冻结并使用 FP32 确定性 mean，保留官方 URDF 尺度；内部 latent limits 只拟合训练真实动作行。原始权重只在 fresh 初始化读取，完整策略内嵌先验和统计。训练、恢复、离线推理命令及预训练来源差异见 [手部动作表示](docs/手部动作表示.md#dexlatent-连续手部表示)。
 
 新 SAT 主干与旧专用 SAT checkpoint 不兼容，需要重新训练；不提供权重迁移，也不宣称完整复现原论文网络或实验结果。
 
 ```bash
-bash scripts/utils/download_pretrained.sh  # 准备 Uni3D 及 DINOv2-small，重复运行复用缓存。
+bash scripts/utils/download_pretrained.sh  # 准备 Uni3D、DexLatent 及 DINOv2-small，重复运行复用文件。
 python -m dexmani_policy.test_tools.agent_checks --device cpu
 bash scripts/training/train.sh sat 'task_name=<task>'
 bash scripts/training/train.sh dqrise 'task_name=<task>' 'initialization.codebook=<codebook.npz>'
+bash scripts/training/train.sh dexlatent 'task_name=<task>'
 # B0：晚融合、均匀权重；B4：在新默认基础上单独启用既有 LoRA。
 bash scripts/training/train.sh sat 'task_name=<task>' \
   agent.fusion_stage=post_global agent.semantic_pool_sigma=null

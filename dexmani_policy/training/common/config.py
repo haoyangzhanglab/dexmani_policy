@@ -52,9 +52,9 @@ def assemble_policy_config(cfg):
             fixed["rgb"] = "identity"
         if method == "r3d":
             fixed["point_cloud"] = "limits"
-        if method in {"sat", "dqrise", "adaptac", "interact-dex"}:
+        if method in {"sat", "dqrise", "dexlatent", "adaptac", "interact-dex"}:
             fixed["point_cloud"] = "identity"
-        if method in {"sat", "dqrise"}:
+        if method in {"sat", "dqrise", "dexlatent"}:
             fixed.update(joint_state="limits", camera_intrinsic="identity", camera_extrinsic="identity")
         if method == "interact-dex":
             fixed.update(eef_pose="identity", fingertip_xyz="identity")
@@ -95,7 +95,7 @@ def prepare_training(cfg):
     if cfg.get("resume_from") is not None:
         raise ValueError("Use python -m dexmani_policy.training.common.resume --run <run>")
     validate_config(cfg)
-    if cfg.policy_name in {"dp", "sat", "dqrise"}:
+    if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         name = cfg.agent.get("rgb_backbone_name", "dino")
         if name != "resnet":
             rgb = dict(cfg.agent.get("rgb_backbone_config") or {})

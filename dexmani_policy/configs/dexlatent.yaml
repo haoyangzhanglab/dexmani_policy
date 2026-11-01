@@ -1,0 +1,90 @@
+defaults:
+  - common
+  - _self_
+
+# DexLatent：共享 spatial observation，普通 DiTX 预测 arm7 + frozen hand latent32。
+
+policy_name: dexlatent
+
+initialization:
+  rgb: facebook/dinov2-small
+  dexlatent: data/pretrained/dexlatent/checkpoint_epoch_1000.pt
+
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+
+dataloader:
+  batch_size: 128
+  drop_last: true
+
+dataset:
+  _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
+  sensor_modalities: ["joint_state", "point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"]
+  rgb_keep_uint8: true
+
+  augmentation_cfg:
+    state:
+      noise:       {noise_std: 0.0002, prob: 1.0}
+
+agent:
+  _target_: dexmani_policy.agents.policies.dexlatent.DexLatentPolicy
+
+  pc_dim: 3
+  state_dim: 19
+  num_points: 1024
+
+  fps_random_config:
+    use_random: true
+    use_random_start: true
+    use_shuffle_output: false
+    random_noise_scale: 0.0
+
+  pc_encoder_config:
+    channels: 192
+    num_patches: 96
+    group_size: 32
+    depth: 2
+    num_heads: 8
+    mlp_ratio: 2.0
+    geometry_scale: 0.10
+    rope_scale: 0.05
+    rope_base: 100.0
+
+  rgb_backbone_config:
+    tune_mode: freeze
+    image_size: [224, 224]
+
+  fusion_stage: pre_global
+  semantic_pool_sigma: 0.04
+
+  n_layers: 6
+  hidden_dim: 768
+  n_head: 8
+  mlp_ratio: 4.0
+  p_drop_attn: 0.1
+  qkv_bias: false
+  qk_norm: false
+  timestep_embed_dim: 128
+
+  num_inference_steps: 10
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+training:
+  use_bfloat16: true
+  use_compile: true
+  use_ema: true
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    total_train_steps: 100000
+
+eval:
+  inference_steps: ${agent.num_inference_steps}
+  use_ema: true

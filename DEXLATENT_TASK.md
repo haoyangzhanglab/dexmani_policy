@@ -55,9 +55,9 @@
 
 ## 4. 预训练权重准备
 
-- [ ] 确认或准备官方原始 checkpoint。
-- [ ] 将下载方式加入已有 `scripts/utils/download_pretrained.sh`；若已存在则复用。
-- [ ] 更新 `data/README.md` 中的来源、路径、用途和远程同步说明。
+- [x] 确认或准备官方原始 checkpoint。
+- [x] 将下载方式加入已有 `scripts/utils/download_pretrained.sh`；若已存在则复用。
+- [x] 更新 `data/README.md` 中的来源、路径、用途和远程同步说明。
 
 固定来源：
 
@@ -87,7 +87,7 @@ initialization:
 
 ## 5. 手部先验模块
 
-- [ ] 新增 `dexmani_policy/agents/hand_prior/dexlatent.py`，仅包含必要的 PyTorch 网络和选定权重加载逻辑。
+- [x] 新增 `dexmani_policy/agents/hand_prior/dexlatent.py`，仅包含必要的 PyTorch 网络和选定权重加载逻辑。
 
 网络要求：
 
@@ -103,8 +103,8 @@ initialization:
 
 ## 6. 坐标与统计
 
-- [ ] 复用 Trainer 已有的 `hand_affine` 注入方式。
-- [ ] 用训练真实行一次性拟合内部 latent affine，并随完整策略保存。
+- [x] 复用 Trainer 已有的 `hand_affine` 注入方式。
+- [x] 用训练真实行一次性拟合内部 latent affine，并随完整策略保存。
 
 | 字段 | affine 来源 | 保存位置 |
 | --- | --- | --- |
@@ -139,9 +139,9 @@ latent limits 是为本地 Flow 训练明确采用的数值适配，不宣称是
 
 ## 7. Policy 与动作链路
 
-- [ ] 新增 `dexmani_policy/agents/policies/dexlatent.py`。
-- [ ] 参考 DQRISEPolicy 组装普通 DiTX，保持公共 BasePolicy 接口。
-- [ ] 实现 39D Flow 训练目标和 19D 物理动作输出。
+- [x] 新增 `dexmani_policy/agents/policies/dexlatent.py`。
+- [x] 参考 DQRISEPolicy 组装普通 DiTX，保持公共 BasePolicy 接口。
+- [x] 实现 39D Flow 训练目标和 19D 物理动作输出。
 
 固定 `action_dim=19`、`control_action_dim=19`、`state_dim=19`。仅动作 backbone/Flow 内部使用 `flow_action_dim=39`。不要将顶层 action_dim 改为 39，也不要让 Dataset 输出 latent。
 
@@ -169,9 +169,9 @@ result = format_action_output(prediction)
 
 ## 8. 配置、初始化与恢复
 
-- [ ] 新增 `dexmani_policy/configs/dexlatent.yaml`。
-- [ ] 在 `training/common/config.py` 加入现有 dense observation 的归一化与 DINO architecture fresh 分支。
-- [ ] 在 `training/trainer.py` 加入 DINO 初始化、官方先验加载、hand affine 注入和一次性 latent affine 拟合。
+- [x] 新增 `dexmani_policy/configs/dexlatent.yaml`。
+- [x] 在 `training/common/config.py` 加入现有 dense observation 的归一化与 DINO architecture fresh 分支。
+- [x] 在 `training/trainer.py` 加入 DINO 初始化、官方先验加载、hand affine 注入和一次性 latent affine 拟合。
 
 共同配方以当前 SAT/DQ YAML 为直接参考：
 
@@ -217,12 +217,79 @@ Fresh 初始化顺序：
 
 交付要求：
 
-- [ ] fresh 配置可通过现有训练入口组装，权重已放在指定位置，示例命令与实际实现一致。
-- [ ] 19D 外部接口、39D 内部 Flow、FP32 冻结 E/D、train-only latent affine 均按上述契约接通。
-- [ ] 保存、续训与推理复用完整策略状态，先验不进入优化器更新。
-- [ ] 权重下载入口及现有文档同步更新，不提交预训练二进制。
-- [ ] 完成必要的就地确认和最终 diff 检查；报告真实执行结果与未验证项。
+- [x] fresh 配置可通过现有训练入口组装，权重已放在指定位置，示例命令与实际实现一致。
+- [x] 19D 外部接口、39D 内部 Flow、FP32 冻结 E/D、train-only latent affine 均按上述契约接通。
+- [x] 保存、续训与推理复用完整策略状态，先验不进入优化器更新。
+- [x] 权重下载入口及现有文档同步更新，不提交预训练二进制。
+- [x] 完成必要的就地确认和最终 diff 检查；报告真实执行结果与未验证项。
 
 若现有环境具备真实数据和依赖，优先复用已有短训/恢复入口做最小确认；否则完成可行的源码、导入或张量路径检查并说明限制。不要为了检查引入 mock 后端、修改无关环境或搭建新测试系统。无需启动 100000 步正式训练或批量闭环评测，不得把未执行的训练/评测称为通过。
 
 完成后给出改动文件、权重实际位置、可复制的训练/恢复/推理命令、实际运行过的确认及结果。根据真实完成情况更新本任务书复选框，不通过降低任务要求来标记完成。
+
+
+## 10. 实际完成记录（2026-11-01）
+
+已完成上述接入。新增 hand prior、Policy、YAML 三个文件；修改配置组装、Trainer fresh 分支、hand_prior 模块说明、已有下载脚本、`data/README.md`、`docs/手部动作表示.md`、`docs/项目架构.md`、根 README 及本任务书。SAT/DQ 实现和配方、公共 Flow、Dataset、checkpoint 与 Runtime 未修改；未新增测试文件、检查脚本或项目依赖，未提交或推送远程。
+
+官方原始权重已通过更新后的下载脚本保存至：
+
+```text
+/home/zhanghaoyang/Desktop/dexmani_policy/data/pretrained/dexlatent/checkpoint_epoch_1000.pt
+```
+
+实际文件为 2,155,219 bytes，原始四手内容保留；仅在 fresh 中提取 XHand 分支并严格加载。`git check-ignore` 确认该路径仍被排除。
+
+实际执行的基本确认：
+
+- `policy` 环境中配置组装、DINO 架构解析及完整模型构造通过；外部 action/control/state 为 19D，内部 Flow 为 39D，普通时间 token，支持 sync/async。
+- 官方 checkpoint 严格加载通过；FP32 mean 与使用官方参数逐层执行 Linear/LayerNorm/ReLU 的结果相等；外层 BF16 下 E/D 输出仍为 FP32，重复编码一致且无梯度。
+- 真实 `robot_data/pick_apple_messy.zarr` 默认划分为 100 train / 15 validation episodes；CPU 原生 PyTorch3D FPS 可用。使用完整 6 层 768D 主干、BF16 配方、batch=1、workers=0、compile=false，已有 smoke 入口完成 fresh 1 update、保存、resume 至第 2 update。
+- 临时命令确认真实观测 condition 为 `[1,194,256]`、Flow 为 `[1,16,39]`、Runtime 输出为 `(15,19)`；训练 loss 与全元素 Flow MSE 一致。每次 loss 只编码手部一次，完整预测只解码一次；BF16 外层下 Euler 状态保持 FP32，重置 generator 后预测一致。
+- raw/EMA 的先验参数在训练后与官方权重逐张量相等，先验不在 optimizer 参数组中；action 手部 affine 为官方尺度，内部 `hand_latent` 形状保存为 `[32]`，未进入 Dataset normalization 配置。
+- 临时移走原始权重后，raw/EMA 都完成严格恢复和真实观测推理；随后在原始权重缺失、RGB 初始化来源不可用时续训至第 3 update（loss=1.83636），所有先验参数和 affine 保持不变。检查结束后原始权重已恢复原路径。
+- 下载脚本 shell 语法与最终 `git diff --check` 通过。验证全部使用现有入口或临时命令，无 mock 后端。
+
+本次 smoke 产物保留于 `/tmp/dexlatent-smoke-20261101`，最终 `checkpoints/latest.pt` 为第 3 update。复现基础短训命令如下（输出目录须不存在）：
+
+```bash
+conda activate policy
+HF_HUB_OFFLINE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+python -m dexmani_policy.test_tools.smoke_test dexlatent --device cpu \
+  --max-updates 1 --resume-updates 1 --output-dir /tmp/dexlatent-smoke-new \
+  --override dataloader.batch_size=1 --override dataloader.num_workers=0 \
+  --override training.use_compile=false
+```
+
+正式训练、恢复、离线真实观测推理及共用 split 命令见 [动作表示文档](docs/手部动作表示.md#dexlatent-连续手部表示)。此前 CUDA 不可访问是 sandbox 限制；经用户授权在 sandbox 外完成以下 GPU 确认。
+
+### Sandbox 外 CUDA 补充确认
+
+- 环境：RTX 4090（24 GiB），driver 580.173.02，PyTorch 2.4.1+cu124，CUDA 12.4；`torch.cuda.is_available()` 为 True。
+- 同一真实数据及默认训练划分，保留 batch 128、BF16、EMA、完整主干和 `torch.compile`，只将 workers 改为 0、日志间隔改为 1。已有 smoke 入口完成 2 步 fresh、保存、恢复至第 3 步；loss 分别为 1.46498、1.47228、1.47497，未出现非有限值或 OOM。编译输出 symbolic_shapes 的 unknown range 警告，运行正常完成。
+- GPU checkpoint 严格恢复通过，保存的参数名不含 `_orig_mod.`；raw/EMA 先验均与官方权重逐张量相等，未进入 optimizer，所有 affine 保持 FP32 且 raw/EMA 一致。
+- 临时移走原始先验文件后，raw/EMA 都在 CUDA 上完成真实观测推理；检查后权重已恢复。外层 BF16 下 E/D 仍为 FP32，mean 重复编码一致；每次预测编码一次观测、完成 10 次 FP32 Euler 更新、解码一次，输出 `(15,19)` 且全部有限。重置 generator 后输出相等；默认 Runtime 无外层 autocast 的推理也通过。
+- GPU 产物：`/tmp/dexlatent-cuda-smoke-20261101/checkpoints/latest.pt`，global_step=3。
+
+可复制命令（在可访问 GPU 的环境运行，输出目录须不存在）：
+
+```bash
+conda activate policy
+HF_HUB_OFFLINE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+python -m dexmani_policy.test_tools.smoke_test dexlatent --device cuda:0 \
+  --max-updates 2 --resume-updates 1 --output-dir /tmp/dexlatent-cuda-smoke-new \
+  --override dataloader.num_workers=0 --override training.loop.log_interval_steps=1
+```
+
+未验证正式长训练、默认 8-worker 数据加载、sync/async 闭环执行或任务成功率；短训仅确认数值及生命周期链路，不代表性能评估。
+
+
+### 全链路审查与清理
+
+- 先验改用已有 `agents.modules.build_mlp`，删除重复 MLP 构造函数，保持官方层序、参数名和严格加载。logvar 层继续用于原始官方 state 的直接严格加载，不参与编码计算。
+- 删除 Policy 中重复的 autocast/no_grad 包装：FieldNormalizer 保证 affine 运算为 FP32，先验在 E/D 边界关闭 autocast，内部 `_encode_actions` 切断标签梯度。固定维度改为类常量供构造和推理共用，补齐相关方法返回类型。
+- 对齐模块说明、项目架构中的类路径/观测/动作/统计/执行能力、三种策略比较及训练入口。训练示例显式传入对应数据的 task_name；删除 DQ 会返回连续/离散索引的过时描述。
+- 审查了 fresh、EMA、optimizer、strict checkpoint 恢复、Dataset 真实行统计、Runtime、脚本及现有检查入口，未引入新的兼容、回退或校验机制。
+- 清理后重新完成 RTX 4090、batch 128、BF16、compile 的 fresh 2 步及 resume 1 步；三步 loss 与前次记录一致。新产物为 `/tmp/dexlatent-review-smoke-20261101/checkpoints/latest.pt`。参数键、先验和统计与清理前产物一致。
+- CUDA/BF16 临时命令确认 raw/EMA 的目标与显式 FP32 参考逐值相等，标准全元素 MSE 一致，标签和先验无梯度；原始文件缺失时恢复、10 步 FP32 Euler、单次解码和 generator 重放均通过。
+- 四个核心/接入文件的定向 mypy 检查通过（`--follow-imports=skip --ignore-missing-imports`）；全包 compileall、下载脚本 `bash -n`、最终 diff 检查通过。离线 wheel 构建通过，并核对两个新模块及 YAML 均完整入包。未新增测试文件或检查脚本，未执行长训练或闭环评测。
