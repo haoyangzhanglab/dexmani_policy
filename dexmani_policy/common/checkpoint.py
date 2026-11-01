@@ -64,6 +64,6 @@ def restore_policy(checkpoint_path, *, use_ema, device):
     agent.configure_normalizer(cfg["normalization_dims"], cfg["normalizer_shapes"])
     agent.load_state_dict(state, strict=True, assign=True)
     del state
-    agent.to(device)
+    agent.to(device=device, dtype=torch.float32)
     agent.eval()
     return agent

@@ -107,7 +107,6 @@ class PolicyTrainer:
         if cfg.training.use_ema:
             # Copy before compile; resume restores raw and EMA independently below.
             ema_model = copy.deepcopy(model)
-            ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
         if checkpoint is not None:
             # Assignment replaces Parameters; restore before constructing the optimizer.
@@ -119,6 +118,8 @@ class PolicyTrainer:
         model.to(device)
         if ema_model is not None:
             ema_model.to(device)
+            # Bind current Parameters only after assignment and device migration.
+            ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
 
         self.device = device
         self.model, self.ema_model, self.ema_updater = model, ema_model, ema_updater
@@ -208,7 +209,7 @@ class PolicyTrainer:
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
         if self.ema_updater is not None:
-            self.ema_updater.step(self.model)
+            self.ema_updater.step()
 
     def train_microbatch(
         self,

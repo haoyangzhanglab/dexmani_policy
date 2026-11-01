@@ -48,7 +48,7 @@
 - [DexLatent/model.py](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/HandLatent/model.py)：MLP、确定性 mean 和归一化入口。
 - [DexLatent/train.py](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/HandLatent/train.py)：四手预训练入口。
 - [官方 XHand URDF](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/Assets/xarm7_xhand/xarm7_xhand_right_hand.urdf)：独立关节顺序与尺度。
-- [本地仿真 XHand URDF](https://github.com/haoyangzhanglab/dexmani_sim/blob/607ae7c805b18022518a381dd78921dfa655df95/dexmani_sim/assets/robots/xhand/xarm7_xhand_right.urdf)：执行侧关节限制，仅作参考，不在本任务修改仿真仓库。
+- [仿真 XHand 组合机器人 URDF](https://github.com/haoyangzhanglab/dexmani_sim/blob/6ccaed388aecfc0d78579fdaf5db2c012312c8e9/dexmani_sim/assets/robots/xhand/xarm7_xhand_right.urdf)及[独立手 URDF](https://github.com/haoyangzhanglab/dexmani_sim/blob/6ccaed388aecfc0d78579fdaf5db2c012312c8e9/dexmani_sim/assets/robots/xhand/xhand_right.urdf)：当前仿真关节位置上下限参考，不在本任务修改仿真仓库。
 - [DQ-RISE v2](https://arxiv.org/html/2509.17450v2)：单步手姿量化、连续松弛与联合动作预测。
 
 官方论文描述与公开代码不完全一致时，本任务的先验网络和数值路径以上述固定代码、已发布权重为准，不推测未公开的 VLA 实现。
@@ -58,6 +58,8 @@
 - [x] 确认或准备官方原始 checkpoint。
 - [x] 将下载方式加入已有 `scripts/utils/download_pretrained.sh`；若已存在则复用。
 - [x] 更新 `data/README.md` 中的来源、路径、用途和远程同步说明。
+
+使用 `bash scripts/utils/download_pretrained.sh dexlatent`，仅准备 DINOv2-small 缓存和官方 DexLatent 原始权重。
 
 固定来源：
 
@@ -127,7 +129,9 @@ offset = -1 - lower * scale
 
 唯一的 action normalizer 保存该手部 affine，不在 prior 中再持有副本。normalized hand 输入按官方入口限制到 `[-1,1]`；不能把本地示范 min/max 归一化的 hand 直接送入官方 encoder。
 
-本地仿真的 thumb rota1/2 上限为 1.57 rad，官方为 1.745 rad。编码和解码保持官方 affine，输出动作沿用公共执行端的关节限制，不能替换 affine 来适配本地上限，也不另建只供 DexLatent 使用的控制器。
+`dexmani_sim` 的组合机器人和独立手 URDF 已将 `right_hand_thumb_rota_joint1` 和 `right_hand_thumb_rota_joint2` 上限统一为 1.745 rad。当前 `dexmani_sim`、`dexmani_real` 与 DexLatent 官方 XHand URDF 的 12 个主动关节位置上下限一致；此处不代表完整 URDF、坐标系、effort 或实际运行限制全部一致，`dexmani_real` 的运行配置仍可能进一步收紧下限。
+
+编码和解码继续使用现有官方固定 hand affine；物理关节目标沿用公共执行端处理，无需增加 DexLatent 专用限位转换、比例缩放或裁剪逻辑。
 
 Fresh 时先加载先验并安装最终 action affine，再以 `dataset.iter_normalization_data("action")` 分块生成 hand latent，调用现有 `LinearNormalizer.fit_field("hand_latent", ..., mode="limits")`。编码与训练使用同一条 mean/归一化路径。
 
@@ -163,7 +167,7 @@ result = format_action_output(prediction)
 
 训练标签来自 `batch["action"]` 的目标命令，不能用实测 `obs.joint_state` 替代。观测编码保持现有 19D state 输入，不编码为 latent，也不增加额外条件输入。
 
-观测和 DiTX 前向沿用当前 BF16 配方。Flow 推理复用既有 `dtype=torch.float32` 参数；显式传递现有 generator。E 每个训练 batch 调用一次，D 每个完整预测调用一次；Euler 中不 decode、re-encode、投影或裁剪 latent。
+训练时观测和 DiTX 前向沿用当前 BF16 配方，续训保留训练参数存储及 optimizer/EMA 状态。正式部署、仿真评测及 warmup 在 `restore_policy()` 严格加载后整体转为 FP32，预测入口关闭 autocast。Flow 推理复用既有 `dtype=torch.float32` 参数；显式传递现有 generator。E 每个训练 batch 调用一次，D 每个完整预测调用一次；Euler 中不 decode、re-encode、投影或裁剪 latent。
 
 沿用现有请求内观测编码和条件 K/V 复用，不新增跨请求缓存。完整 16 步先解码再调用 `format_action_output()`，返回 `[1:]` 的 15 步，执行其中前 8 步。保持 sync/async 能力，不扩展 RTC。
 

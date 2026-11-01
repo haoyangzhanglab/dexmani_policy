@@ -106,7 +106,7 @@ class PolicyRuntime:
         tensors = self.prepare_observations(observation)
         kwargs = self._prepare_rtc(rtc_prefix, delay_steps, rtc_guidance_cap)
 
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast(device_type=self.generator.device.type, enabled=False):
             result = self.agent.predict_action(
                 tensors, inference_steps=self.info.inference_steps, generator=self.generator, **kwargs
             )

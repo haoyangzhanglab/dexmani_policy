@@ -37,19 +37,30 @@ class EMA:
 
     def __init__(
         self,
-        model,
-        update_after_step=0,
-        inv_gamma=1.0,
-        power=2 / 3,
-        min_value=0.0,
-        max_value=0.9999,
-    ):
-        for parameter in model.parameters():
-            if parameter.requires_grad and parameter.dtype in (torch.float16, torch.bfloat16):
-                parameter.data = parameter.data.float()
-        self.averaged_model = model
-        self.averaged_model.eval()
-        self.averaged_model.requires_grad_(False)
+        model: torch.nn.Module,
+        ema_model: torch.nn.Module,
+        update_after_step: int = 0,
+        inv_gamma: float = 1.0,
+        power: float = 2 / 3,
+        min_value: float = 0.0,
+        max_value: float = 0.9999,
+    ) -> None:
+        ema_model.eval()
+        ema_model.requires_grad_(False)
+        self.parameter_groups: dict[
+            tuple[torch.device, torch.dtype, bool], tuple[list[torch.Tensor], list[torch.Tensor]]
+        ] = {}
+        for param, ema_param in zip(model.parameters(), ema_model.parameters()):
+            if not param.requires_grad:
+                continue
+            if ema_param.dtype in (torch.float16, torch.bfloat16):
+                ema_param.data = ema_param.data.float()
+            needs_cast = param.device != ema_param.device or param.dtype != ema_param.dtype
+            targets, sources = self.parameter_groups.setdefault(
+                (ema_param.device, ema_param.dtype, needs_cast), ([], [])
+            )
+            targets.append(ema_param)
+            sources.append(param)
         self.update_after_step = update_after_step
         self.inv_gamma = inv_gamma
         self.power = power
@@ -57,7 +68,7 @@ class EMA:
         self.max_value = max_value
         self.optimization_step = 0
 
-    def get_decay(self, optimization_step):
+    def get_decay(self, optimization_step: int) -> float:
         step = max(0, optimization_step - self.update_after_step - 1)
         if step == 0:
             return 0.0
@@ -65,18 +76,13 @@ class EMA:
         return max(self.min_value, min(value, self.max_value))
 
     @torch.no_grad()
-    def step(self, new_model):
+    def step(self) -> None:
         decay = self.get_decay(self.optimization_step)
-        # Frozen parameters are copied at initialization and remain unchanged.
-        groups: dict[tuple[torch.device, torch.dtype], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
-        for param, ema_param in zip(new_model.parameters(), self.averaged_model.parameters()):
-            if not param.requires_grad:
-                continue
-            targets, sources = groups.setdefault((ema_param.device, ema_param.dtype), ([], []))
-            targets.append(ema_param)
-            sources.append(param.detach().to(device=ema_param.device, dtype=ema_param.dtype))
         update = get_ema_multi_avg_fn(decay)
-        for targets, sources in groups.values():
+        for (device, dtype, needs_cast), (targets, sources) in self.parameter_groups.items():
+            if needs_cast:
+                # Read current values; caching casts would keep stale parameter copies.
+                sources = [param.to(device=device, dtype=dtype) for param in sources]
             update(targets, sources, self.optimization_step)
 
         self.optimization_step += 1

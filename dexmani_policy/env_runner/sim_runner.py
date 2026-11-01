@@ -71,9 +71,10 @@ class SimRunner:
     def predict_action_chunk(
         self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int, generator=None
     ) -> np.ndarray:
-        result = agent.predict_action(
-            obs_dict=obs_batch, inference_steps=inference_steps, generator=generator
-        )
+        with torch.autocast(device_type=next(agent.parameters()).device.type, enabled=False):
+            result = agent.predict_action(
+                obs_dict=obs_batch, inference_steps=inference_steps, generator=generator
+            )
         actions = result["future_actions"][0, :action_steps]
         return np.ascontiguousarray(actions.cpu().numpy())
 

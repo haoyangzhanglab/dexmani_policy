@@ -121,7 +121,7 @@ class RectifiedFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        dtype = cond.dtype if dtype is None else dtype
+        dtype = torch.float32 if dtype is None else dtype
         batch_size = action_shape[0]
         x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         dt = 1.0 / num_steps

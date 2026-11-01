@@ -13,25 +13,38 @@ data/
 
 ## 预训练模型
 
+`bash scripts/utils/download_pretrained.sh [方法]` 在既有 `policy` 环境中准备权重，重复运行复用已有文件：
+
+| 参数 | 准备内容 |
+| --- | --- |
+| 无参数或 `all` | Uni3D、DINOv2-small、DexLatent |
+| `dexlatent` | DINOv2-small、DexLatent |
+| `sat`、`dqrise`、`dp` | DINOv2-small |
+| `r3d` | Uni3D |
+
+DQ-RISE 的码本仍由项目原有预训练流程生成，下载 DINO 不会准备码本。自定义 RGB 型号沿用配置中的初始化来源。
+
 ### Uni3D（R3D 策略的 3D 点云编码器）
 
 - **来源**: [eddie-cui/r3d-weights](https://huggingface.co/eddie-cui/r3d-weights) @ HuggingFace Hub
 - **用途**: R3D Agent 的 fresh 点云编码器初始化；设 `initialization.uni3d=null` 从头训练
-- **下载**: 运行 `bash scripts/utils/download_pretrained.sh`
+- **下载**: 运行 `bash scripts/utils/download_pretrained.sh r3d`
 - **配置路径**: `initialization.uni3d: data/pretrained/uni3d`
 
 ### DINOv2-small（SAT / DQ-RISE / DexLatent 和默认 RGB 策略）
 
-`bash scripts/utils/download_pretrained.sh` 同时将 `facebook/dinov2-small` 的 `config.json` 和 `model.safetensors` 下载到 HuggingFace Hub 缓存，默认位于 `~/.cache/huggingface/`，也遵循 `HF_HOME` 等既有环境设置。已有 Uni3D 权重时仍会准备 DINO 缓存；重复运行复用已有文件。
+`bash scripts/utils/download_pretrained.sh sat` 将 `facebook/dinov2-small` 的 `config.json` 和 `model.safetensors` 下载到 HuggingFace Hub 缓存，默认位于 `~/.cache/huggingface/`，也遵循 `HF_HOME` 等既有环境设置，不额外复制到项目目录。`dqrise`、`dp` 使用同一默认来源；`dexlatent` 和 `all` 也会准备该缓存。
 
 文本 CLIP 组件继续保留，其来源由独立文本编码器配置。RGB 的 SigLIP 或其他 DINO 型号通过 fresh 的 `initialization.rgb` 准备；首次离线训练前需先准备对应型号。模型构造只使用已解析的 architecture；完整策略 checkpoint 内嵌架构与参数，恢复无需这些初始文件或网络。
 
 ### DexLatent（冻结 XHand 手部先验）
 
 - **固定来源**：[DexLatent checkpoint_epoch_1000.pt](https://raw.githubusercontent.com/EmptyBlueBox/DexLatent/502750df34b9fa6a1b56a66481586887ec722f9c/Checkpoints/20260311_225425/checkpoint_epoch_1000.pt)，保留官方四手原始文件。
-- **下载**：同一 `bash scripts/utils/download_pretrained.sh` 入口；已有文件直接复用，下载先写临时目录，成功后原子替换。
+- **下载**：`bash scripts/utils/download_pretrained.sh dexlatent`；已有文件直接复用，缺失时在目标目录所在文件系统的临时目录下载，成功后原子替换。
 - **路径**：`initialization.dexlatent: data/pretrained/dexlatent/checkpoint_epoch_1000.pt`，文件不纳入 Git。
 - **用途**：仅 fresh 初始化读取 XHand 参数及安装官方 URDF 手部尺度；完整策略 raw/EMA checkpoint 内嵌 E/D、action affine、训练集 latent affine 和架构，续训/推理不读取原始权重。
+
+训练及续训沿用 BF16 配方和训练参数存储策略；正式推理严格加载完整 checkpoint 后统一转为 FP32，不重新下载或替换 RGB 权重，也不修改磁盘上的 checkpoint。
 
 远程复用 `bash scripts/remote/sync_data.sh --host <host> --local data/pretrained/dexlatent --remote /data/project/data/pretrained/dexlatent`，训练启动沿用 `--data-root /data/project`。DINO HF 缓存需在目标环境提前准备；源码同步不携带 `data/` 权重。
 

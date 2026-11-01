@@ -56,6 +56,8 @@ python -m dexmani_policy.eval_pipeline \
 
 续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
+训练沿用 `training.use_bfloat16` 配方及原有参数存储、训练状态恢复方式。正式部署、仿真评测及 warmup 在严格加载完整策略后统一转为 FP32，预测入口显式关闭 autocast；该转换可能增加显存和耗时，不保证与旧 BF16 推理逐位相同。
+
 动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ/DexLatent 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ/DexLatent 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 
 FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测关闭随机起点、选点噪声和输出 shuffle。
@@ -73,7 +75,7 @@ DexLatent 使用同一观测及普通时间 token DiTX，内部预测 7D arm + 3
 新 SAT 主干与旧专用 SAT checkpoint 不兼容，需要重新训练；不提供权重迁移，也不宣称完整复现原论文网络或实验结果。
 
 ```bash
-bash scripts/utils/download_pretrained.sh  # 准备 Uni3D、DexLatent 及 DINOv2-small，重复运行复用文件。
+bash scripts/utils/download_pretrained.sh dexlatent  # 仅准备 DINOv2-small 和官方 DexLatent 权重。
 python -m dexmani_policy.test_tools.agent_checks --device cpu
 bash scripts/training/train.sh sat 'task_name=<task>'
 bash scripts/training/train.sh dqrise 'task_name=<task>' 'initialization.codebook=<codebook.npz>'
@@ -84,7 +86,7 @@ bash scripts/training/train.sh sat 'task_name=<task>' \
 bash scripts/training/train.sh sat 'task_name=<task>' agent.rgb_backbone_config.tune_mode=lora
 ```
 
-小型检查使用随机视觉模型，不代表闭环性能。数据流、B0–B4 配置覆盖与恢复约定见 [观测编码](docs/项目架构.md#观测编码)；初始权重及 HF 缓存位置见 [数据目录说明](data/README.md)。
+下载参数 `sat`、`dqrise`、`dp` 仅准备默认 DINOv2-small，`r3d` 仅准备 Uni3D；无参数或 `all` 准备全部三类权重。DQ-RISE 码本仍需通过原有预训练流程获得。小型检查使用随机视觉模型，不代表闭环性能。数据流、B0–B4 配置覆盖与恢复约定见 [观测编码](docs/项目架构.md#观测编码)；初始权重及 HF 缓存位置见 [数据目录说明](data/README.md)。
 
 ## InterAct-Dex 逐指触觉监督
 

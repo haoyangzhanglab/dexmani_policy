@@ -469,6 +469,7 @@ def check_codebook_pipeline(device):
             torch.testing.assert_close(before_rng["torch"], after_rng["torch"], rtol=0, atol=0)
             if device.type == "cuda":
                 torch.testing.assert_close(before_rng["torch_cuda"], after_rng["torch_cuda"], rtol=0, atol=0)
+            expected.float()
             for key, value in expected.state_dict().items():
                 torch.testing.assert_close(restored.state_dict()[key], value, rtol=0, atol=0)
             expected_prediction = expected.predict_action(
