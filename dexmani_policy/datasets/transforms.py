@@ -123,8 +123,9 @@ class PointColorJitter(Augmentation):
     def hsv_to_rgb(hsv):
         h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
         h6 = h * 6.0
-        i = np.floor(h6).astype(np.int32) % 6
-        f = h6 - np.floor(h6)
+        h_floor = np.floor(h6)
+        i = h_floor.astype(np.int32) % 6
+        f = h6 - h_floor
 
         p = v * (1.0 - s)
         q = v * (1.0 - s * f)
@@ -168,9 +169,7 @@ class PointDropout(Augmentation):
         for t in range(T):
             ratio = np.random.uniform(0.0, self.max_dropout_ratio)
             drop_mask = np.random.random(N) <= ratio
-            if np.any(drop_mask):
-                anchor = x[t, 0].copy()
-                x[t, drop_mask] = anchor
+            x[t, drop_mask] = x[t, 0]
 
 
 class PointCoordinateNoise(Augmentation):

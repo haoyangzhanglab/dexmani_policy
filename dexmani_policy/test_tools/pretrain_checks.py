@@ -168,7 +168,7 @@ def check_contact_formula():
         difference = hand - point
         distance = np.linalg.norm(difference, axis=-1)
         alignment = np.abs(difference @ normal) / (distance + 1e-8)
-        minimum = np.min(distance * np.exp(1 - alignment))
+        minimum: np.float64 = np.min(distance * np.exp(1 - alignment))
         expected.append(1 - 2 * (1 / (1 + np.exp(-10 * minimum)) - 0.5))
     for block in (1, 7, 128):
         for sign in (1, -1):
@@ -295,12 +295,17 @@ def check_train_only(root, method, device=torch.device("cpu")):
         assert "Normalization must declare" in str(error)
     else:
         raise AssertionError("Fresh pretraining accepted missing normalization modes")
+    dataset_class = hydra.utils.get_class(cfg.dataset._target_)
     with (
-        patch.object(ObservationPretrainDataset, "get_validation_dataset", side_effect=AssertionError("Built val view")),
+        patch.object(dataset_class, "build_sampler", autospec=True,
+                     side_effect=dataset_class.build_sampler) as sampler,
+        patch.object(common, "DataLoader", side_effect=AssertionError("Built val loader")),
         patch.object(ObservationPretrainDataset, "iter_normalization_data", side_effect=AssertionError("Read identity stats")),
         patch.object(common, "evaluate", side_effect=AssertionError("Evaluated without val")),
     ):
         common.train(method, cfg, max_updates=1)
+    sampler.assert_called_once()
+    assert sampler.call_args.args[1].all(), "Built sampler for non-training episodes"
     package = torch.load(Path(cfg.workspace.output_dir) / "encoder.pt", weights_only=True)
     assert package["normalizer_state"] == {}
     assert all(mode == "identity" for mode in package["normalization"].values())

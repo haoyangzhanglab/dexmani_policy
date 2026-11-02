@@ -17,7 +17,7 @@ from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler, window_indices
 from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.datasets.variants.r3d import R3DDataset
-from dexmani_policy.datasets.variants.tactile import AdapTacDataset, InterActDexDataset
+from dexmani_policy.datasets.variants.tactile import AdapTacDataset, InterActDexDataset, read_future_force
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import fit_normalizer
 
@@ -181,10 +181,11 @@ def check_method_targets(root):
                   horizon=5, obs_horizon=2, pad_before=1, pad_after=3)
     for cls, extra in ((AdapTacDataset, {}), (InterActDexDataset, {"interaction_horizon": 3})):
         dataset = cls(str(path), **kwargs, **extra)
+        episode_ends = dataset.episode_store.episode_ends
         for index in range(len(dataset)):
             rows = dataset.sampler.sample_source_rows(index)
             query = rows[dataset.action_start_index]
-            end = dataset.episode_store.episode_ends[np.searchsorted([2, 7, 13], query, side="right")]
+            end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
             offsets = np.arange(1, 5) if cls is AdapTacDataset else np.array([3])
             target = query + offsets
             sample = dataset[index]
@@ -194,6 +195,20 @@ def check_method_targets(root):
                 assert query + 1 < end
         if cls is InterActDexDataset:
             assert any(not dataset[index]["future_force_valid"].any() for index in range(len(dataset)))
+    force_store = EpisodeStore(path, keys=["finger_tactile_force"])
+    for query, offsets in (
+        (2, range(1, 4)), (2, (1,)), (6, (3,)),
+        (5, range(1, 5)), (6, range(1, 5)),
+        (2, [1, 3]), (2, [1, 1, 3]), (2, [1, 2, 2, 4]),
+        (2, [1, 3, 2, 4]), (2, range(1, 5, 2)),
+    ):
+        target = query + np.asarray(offsets, dtype=np.int64)
+        end = force_store.episode_ends[np.searchsorted(force_store.episode_ends, query, side="right")]
+        force, valid = read_future_force(force_store, query, offsets)
+        expected = force_store.read("finger_tactile_force", np.minimum(target, end - 1))
+        np.testing.assert_array_equal(force, expected)
+        np.testing.assert_array_equal(valid, target < end)
+        assert force.dtype == np.float32 and valid.dtype == bool
     source["data/finger_tactile_force"][:] = 0
     zero_force = AdapTacDataset(str(path), **kwargs)[0]
     assert zero_force["future_force_valid"].any() and not zero_force["future_force"].any()
@@ -265,12 +280,14 @@ def check_rgb_preprocessing(root):
     path = root / "rgb.zarr"
     source = make_source(path, [3])
     source.create_dataset("data/rgb", data=rgb)
-    base = dict(sensor_modalities=["rgb"], obs_horizon=2, horizon=2)
-    raw = DemonstrationDataset(path, **base)[0]["obs"]["rgb"]
+    raw = DemonstrationDataset(path, sensor_modalities=["rgb"], obs_horizon=2, horizon=2)[0]["obs"]["rgb"]
     assert raw.dtype == torch.uint8 and raw.is_contiguous()
     np.testing.assert_array_equal(raw, rgb[:2].transpose(0, 3, 1, 2))
     for color in (None, lambda value: value):
-        dataset = DemonstrationDataset(path, **base, rgb_preprocess_size=(10, 12), rgb_color_aug=color)
+        dataset = DemonstrationDataset(
+            path, sensor_modalities=["rgb"], obs_horizon=2, horizon=2,
+            rgb_preprocess_size=(10, 12), rgb_color_aug=color,
+        )
         actual = dataset[0]["obs"]["rgb"]
         expected = preprocess_rgb_eval(rgb[:2], resize_hw=(10, 12), center_crop_hw=None,
                                        float_spatial_before_uint8=color is not None)

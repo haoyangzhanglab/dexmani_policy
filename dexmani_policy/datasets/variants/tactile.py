@@ -15,6 +15,10 @@ def read_future_force(store, query, offsets):
         "finger_tactile_force",
         slice(rows[0], rows[-1] + 1),
     )
+    if len(rows) == 1 or (
+        isinstance(offsets, range) and offsets.step == 1 and target_rows[-1] < end
+    ):
+        return force, target_rows < end
     return force[rows - rows[0]], target_rows < end
 
 

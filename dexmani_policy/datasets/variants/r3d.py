@@ -35,8 +35,9 @@ class R3DDataset(DemonstrationDataset):
         if key != "action":
             yield from super().iter_normalization_data(key)
             return
+        columns = self.consumed_fields["action_ee"]
         for start, values in self.episode_store.iter_chunks(self.action_key, episode_mask=self.train_mask):
             auxiliary = self.episode_store.read(
-                "action_ee", slice(start, start + len(values)), columns=self.consumed_fields["action_ee"],
+                "action_ee", slice(start, start + len(values)), columns=columns,
             )
             yield np.concatenate((values, auxiliary), axis=-1)

@@ -12,16 +12,15 @@ from .modules import TimestepMLP, add_temporal_embedding, batch_timesteps
 class MultiheadAttention(nn.Module):
     def __init__(self, embedding_dim: int, num_heads: int, downsample_rate: int = 1):
         super().__init__()
-        self.embedding_dim = embedding_dim
-        self.internal_dim = embedding_dim // downsample_rate
+        internal_dim = embedding_dim // downsample_rate
         self.num_heads = num_heads
-        if num_heads <= 0 or self.internal_dim % num_heads:
+        if num_heads <= 0 or internal_dim % num_heads:
             raise ValueError("internal_dim must be divisible by positive num_heads")
 
-        self.q_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.k_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
+        self.q_proj = nn.Linear(embedding_dim, internal_dim)
+        self.k_proj = nn.Linear(embedding_dim, internal_dim)
+        self.v_proj = nn.Linear(embedding_dim, internal_dim)
+        self.out_proj = nn.Linear(internal_dim, embedding_dim)
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -75,14 +74,13 @@ class OneWayAttentionBlock(nn.Module):
         )
         self.norm3 = nn.LayerNorm(embedding_dim)
 
-    def forward(self, queries, keys, query_pe, key_pe, self_attn_mask=None):
+    def forward(self, queries, keys, query_pe, positioned_keys, self_attn_mask=None):
         q = queries + query_pe
         queries = queries + self.self_attn(q=q, k=q, v=queries, attn_mask=self_attn_mask)
         queries = self.norm1(queries)
 
         q = queries + query_pe
-        k = keys + key_pe
-        queries = queries + self.cross_attn(q=q, k=k, v=keys)
+        queries = queries + self.cross_attn(q=q, k=positioned_keys, v=keys)
         queries = self.norm2(queries)
 
         queries = queries + self.mlp(queries)
@@ -110,10 +108,6 @@ class OneWayTransformer(nn.Module):
     ):
         super().__init__()
 
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.n_obs_steps = n_obs_steps
-        self.embedding_dim = embedding_dim
         self.pc_pe_dim = pc_pe_dim
         self.obs_feature_dim = obs_token_dim - pc_pe_dim
         self.use_aux_ee = use_aux_ee
@@ -184,10 +178,11 @@ class OneWayTransformer(nn.Module):
         ).unsqueeze(1)
 
         context_pe = add_temporal_embedding(pc_pe, self.temporal_pe_obs)
+        positioned_keys = keys + context_pe
 
         output = queries
         for layer in self.layers:
-            output = layer(output, keys, query_pe, context_pe, self_attn_mask)
+            output = layer(output, keys, query_pe, positioned_keys, self_attn_mask)
 
         if self.use_aux_ee:
             joint = self.joint_output_proj(output[:, :H])

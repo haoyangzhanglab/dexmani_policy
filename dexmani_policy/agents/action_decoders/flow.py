@@ -81,13 +81,15 @@ class RectifiedFlow(nn.Module):
             pred_v, features = self.model(x=xt, timestep=t, context=cond, return_features=True)
         else:
             pred_v = self.model(x=xt, timestep=t, context=cond)
+        pred_v_fp32 = pred_v.float()
+        target_v_fp32 = target_v.float()
         metrics = {}
         if dim_groups is None:
-            loss = F.mse_loss(pred_v.float(), target_v.float())
+            loss = F.mse_loss(pred_v_fp32, target_v_fp32)
         else:
             group_losses = []
             for name, (start, end, weight) in dim_groups.items():
-                group_loss = F.mse_loss(pred_v[..., start:end].float(), target_v[..., start:end].float())
+                group_loss = F.mse_loss(pred_v_fp32[..., start:end], target_v_fp32[..., start:end])
                 group_losses.append(weight * group_loss)
                 if log_metrics:
                     metrics[f"loss_{name}"] = group_loss.detach()
@@ -98,8 +100,8 @@ class RectifiedFlow(nn.Module):
                 metrics.update({
                     "loss": loss.detach(),
                     "loss_action": loss.detach(),
-                    "pred_v_magnitude": torch.sqrt(torch.mean(pred_v.float()**2)),
-                    "target_v_magnitude": torch.sqrt(torch.mean(target_v.float()**2)),
+                    "pred_v_magnitude": torch.sqrt(torch.mean(pred_v_fp32**2)),
+                    "target_v_magnitude": torch.sqrt(torch.mean(target_v_fp32**2)),
                     "t_mean": t.mean(),
                 })
         if return_features:

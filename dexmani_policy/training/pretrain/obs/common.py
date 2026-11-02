@@ -153,9 +153,8 @@ def train(method, cfg, checkpoint=None, max_updates=None):
     if checkpoint is None and set(cfg.normalization) != dataset.normalization_fields.keys():
         raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
     print(f"[Dataset] {dataset.training_summary()}")
-    validation = None
-    if dataset.val_mask.any():
-        validation = dataset.get_validation_dataset()
+    validation = dataset.get_validation_dataset()
+    if validation is not None:
         positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
         print(f"[Dataset] val windows={len(validation):,}")
     loader = build_train_loader(cfg, dataset)
