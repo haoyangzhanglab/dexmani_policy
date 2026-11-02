@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pull one stopped/completed run, publishing its best pointer after its targets.
+# Pull one stopped/completed run, updating its best pointer last.
 set -euo pipefail
 
 HOST=""
@@ -23,76 +23,24 @@ LOCAL_PATH="${LOCAL_RUN%/}/"
 if [[ ${#DRY_RUN[@]} -eq 0 ]]; then
     mkdir -p "$(dirname "$LOCAL_PATH")"
 fi
-WANDB_EXCLUDE=()
+RSYNC_OPTS=(-avs "${DRY_RUN[@]}")
 if ! $WITH_WANDB; then
-    WANDB_EXCLUDE=(--exclude='wandb/')
+    RSYNC_OPTS+=(--exclude='wandb/')
 fi
 printf 'Remote: %s\nLocal: %s\n' "$REMOTE_PATH" "$LOCAL_PATH"
 
-# Refuse any config byte difference before transferring experiment artifacts.
-config_changes=$(rsync -rclsni --existing --out-format='%i %n' \
-    "${WANDB_EXCLUDE[@]}" --include='*/' \
-    --include='config.yaml' --exclude='*' \
-    "$REMOTE_PATH" "$LOCAL_PATH")
-conflicts=$(printf '%s\n' "$config_changes" | sed -n '/^[<>ch][fL]/p')
-if [[ -n "$conflicts" ]]; then
-    printf 'Training config conflict; no artifacts updated:\n%s\n' "$conflicts" >&2
-    exit 1
-fi
+# Keep rsync's default temporary-file transfer for each updated file.
+echo "--- Pass 1/2: run files ---"
 
-# --partial would leave incomplete files that --ignore-existing skips on retry.
-echo "--- Pass 1/3: new files (--ignore-existing) ---"
+rsync "${RSYNC_OPTS[@]}" --progress \
+    --exclude='.dexmani-publish-*' --exclude='best_ckpt.json' \
+    "$REMOTE_PATH" "$LOCAL_PATH"
 
-PASS1_OPTS=(
-    -avs
-    --ignore-existing
-    --progress
-    "${WANDB_EXCLUDE[@]}"
-    --include='*/'
-    --exclude='.dexmani-publish-*'
-    --exclude='metrics.jsonl'
-    --exclude='checkpoints/latest.pt'
-    --exclude='resume.pt'
-    --exclude='encoder.pt'
-    --exclude='vqvae_hand_best.pt'
-    --exclude='codebook.npz'
-    --exclude='best_ckpt.json'
-    "${DRY_RUN[@]}"
-)
-
-rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
-
-# rsync's temporary transfer preserves the previous complete file on failure.
-echo ""
-echo "--- Pass 2/3: training state ---"
-
-PASS2_OPTS=(
-    -avs
-    "${WANDB_EXCLUDE[@]}"
-    --include='metrics.jsonl'
-    --include='checkpoints/latest.pt'
-    --include='resume.pt'
-    --include='encoder.pt'
-    --include='vqvae_hand_best.pt'
-    --include='codebook.npz'
-    --include='*/'
-    --exclude='*'
-    "${DRY_RUN[@]}"
-)
-
-rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
-
-# Publish the best pointer after checkpoint and completed-result transfers succeed.
-echo "--- Pass 3/3: best pointer (--ignore-times) ---"
-PASS3_OPTS=(
-    -avs --ignore-times
-    "${WANDB_EXCLUDE[@]}"
-    --include='*/'
-    --include='best_ckpt.json'
-    --exclude='*'
-    "${DRY_RUN[@]}"
-)
-rsync "${PASS3_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
+# Update best only after the other run files have synced successfully.
+echo "--- Pass 2/2: best pointer (--ignore-times) ---"
+rsync "${RSYNC_OPTS[@]}" --ignore-times \
+    --include='*/' --include='best_ckpt.json' --exclude='*' \
+    "$REMOTE_PATH" "$LOCAL_PATH"
 
 if [[ ${#DRY_RUN[@]} -eq 0 ]]; then
     echo ""

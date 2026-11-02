@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
+from dexmani_policy.common.checkpoint import _restore_policy, load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.io_util import write_json
@@ -33,10 +33,14 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                     seeds=None, episodes=100, seed=1024, device="cuda:0", video=True, output_dir=None):
     """Run one checkpoint with explicit or deterministically sampled evaluation seeds."""
     checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
-    cfg = load_checkpoint(checkpoint).effective_config
+    loaded = load_checkpoint(checkpoint)
+    cfg = loaded.effective_config
     weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
     if weights not in {"raw", "ema"}:
         raise ValueError("weights must be raw or ema")
+    state_dict = loaded.ema_model_state if weights == "ema" else loaded.model_state
+    global_step = loaded.global_step
+    del loaded
     inference_steps = positive_int(cfg["eval"]["inference_steps"] if inference_steps is None
                                    else inference_steps, "inference_steps")
     action_steps = positive_int(cfg["agent"]["n_action_steps"] if action_steps is None
@@ -67,7 +71,8 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
         raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
     set_seed(seed)
     record["runtime"] = {"torch": str(torch.__version__), "cuda": torch.version.cuda}
-    agent = restore_policy(checkpoint, use_ema=weights == "ema", device=device)
+    agent = _restore_policy(cfg, state_dict, global_step, device)
+    del state_dict
     record["global_step"] = agent.checkpoint_step
     record["runtime"]["parameter_dtypes"] = sorted({str(p.dtype) for p in agent.parameters()})
     from dexmani_policy.env_runner.sim_runner import SimRunner

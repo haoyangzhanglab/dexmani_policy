@@ -76,11 +76,15 @@ bash scripts/remote/sync_down.sh --host "$HOST" \
   --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01
 ```
 
-默认同步停止或已完成的单个 run，单向 rsync，不删除本地结果。已有 `config.yaml` 不同则在传输前失败，避免把两个实验混入同一目录。先传新权重和只在完成后生成的评测结果，再更新训练状态及观测预训练的 `resume.pt/encoder.pt`，最后更新 `best_ckpt.json`；任一阶段失败即停止后续发布。评测结果按不可变文件同步，不再单独强制重传。临时 `.dexmani-publish-*` 文件不传输。同名大权重不做完整内容身份验证，整个目录不是事务快照；运行中查看日志用 tail。
+只同步已停止或完成的指定 run，远端是本次下载的来源，用户通过 `--local-run` 指定本地目标。共执行两次 rsync：第一次同步除 `best_ckpt.json` 和临时 `.dexmani-publish-*` 文件外的正常文件，按 rsync 默认的大小与修改时间判断增量更新；`config.yaml` 与其他普通文件一样同步，已有文件可以更新。symlink 原样保留，不解引用复制外部目标，也不删除本地独有文件。
 
-同步仍按产物依赖分阶段进行，最后更新 best 指针；评测在独立测试及完整结果保存后发布 best，不再使用发布锁。外部候选布局可显式指定 `--run-dir`。下载后直接评测或显式选模：
+第一次成功后，第二次只用 `--ignore-times` 强制更新 `best_ckpt.json`。任一阶段失败立即退出，第一次失败不进入第二次；两次都保留 rsync 默认的临时文件传输方式。`--dry-run` 仅预览，不修改本地目标。这两次同步不构成整个目录的事务快照；运行中查看日志用 tail。
 
 `sync_down.sh` 只同步指定 run，外部 checkpoint 和结果目录不会自动下载；需自行同步并维护相对路径，文件搬迁后更新相应指针。
+
+本地同步回归无需 SSH 服务器，运行 `python -m dexmani_policy.test_tools.remote_checks`（需要本地 rsync）。
+
+评测在独立测试及完整结果保存后发布 best。外部候选布局可显式指定 `--run-dir`。下载后直接评测或显式选模：
 
 ```bash
 python -m dexmani_policy.evaluate --checkpoint <run>/checkpoints/latest.pt \

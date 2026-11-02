@@ -102,14 +102,17 @@ def check_evaluation(_device):
     with tempfile.TemporaryDirectory(prefix="dexmani-evaluation-check-") as temporary:
         root = Path(temporary)
         checkpoints = [save_checkpoint(root / folder / "model.pt", Checkpoint(
-            step, {}, None, {}, {}, {}, config)) for step, folder in ((1, "external-a"), (2, "external-b"))]
+            step, {}, {}, {}, {}, {}, config)) for step, folder in ((1, "external-a"), (2, "external-b"))]
         run = root / "publication"
         (run / "checkpoints").mkdir(parents=True)
         link = run / "checkpoints/link.pt"
         link.symlink_to(checkpoints[1])
         for explicit in (checkpoints[1], link, "link.pt"):
             assert inspect_policy(run, checkpoint=explicit).checkpoint_path == checkpoints[1]
-        old_best = b'{"old": true}\n'
+        old_best = (json.dumps(dict(
+            ckpt_relpath="../external-a/model.pt",
+            inference=dict(use_ema=True, inference_steps=2, action_steps=2),
+        )) + "\n").encode()
         best = run / "best_ckpt.json"
         for mode in ("success", "test_failure", "save_failure", "candidate_failure"):
             best.write_bytes(old_best)
@@ -151,6 +154,7 @@ def check_evaluation(_device):
                     assert "injected" in str(error)
                     assert mode != "success"
                     assert best.read_bytes() == old_best
+                    assert inspect_policy(run).checkpoint_path == checkpoints[0]
                     assert not (directory / "selection_result.json").exists()
                     continue
             assert mode == "success"
@@ -158,7 +162,6 @@ def check_evaluation(_device):
             assert calls[0]["seeds"] == calls[1]["seeds"]
             assert set(calls[0]["seeds"]).isdisjoint(calls[2]["seeds"])
             record = json.loads(path.read_text())
-            assert "status" not in record
             assert (path.parent / record["ckpt_relpath"]).resolve() == checkpoints[1]
             assert (path.parent / record["test_result"]).is_file()
             for candidate, checkpoint in zip(record["candidates"], checkpoints):
@@ -166,7 +169,6 @@ def check_evaluation(_device):
                 assert (path.parent / candidate["result"]).is_file()
             assert set(json.loads(best.read_text())) == {"ckpt_relpath", "inference"}
             assert inspect_policy(run).checkpoint_path == checkpoints[1]
-        assert not (run / ".pipeline.lock").exists()
 
         agent = SimpleNamespace(checkpoint_step=2, parameters=torch.nn.Linear(1, 1).parameters)
         for fail in (False, True):
@@ -182,7 +184,7 @@ def check_evaluation(_device):
                 finally:
                     closed.append(True)
 
-            with patch.object(rollout, "restore_policy", return_value=agent), \
+            with patch.object(rollout, "_restore_policy", return_value=agent), \
                  patch.object(SimRunner, "run", side_effect=episodes):
                 try:
                     record, path = rollout.evaluate_policy(checkpoints[0], seeds=[1], device="cpu",
@@ -191,7 +193,7 @@ def check_evaluation(_device):
                     assert "injected" in str(error)
                     assert fail and not (directory / "result_details.json").exists()
                 else:
-                    assert not fail and "status" not in record and path.is_file()
+                    assert not fail and path.is_file()
             assert closed == [True]
 
 

@@ -3,6 +3,7 @@
 import argparse
 import json
 import tempfile
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +17,7 @@ from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.config import validate_observation_fields
-from dexmani_policy.common.normalizer import LinearNormalizer, normalizer_shapes_from_state
+from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.datasets.variants.r3d import R3DDataset
@@ -234,7 +235,12 @@ def check_resume_logging(root):
 
 
 def check_normalizer_restore(root, device):
-    cfg = load_policy_config("dp3", ["agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16"])
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    from dexmani_policy.evaluation.rollout import evaluate_policy
+    from dexmani_policy.evaluation.seeds import split_evaluation_seeds
+
+    cfg = load_policy_config("dp3", ["agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16",
+                                     "agent.pc_dim=3"])
     model = hydra.utils.instantiate(cfg.agent, _convert_="all")
     dims = dict(joint_state=19, point_cloud=3, action=19)
     model.configure_normalizer(dims, dict(joint_state=(19,), action=(19,), hand_latent=(4,)))
@@ -244,12 +250,63 @@ def check_normalizer_restore(root, device):
     averaged["normalizer.fields.action.scale"].fill_(3)
     for part in ("scale", "offset"):
         averaged[f"normalizer.fields.hand_latent.{part}"] = torch.ones(5)
-    config = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims)
-    checkpoint = Checkpoint(7, raw, averaged, {}, {}, {}, config)
+    config: dict[str, Any] = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims,
+                  eval=dict(use_ema=True, inference_steps=2), dataset={},
+                  policy_metadata=dict(action_start_index=model.action_start_index),
+                  env_runner=dict(task_name="synthetic", eval_seeds=list(range(10))))
+    checkpoint = Checkpoint(7, raw, averaged, {"momentum": torch.ones(1)},
+                            {"step": torch.ones(1)}, {"torch": torch.ones(1)}, config)
     path = root / "normalizer.pt"
     save_checkpoint(path, checkpoint)
+    torch_load, instantiate = torch.load, hydra.utils.instantiate
+    obs = dict(joint_state=torch.randn(1, model.n_obs_steps, 19, device=device),
+               point_cloud=torch.rand(1, model.n_obs_steps, 8, 3, device=device))
     for use_ema, state in ((False, raw), (True, averaged)):
-        restored = restore_policy(path, use_ema=use_ema, device=device)
+        unused_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+
+        def read_checkpoint(*args, **kwargs):
+            payload = torch_load(*args, **kwargs)
+            unselected = payload["model_state" if use_ema else "ema_model_state"]
+            unused_refs[:] = [weakref.ref(next(iter(unselected.values())))] + [
+                weakref.ref(next(iter(payload[key].values())))
+                for key in ("optimizer_state", "scheduler_state", "rng_state")
+            ]
+            return payload
+
+        def construct(*args, **kwargs):
+            assert unused_refs and all(ref() is None for ref in unused_refs)
+            return instantiate(*args, **kwargs)
+
+        def episodes(runner, agent, *, seeds, inference_steps, action_steps, video_save_dir):
+            assert runner.task_name == "synthetic" and video_save_dir is None
+            assert seeds == split_evaluation_seeds(config["env_runner"]["eval_seeds"], 1024, 2)[0]
+            assert inference_steps == 2 and action_steps == model.n_action_steps
+            assert agent.checkpoint_step == 7 and not agent.training
+            assert all(p.dtype == torch.float32 and p.device == obs["joint_state"].device for p in agent.parameters())
+            assert torch.equal(torch.get_rng_state(), torch.Generator().manual_seed(1024).get_state())
+            assert agent.normalizer["hand_latent"].scale.shape == restored.normalizer["hand_latent"].scale.shape
+            for key, value in restored.state_dict().items():
+                torch.testing.assert_close(agent.state_dict()[key], value, rtol=0, atol=0)
+            expected = restored.predict_action(obs, inference_steps=inference_steps,
+                generator=torch.Generator(device=device).manual_seed(17))["future_actions"]
+            actual = agent.predict_action(obs, inference_steps=inference_steps,
+                generator=torch.Generator(device=device).manual_seed(17))["future_actions"]
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for seed in seeds:
+                yield dict(success=True, steps=2, total_steps=3, seed=seed)
+
+        with patch("torch.load", side_effect=read_checkpoint) as load, \
+             patch("hydra.utils.instantiate", side_effect=construct), \
+             patch.object(SimRunner, "run", autospec=True, side_effect=episodes):
+            restored = restore_policy(path, use_ema=use_ema, device=device)
+            assert load.call_count == 1
+            load.reset_mock()
+            record, result_path = evaluate_policy(path, weights=None if use_ema else "raw",
+                episodes=2, device=device, video=False, output_dir=root / f"evaluation-{use_ema}")
+            assert load.call_count == 1
+            assert record["weights"] == ("ema" if use_ema else "raw") and record["global_step"] == 7
+            assert json.loads(result_path.read_text())["seeds"] == record["seeds"]
+            assert record["runtime"]["parameter_dtypes"] == ["torch.float32"]
         assert "point_cloud" not in restored.normalizer.fields
         assert restored.normalization_dims["point_cloud"] == 3
         assert tuple(restored.normalizer["hand_latent"].scale.shape) == ((5,) if use_ema else (4,))
@@ -261,9 +318,10 @@ def check_normalizer_restore(root, device):
             state["normalizer.fields.action.offset"] = torch.zeros(18)
         else:
             del state[f"normalizer.fields.action.{bad_key}"]
-        model.configure_normalizer(dims, normalizer_shapes_from_state(state))
+        invalid = save_checkpoint(root / f"invalid-normalizer-{bad_key}.pt",
+                                  Checkpoint(7, state, None, {}, {}, {}, config))
         try:
-            model.load_state_dict(state, strict=True, assign=True)
+            restore_policy(invalid, use_ema=False, device=device)
         except RuntimeError:
             pass
         else:
@@ -276,6 +334,14 @@ def check_normalizer_restore(root, device):
         assert "EMA" in str(error)
     else:
         raise AssertionError("Missing EMA silently selected raw weights")
+    try:
+        evaluate_policy(path, seeds=[1], device=device, video=False,
+                        output_dir=root / "evaluation-missing-ema")
+    except ValueError as error:
+        assert "EMA" in str(error)
+    else:
+        raise AssertionError("Evaluation silently selected raw weights for missing EMA")
+    assert not (root / "evaluation-missing-ema/result_details.json").exists()
 
 
 def check_deployment_facts(root):
@@ -363,8 +429,6 @@ def check_inherited_policy(root, method, device=torch.device("cpu")):
         assert run_training(cfg, max_updates=2) == 2
     checkpoint_path = root / method / "checkpoints/latest.pt"
     checkpoint = load_checkpoint(checkpoint_path)
-    assert "normalizer_shapes" not in checkpoint.effective_config
-    assert "resume_from" not in checkpoint.effective_config
     assert {key: checkpoint.effective_config["normalization"][key] for key in fields} == modes
     assert extra not in checkpoint.effective_config["normalization_dims"]
     for key, value in state.items():

@@ -1,8 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dexmani_policy.common.io_util import atomic_path
+
+if TYPE_CHECKING:
+    import torch
+
+    from dexmani_policy.agents.policies.base import Policy
 
 
 @dataclass
@@ -39,33 +44,39 @@ def policy_state_dict(model) -> dict:
     return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
 
 
-def restore_policy(checkpoint_path, *, use_ema, device):
+def restore_policy(checkpoint_path: str | Path, *, use_ema: bool, device: "str | torch.device") -> "Policy":
+    checkpoint = load_checkpoint(checkpoint_path)
+    cfg = checkpoint.effective_config
+    state_dict = checkpoint.ema_model_state if use_ema else checkpoint.model_state
+    global_step = checkpoint.global_step
+    # Drop training state and unselected weights before constructing the model.
+    del checkpoint
+    return _restore_policy(cfg, state_dict, global_step, device)
+
+
+def _restore_policy(
+    effective_config: dict[str, Any], state_dict: dict[str, Any] | None,
+    global_step: int, device: "str | torch.device",
+) -> "Policy":
     import hydra
     import torch
 
-    from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
     from dexmani_policy.common.normalizer import normalizer_shapes_from_state
+    from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
     torch.set_float32_matmul_precision("highest")
-    checkpoint = load_checkpoint(checkpoint_path)
-    cfg = checkpoint.effective_config
-    state = checkpoint.ema_model_state if use_ema else checkpoint.model_state
-    if state is None:
+    if state_dict is None:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
-    global_step = checkpoint.global_step
-    # Release unselected weights and optimizer state before model construction.
-    del checkpoint
 
     rng_state = get_rng_state()
     try:
-        agent = hydra.utils.instantiate(cfg["agent"], _convert_="all")
+        agent = hydra.utils.instantiate(effective_config["agent"], _convert_="all")
     finally:
         set_rng_state(rng_state)
 
     agent.checkpoint_step = global_step
-    agent.configure_normalizer(cfg["normalization_dims"], normalizer_shapes_from_state(state))
-    agent.load_state_dict(state, strict=True, assign=True)
-    del state
+    agent.configure_normalizer(effective_config["normalization_dims"], normalizer_shapes_from_state(state_dict))
+    agent.load_state_dict(state_dict, strict=True, assign=True)
     agent.to(device=device, dtype=torch.float32)
     agent.eval()
     rgb_encoder = getattr(agent.obs_encoder, "rgb_encoder", None)
