@@ -13,7 +13,7 @@ from dexmani_policy.common.normalizer import (
 )
 
 
-def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
+def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affine=None):
     """Assemble the train affine once, inheriting complete fields before fitting the rest."""
     expected_shapes = normalization_feature_shapes(feature_dims)
     initial_state = {} if initial_state is None else initial_state
@@ -31,18 +31,28 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
                 # Action consumers always use an affine, including the identity.
                 shape = expected_shapes[key]
                 normalizer.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
-            continue
-        normalizer.fit_field(
-            key, dataset.iter_normalization_data(key),
-            mode=mode,
-            last_n_dims=len(expected_shapes[key]),
-        )
-        if key == "action" and dataset.action_key == "action_ee":
+            else:
+                continue
+        else:
+            chunks = dataset.iter_normalization_data(key)
+            if key == "action" and hand_affine is not None and mode in {"limits", "gaussian"}:
+                arm_dim = feature_dims[key] - hand_affine["scale"].numel()
+                chunks = (values[..., :arm_dim] for values in chunks)
+            normalizer.fit_field(key, chunks, mode=mode, last_n_dims=len(expected_shapes[key]))
+        if key == "action" and mode != "identity" and dataset.action_key == "action_ee":
             field = normalizer[key]
             if field.scale.numel() <= 9:
                 raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
             field.scale[3:9] = 1
             field.offset[3:9] = 0
+        if key == "action" and hand_affine is not None:
+            field = normalizer[key]
+            arm_dim = feature_dims[key] - hand_affine["scale"].numel()
+            # RMS/MaxAbs must include hand values when determining the shared arm scale.
+            normalizer.fields[key] = FieldNormalizer(
+                torch.cat((field.scale[:arm_dim], hand_affine["scale"])),
+                torch.cat((field.offset[:arm_dim], hand_affine["offset"])),
+            )
     return normalizer
 
 
@@ -63,7 +73,9 @@ def build_dataset(cfg):
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     description = {
         "field_dims": dims,
-        "action_key": dataset.action_key, "attrs": buffer.attrs,
+        "action_key": dataset.action_key,
+        "hand_coordinates": {key: buffer.attrs[key] for key in ("hand_joint_order", "hand_units")
+                             if key in buffer.attrs},
         "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }

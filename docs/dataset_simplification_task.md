@@ -1,6 +1,6 @@
 # 数据集模块收敛任务书：轻、薄、正确、好用
 
-> 状态：方案已完成，代码待实施。本文中的任务与验收均不代表已经执行。  
+> 状态：P0—P5 已实施；本轮实际验证及未覆盖项见第 17 节。第 14 节为验收要求，不表示所有研究或实机验证均已执行。
 > 仓库：`haoyangzhanglab/dexmani_policy`  
 > 审查基线：`f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb`  
 > 定位：个人机器人策略研究项目。优先正确、直观、易改和实验可解释，不建设数据平台。  
@@ -254,7 +254,7 @@ val = order[T:T + V]
 - 本轮不新增自动扫描动作范围、通用 decoder-normalizer 兼容矩阵或“安全归一化”模式。文档给出配对示例，数值回归验证裁剪确实发生在预期空间。
 - 调整现有检查中孤立的 `normalization.action=gaussian` 示例：若它表示可训练推荐配方，应显式配对关闭 clipping；不能把“YAML 可解析”写成该组合已数值正确。
 
-基线 DP3 配方尚未显式声明 `agent.clip_sample`，配对覆盖可写为 `normalization.action=gaussian +agent.clip_sample=false`；若实施时已在 YAML 中声明该键，则使用不带 `+` 的覆盖。这个例子用于说明参数关系，不改变默认配方，也不表示已经完成该实验。
+当前 DP3 配方已显式声明 `agent.clip_sample`，配对覆盖写为 `normalization.action=gaussian agent.clip_sample=false`，不使用 `+`。这个例子用于说明参数关系，不改变默认配方，也不表示已经完成该研究实验。
 
 ## 9. RGB 与几何：统一输出，保留必要处理阶段
 
@@ -269,13 +269,11 @@ val = order[T:T + V]
 - 保留 `float_spatial_before_uint8` 对齐训练/推理量化顺序的实际含义。它可以是内部派生值，不新增用户开关。
 - 模型内部确有浮点输入的调用可以继续接受浮点，不把本任务扩大成禁止所有浮点图像。
 
-### 9.2 原有 checkpoint 的处理
+### 9.2 checkpoint 输入边界
 
-已保存的配置可能含 `rgb_keep_uint8`。目标是精简**新训练配置**，不能让现用完整 checkpoint 因多出一个旧键突然无法推理或续训。
+当前 checkpoint 使用固定 uint8 配方，不包含 `rgb_keep_uint8`。按后续清理要求，不维护已淘汰参数的适配、自动删键或双轨数值路径。
 
-在现有配置/恢复装配处集中处理这个确实存在的旧键：已保存为 true 的配置可以移除冗余键，采用固定 uint8 路径；已保存为 false 的历史配方不得静默改变数值路径。若确有 false 产物需要恢复，保留最小内部读取支持，并将它限制在恢复路径；否则明确说明用原提交恢复。不要为一个已知旧键建立通用迁移框架、legacy mode 开关或版本状态机。
-
-实施时根据仓库实际 checkpoint 读取链选择更少的代码。没有访问实际历史产物时，不宣称已验证所有历史 checkpoint；至少用合成的当前 true 配方 checkpoint 验证恢复。
+读取边界对带废弃键的配置明确失败，避免 Runtime 忽略该参数后静默改变图像数值。该检查只拒绝不支持的输入，不改写保存配置，不增加迁移框架。验证当前产物的 fresh/save/resume/inference，并确认废弃参数被拒绝。
 
 ### 9.3 不误删几何处理
 
@@ -383,46 +381,46 @@ PolicyRuntime 已能按实际消费宽度在 CPU 侧裁剪；SimRunner 当前先
 
 ### P0：核对当前代码与边界
 
-- [ ] 阅读 AGENTS、本文和实际调用方；确认当前分支相对审查基线的变化，尊重已有工作区修改。
-- [ ] 已经满足的条目标记无需修改；不要重新建立已删除的来源/manifest/shape 机制。
-- [ ] 先记录本轮两类变化：明确改变使用行为的数量默认/上限；应保持数值行为的工程收敛。
+- [x] 阅读 AGENTS、本文和实际调用方；确认当前分支相对审查基线的变化，尊重已有工作区修改。
+- [x] 已经满足的条目标记无需修改；不要重新建立已删除的来源/manifest/shape 机制。
+- [x] 先记录本轮两类变化：明确改变使用行为的数量默认/上限；应保持数值行为的工程收敛。
 
 ### P1：数量与配置收敛
 
-- [ ] `datasets/split.py` 实现第 7 节的上限语义，复用到所有当前入口。
-- [ ] `datasets/demonstration.py`、`configs/common.yaml` 的新训练上限改为 null；保留显式论文预算示例。
-- [ ] 主策略摘要准确区分留出与实际验证；预训练 V=0/正值语义保持。
-- [ ] 核对配置派生：主策略 H/O/A 与 action layout 继续在现有装配处派生，避免新增可独立覆盖的副本。
-- [ ] 核对字段列表和 normalization 声明；只删除已证明无消费的项。
+- [x] `datasets/split.py` 实现第 7 节的上限语义，复用到所有当前入口。
+- [x] `datasets/demonstration.py`、`configs/common.yaml` 的新训练上限改为 null；保留显式论文预算示例。
+- [x] 主策略摘要准确区分留出与实际验证；预训练 V=0/正值语义保持。
+- [x] 核对配置派生：主策略 H/O/A 与 action layout 继续在现有装配处派生，避免新增可独立覆盖的副本。
+- [x] 核对字段列表和 normalization 声明；只删除已证明无消费的项。
 
 ### P2：数据内容与统计收敛
 
-- [ ] `training/common/data.py` 缩小 description；同步 `agents/policies/dqrise.py` 等真实消费者。
-- [ ] `training/trainer.py` / 现有 normalizer 装配去掉逐特征模式下被覆盖的 hand 统计；保留 rms/max_abs 的全字段尺度语义。
-- [ ] 不增加 normalizer 持久化文件或旧来源依赖；检查 inherited identity 与 resume 路径。
+- [x] `training/common/data.py` 缩小 description；同步 `agents/policies/dqrise.py` 等真实消费者。
+- [x] `training/trainer.py` / 现有 normalizer 装配去掉逐特征模式下被覆盖的 hand 统计；保留 rms/max_abs 的全字段尺度语义。
+- [x] 不增加 normalizer 持久化文件或旧来源依赖；检查 inherited identity 与 resume 路径。
 
 ### P3：RGB 与推理输入收敛
 
-- [ ] `datasets/demonstration.py`、`common/image_util.py`、RGB 配方统一新训练 uint8 输出。
-- [ ] 同步 `deployment/runtime.py`、`deployment/metadata.py`、`env_runner/sim_runner.py`、`evaluation/rollout.py` 的实际调用点。
-- [ ] 在现有恢复边界处理已经保存的 true 配方旧键；不静默改写 false 历史配方。
-- [ ] SimRunner H2D 前裁剪点云消费通道；不改变历史、动作切片和控制长度。
-- [ ] 保留几何仿射、训练/推理量化顺序和各路径的职责。
+- [x] `datasets/demonstration.py`、`common/image_util.py`、RGB 配方统一新训练 uint8 输出。
+- [x] 同步 `deployment/runtime.py`、`deployment/metadata.py`、`env_runner/sim_runner.py`、`evaluation/rollout.py` 的实际调用点。
+- [x] checkpoint 不自动迁移废弃参数；读取边界明确拒绝，不静默改变图像数值。
+- [x] SimRunner H2D 前裁剪点云消费通道；不改变历史、动作切片和控制长度。
+- [x] 保留几何仿射、训练/推理量化顺序和各路径的职责。
 
 ### P4：检查工具与文档
 
-- [ ] `test_tools/dataset_checks.py` 聚焦 split、source-frame 统计、sampler、标签与数据读取；避免顶层导入整个 PolicyTrainer、视觉主干和外部初始化资源。
-- [ ] 将已有 checkpoint/raw-EMA、恢复日志、完整策略短训等检查移到现有 `agent_checks.py` / `pretrain_checks.py` 的适当位置；消除重复，不复制同一套测试。
-- [ ] 保留本次受影响的最小集成检查；不新建测试框架、测试发现协议或参数组合矩阵。
-- [ ] 更新根 README、`data/README.md`、`docs/项目架构.md`、`docs/仿真数据集格式.md`、`docs/观测预训练.md` 及受影响的手部/部署说明。
-- [ ] 当前任务书只记录本轮实际状态；旧任务书保留历史标记和入口链接，不复制为第三份用户使用文档。
+- [x] `test_tools/dataset_checks.py` 聚焦 split、source-frame 统计、sampler、标签与数据读取；避免顶层导入整个 PolicyTrainer、视觉主干和外部初始化资源。
+- [x] 将已有 checkpoint/raw-EMA、恢复日志、完整策略短训等检查移到现有 `agent_checks.py` / `pretrain_checks.py` 的适当位置；消除重复，不复制同一套测试。
+- [x] 保留本次受影响的最小集成检查；不新建测试框架、测试发现协议或参数组合矩阵。
+- [x] 更新根 README、`data/README.md`、`docs/项目架构.md`、`docs/仿真数据集格式.md`、`docs/观测预训练.md` 及受影响的手部/部署说明。
+- [x] 当前任务书只记录本轮实际状态；旧任务书保留历史标记和入口链接，不复制为第三份用户使用文档。
 
 ### P5：验证与收尾
 
-- [ ] 执行第 14 节中受改动影响的检查；说明已运行、失败、未运行及原因。
-- [ ] 检查配置、CLI 示例、调用引用与文档是否同步；删除本轮引入而未使用的参数和 helper。
-- [ ] 对新默认使用全部数据、上限新语义、历史 RGB 配方处理作简短变更说明。
-- [ ] 未执行长训、真实闭环、硬件测试或性能 profiling 时明确写出；不把合成数据结果扩写成任务成功率结论。
+- [x] 执行第 14 节中受改动影响的检查；说明已运行、失败、未运行及原因。
+- [x] 检查配置、CLI 示例、调用引用与文档是否同步；删除本轮引入而未使用的参数和 helper。
+- [x] 对新默认使用全部数据、上限新语义、历史 RGB 配方处理作简短变更说明。
+- [x] 未执行长训、真实闭环、硬件测试或性能 profiling 时明确写出；不把合成数据结果扩写成任务成功率结论。
 
 ## 14. 验收：验证真实风险，复用已有检查
 
@@ -442,13 +440,13 @@ PolicyRuntime 已能按实际消费宽度在 CPU 侧裁剪；SimRunner 当前先
 | 几何 | 使用真实 torch resize/投影路径核对像素中心与标定；仅检查矩阵形状或纸面公式不算完整图像验证 |
 | SimRunner | H2D 前只保留 C 通道；与原来设备侧切片数值一致；初始历史和滚动顺序不变 |
 | DDIM | 小型 scheduler 数值例子验证 clipping 与动作 affine 的关系；默认 limits 路径保持；非默认例子显式关闭 clipping |
-| 当前 checkpoint | 新产物 fresh→save→resume/inference；另用保存了 `rgb_keep_uint8=true` 的合成当前配方确认旧键不阻断恢复 |
+| 当前 checkpoint | 当前产物 fresh→save→resume/inference；包含废弃 RGB 参数的输入明确失败 |
 | 轻量入口 | Dataset 检查不要求下载权重、加载实机环境或构造大视觉模型；测试失败保留明确异常 |
 
 优先使用仓库已有入口，修改后同步其实际能力：
 
 ```bash
-python -m dexmani_policy.test_tools.dataset_checks --device cpu
+python -m dexmani_policy.test_tools.dataset_checks
 python -m dexmani_policy.test_tools.pretrain_checks --device cpu
 python -m dexmani_policy.test_tools.agent_checks --device cpu
 ```
@@ -483,3 +481,57 @@ python -m dexmani_policy.test_tools.agent_checks --device cpu
 | DP3 | [默认配方](https://github.com/YanjieZe/3D-Diffusion-Policy/blob/47385d9d6f5bde3f2ebdf2400ecb8261cc9e6b97/3D-Diffusion-Policy/diffusion_policy_3d/config/dp3.yaml)、[RealDex Dataset](https://github.com/YanjieZe/3D-Diffusion-Policy/blob/47385d9d6f5bde3f2ebdf2400ecb8261cc9e6b97/3D-Diffusion-Policy/diffusion_policy_3d/dataset/realdex_dataset.py) | 确认 sample DDIM、clip=true 与 limits 的默认组合；保持本项目自己的 train-only 分块统计 |
 | Diffusers | [v0.27.2 DDIMScheduler](https://github.com/huggingface/diffusers/blob/v0.27.2/src/diffusers/schedulers/scheduling_ddim.py) | 当前依赖版本的 clip 作用于重建的 `pred_original_sample`；不能通过更换 prediction type 回避范围约束 |
 | 本项目 | [数据目录](https://github.com/haoyangzhanglab/dexmani_policy/tree/f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb/dexmani_policy/datasets)、[训练装配](https://github.com/haoyangzhanglab/dexmani_policy/blob/f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb/dexmani_policy/training/common/data.py)、[Normalizer](https://github.com/haoyangzhanglab/dexmani_policy/blob/f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb/dexmani_policy/common/normalizer.py) | 在已经精简的主线上收敛剩余问题，保持物理含义与现有研究能力 |
+
+
+## 17. 本轮实施与验证记录（2026-11-03）
+
+实施起点为 `88f2856`，工作区干净；相对审查基线仅有三份任务文档变化。本节只记录本轮实际工作，不沿用历史任务书的测试结论。
+
+### 实际变更与无需修改项
+
+- 新训练默认上限为 null，T 为 `N−V` 或 `min(M,N−V)`；主策略明确报告 val 留出但未验证。100 条预算需显式设置，这是训练配方变化；恢复保持 checkpoint 保存的具体参数。
+- 跨层 description 改为必要维度、动作事实、hand_coordinates 和已有部署事实，不再转发完整 attrs。DQ-RISE 消费者及检查同步。
+- hand affine 在现有 normalizer 装配中拼接：limits/gaussian 仅统计 arm，identity 不扫描，rms/max_abs 保留完整字段共享尺度。CPU 五模式与旧版“完整拟合后覆盖 hand”逐位对照通过，DexLatent latent 统计保留。
+- RGB 固定连续 CHW uint8，移除配方开关；checkpoint 不做参数迁移，包含废弃参数时明确拒绝。颜色增强、最终量化、标定原图和模型侧几何保持。
+- SimRunner 按恢复 Policy 的实际 normalization_dims 在 H2D 前裁剪点云，PolicyInfo 公开实际消费宽度；Runtime 和 rollout 的公共 kwargs 调用自动同步，无需额外修改。
+- Dataset 检查与模型集成分开；sampler 检查迁入 Dataset 入口，恢复/日志/策略短训迁入 agent 入口，未建立新框架。README、数据、架构、格式、预训练、手部及部署说明已同步。
+- 经核对无需修改：Store 进程句柄、Sampler 窗口/按需读取、train 原始帧统计、预训练 affine/identity 继承、resume 不拟合、H/O/A 装配、字段声明、预训练 V=0/正值分支。CordViP 默认采样、contact 点槽、AdapTac 算法/梯度、未来 mask、R3D 与默认 DDIM 语义均保留。
+
+### 实际执行的验证
+
+解释器为 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`，Torch 2.4.1+cu124。CUDA 在用户授权的 sandbox 外执行，设备为 RTX 4090。
+
+```bash
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python -m dexmani_policy.test_tools.dataset_checks
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python -m dexmani_policy.test_tools.pretrain_checks --device cpu
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python -m compileall -q dexmani_policy
+git diff --check
+```
+
+上述命令均通过。Dataset 检查覆盖数量/RNG、sampler、train-only 统计、hand 五模式、按需读取、未来标签、R3D、RGB 连续布局和增强量化；预训练检查覆盖 AFRO stride、CordViP contact 行/点槽对齐、串行/spawn 标签处理、有无 val、恢复、导出及相关异常清理。另独立导入轻量入口，确认不导入 trainer、transformers、timm 或 dexmani_sim。
+
+复查阶段运行了完整 CUDA agent_checks，全部通过；日志为 `/tmp/dexmani-dataset-review-cuda.log`：
+
+```bash
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python -m dexmani_policy.test_tools.agent_checks --device cuda:0
+```
+
+完整入口覆盖各策略合成前后向、保存/加载/预测对照、RGB raw/EMA 与 LoRA、R3D 有无辅助目标、点云传输前裁剪与历史、真实 resize/投影、DDIM clipping，以及 AFRO/CordViP/DQ-RISE 各 2 次 fresh updates 与 1 次 resume update。恢复检查删除原 encoder/codebook，并禁止重新拟合；DQ 确认保存的 100 条预算不受新默认影响。包含废弃 RGB 参数的配置明确拒绝，不再维护自动删键及兼容恢复检查。CPU 对固定 uint8 预处理的数值及增强量化顺序也已验证。
+
+本轮沿调用链复查了 Dataset、统计装配、配置、策略消费、checkpoint、Runtime、SimRunner、评测和 shell 入口；未发现额外 SHA/hash、来源证明或版本迁移机制。保留现用几何、触觉和恢复边界，未为清理数量改写稳定核心。轻量 Dataset 检查固定在 CPU，移除了接受却不使用的 device 参数；脚本无该参数调用，当前文档命令已同步。相关训练、预训练和评测 shell 入口的 `bash -n` 检查通过；轻量入口帮助及导入隔离复核通过。
+
+类型检查针对 7 个相关源文件通过：
+
+```bash
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python -m mypy --follow-imports=silent --ignore-missing-imports --check-untyped-defs dexmani_policy/common/checkpoint.py dexmani_policy/common/image_util.py dexmani_policy/datasets/split.py dexmani_policy/training/common/data.py dexmani_policy/deployment/metadata.py dexmani_policy/deployment/runtime.py dexmani_policy/env_runner/sim_runner.py
+```
+
+构建检查在临时目录复制当前 pyproject 和 Python 包，使用 `pip wheel --no-deps --no-build-isolation --no-index` 成功构建 wheel，并确认全部 18 份 YAML 包资源存在。环境不能运行 `python -m build`，因此使用已安装的 pip 构建前端，没有安装新依赖或向仓库写入构建产物。
+
+### 未执行及限制
+
+- 未执行长训、真实仿真闭环、实机测试或性能 profiling；合成短训和模拟 rollout 不代表真实任务训练成功、成功率或吞吐改善。
+- 不支持带废弃 RGB 参数的产物；本轮按清理要求移除自动适配，读取会明确失败，不提供迁移工具。
+- DexLatent 手部 affine 的公共装配已作五模式数学回归；本轮未修改先验与 latent 算法，因此未扩展到依赖官方初始化权重的完整 DexLatent 训练集成。
+- agent_checks 完整入口已在 CUDA 通过；未重复运行 CUDA 预训练全集，预训练完整入口使用 CPU。
+- 本轮不实施第 12 节研究事项，也不猜测非默认控制频率的仿真 API。最终检查未发现本轮冗余参数、无消费者 helper 或无关文件变更。

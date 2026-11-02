@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from dexmani_policy.common.config import PROJECT_ROOT, positive_int
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, PROJECT_ROOT, positive_int
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
@@ -106,7 +106,8 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         control_action_dim=metadata["control_action_dim"],
         action_mode={"action": "joint", "action_ee": "eef"}[cfg["action_key"]],
         rgb_preprocessing=rgb_preprocessing_kwargs(dataset),
-        pc_dim=dataset.get("pc_dim"),
+        pc_dim=next((width for key, width in cfg["normalization_dims"].items()
+                     if key in POINT_CLOUD_FIELDS), None),
         supported_execution_modes=tuple(metadata["supported_execution_modes"]),
         control_dt_s=deployment.get("control_dt_s"),
         depth_config=deployment.get("depth_config"),

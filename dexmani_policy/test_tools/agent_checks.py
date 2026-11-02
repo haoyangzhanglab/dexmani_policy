@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import tempfile
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 import hydra
 import numpy as np
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -36,14 +37,19 @@ from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder, X
 from dexmani_policy.agents.policies.dp import DP
 from dexmani_policy.agents.policies.dp3 import DP3
 from dexmani_policy.agents.policies.dqrise import DQRISE
-from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
+from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.config import validate_observation_fields
 from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.common.pytorch_util import get_rng_state
-from dexmani_policy.datasets.episode_store import EpisodeStore
-from dexmani_policy.datasets.sampler import SequenceSampler, window_indices
+from dexmani_policy.datasets.demonstration import DemonstrationDataset
+from dexmani_policy.deployment import inspect_policy, load_policy
+from dexmani_policy.test_tools.dataset_checks import make_source
+from dexmani_policy.train import run_training
+from dexmani_policy.training.common.config import assemble_effective_config, load_policy_config, prepare_training, validate_config
+from dexmani_policy.training.common.data import build_dataset
+from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.common.optimization import build_optimizer
-from dexmani_policy.training.common.config import load_policy_config
+from dexmani_policy.training.common.resume import prepare_resume
 from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
 from dexmani_policy.training.pretrain.hand_prior import vqvae as vq_training
@@ -195,52 +201,6 @@ def check_evaluation(_device):
                 else:
                     assert not fail and path.is_file()
             assert closed == [True]
-
-
-def check_sampler(_device):
-    ends = np.array([1, 4, 9], dtype=np.int64)
-    mask = np.array([True, False, True])
-    expected = np.array([
-        [0, 1, 3], [0, 1, 2], [0, 1, 1], [0, 1, 0],
-        [4, 5, 3], [4, 6, 2], [4, 7, 1], [4, 8, 0],
-        [5, 9, 0], [6, 9, 0], [7, 9, 0], [8, 9, 0],
-    ], dtype=np.int64)
-    actual = window_indices(ends, 4, mask, 3, 3)
-    assert actual.dtype == np.int64
-    np.testing.assert_array_equal(actual, expected)
-    np.testing.assert_array_equal(window_indices(ends[:1], 1, mask[:1]), [[0, 1, 0]])
-    np.testing.assert_array_equal(
-        window_indices(ends, 4, np.ones(3, dtype=bool)), [[4, 8, 0], [5, 9, 0]],
-    )
-    for episode_ends, horizon, selected in (
-        (ends, 4, np.zeros(3, dtype=bool)),
-        (ends, 32, mask),
-        (ends[:0], 1, mask[:0]),
-    ):
-        empty = window_indices(episode_ends, horizon, selected)
-        assert empty.shape == (0, 3) and empty.dtype == np.int64
-
-    rows = np.array([
-        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
-        [4, 4, 4, 4], [4, 4, 4, 5], [4, 4, 5, 6], [4, 5, 6, 7],
-        [5, 6, 7, 8], [6, 7, 8, 8], [7, 8, 8, 8], [8, 8, 8, 8],
-    ])
-    values = np.arange(9 * 4, dtype=np.float32).reshape(9, 4)
-    with tempfile.TemporaryDirectory(prefix="dexmani-sampler-check-") as directory:
-        group = zarr.open_group(directory, mode="w")
-        group.create_dataset("meta/episode_ends", data=ends)
-        for key in ("action", "state"):
-            group.create_dataset(f"data/{key}", data=values, chunks=(3, 4))
-        sampler = SequenceSampler(
-            EpisodeStore(directory), 4, 3, 3, episode_mask=mask,
-            fields={"action": slice(1, 4, 2), "state": None}, field_horizons={"state": 2},
-        )
-        assert len(sampler) == len(rows)
-        for index, expected_rows in enumerate(rows):
-            np.testing.assert_array_equal(sampler.sample_source_rows(index), expected_rows)
-            sample = sampler.sample_sequence(index)
-            np.testing.assert_array_equal(sample["action"], values[expected_rows, 1:4:2])
-            np.testing.assert_array_equal(sample["state"], values[expected_rows[:2]])
 
 
 def check_time(device):
@@ -679,7 +639,6 @@ def check_policy_roundtrips(device):
         print(f"PASS policy roundtrip: {method}, auxiliary={auxiliary} ({device})", flush=True)
 
 
-
 def check_output_boundaries(device):
     from types import SimpleNamespace
     from dexmani_policy.deployment.runtime import PolicyRuntime
@@ -710,6 +669,89 @@ def check_output_boundaries(device):
                     assert "Nonfinite physical" in str(error)
                 else:
                     raise AssertionError("Nonfinite future actions escaped the CPU boundary")
+
+
+def check_sim_observations(device):
+    from dexmani_policy.common.config import POINT_CLOUD_FIELDS
+    from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+    from dexmani_policy.deployment.runtime import PolicyRuntime
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+
+    fields = sorted(POINT_CLOUD_FIELDS)
+    runner = SimRunner("unused", 2, fields, {})
+    dims = dict.fromkeys(fields, 3)
+    observations = []
+    tensor = torch.as_tensor
+    for index in range(3):
+        observation = {key: np.arange(8 * 6, dtype=np.float32).reshape(8, 6) + index * 100
+                       for key in fields}
+        observations.append(observation)
+        runner.update_obs(observation)
+        with patch("dexmani_policy.env_runner.sim_runner.torch.as_tensor", wraps=tensor) as transfer:
+            actual = runner.get_obs_batch(device, normalization_dims=dims)
+        assert len(transfer.call_args_list) == len(fields)
+        for call in transfer.call_args_list:
+            assert call.args[0].shape == (2, 8, 3)
+            assert call.args[0].flags.c_contiguous
+        for key in fields:
+            history = np.stack([observations[max(0, index - 1)][key], observations[index][key]])
+            old_device_slice = tensor(history, device=device)[..., :3].unsqueeze(0)
+            torch.testing.assert_close(actual[key], old_device_slice, rtol=0, atol=0)
+    runner.reset()
+    assert runner.get_obs_batch(device, normalization_dims={}) == {}
+    kwargs = rgb_preprocessing_kwargs({"rgb_preprocess_size": (10, 12), "rgb_color_aug": {"present": True}})
+    runner = SimRunner("unused", 2, ["rgb"], kwargs)
+    rgb = np.random.default_rng(3).integers(256, size=(7, 9, 3), dtype=np.uint8)
+    runner.update_obs({"rgb": rgb})
+    simulated = runner.get_obs_batch(device, normalization_dims={"rgb": 3})["rgb"]
+    info = SimpleNamespace(observation_fields=("rgb",), n_obs_steps=2, rgb_preprocessing=kwargs)
+    runtime = PolicyRuntime(torch.nn.Linear(1, 1).to(device), info, seed=0)
+    external = runtime.prepare_observations({"rgb": np.stack((rgb, rgb))})["rgb"]
+    assert simulated.dtype == external.dtype == torch.uint8
+    assert simulated.is_contiguous() and external.is_contiguous()
+    torch.testing.assert_close(simulated, external, rtol=0, atol=0)
+
+
+def check_image_geometry(device):
+    from dexmani_policy.agents.obs_encoder.pointcloud.projection import project_points
+    from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
+
+    height, width = 6, 8
+    y, x = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
+    image = torch.stack((x / (width - 1), y / (height - 1), (x + y) / (height + width - 2)))[None]
+    processor = ImageProcessor((10, 14), image_mean=(0, 0, 0), image_std=(1, 1, 1)).to(device)
+    resized, transform = processor.process_images(image, return_transform=True)
+    pixels = torch.tensor([[[2.2, 1.7], [4.1, 3.2]]], device=device)
+    points = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
+    projection = project_points(points, torch.eye(3, device=device)[None],
+                                torch.eye(4, device=device)[None, :3], transform, resized.shape[-2:])
+    sampled = F.grid_sample(resized, projection.grid_xy[:, :, None], align_corners=False)[:, :, :, 0].transpose(1, 2)
+    expected = torch.stack((pixels[..., 0] / (width - 1), pixels[..., 1] / (height - 1),
+                            pixels.sum(-1) / (height + width - 2)), -1)
+    assert (projection.confidence == 1).all()
+    torch.testing.assert_close(sampled, expected, rtol=2e-6, atol=2e-6)
+    quantized = image.mul(255).round().to(torch.uint8)
+    torch.testing.assert_close(processor.process_images(quantized),
+                               processor.process_images(quantized.float() / 255), rtol=0, atol=0)
+
+
+def check_ddim_clipping(device):
+    from diffusers import DDIMScheduler
+    from dexmani_policy.common.normalizer import FieldNormalizer
+
+    limits = FieldNormalizer(torch.tensor([0.5], device=device), torch.tensor([-2.], device=device))
+    physical = torch.tensor([[[2.], [3.], [5.], [6.]]], device=device)
+    bounded = limits.normalize(physical)
+    outside = torch.tensor([[[-2.], [-0.5], [0.5], [2.]]], device=device)
+    for clip in (True, False):
+        scheduler = DDIMScheduler(num_train_timesteps=10, prediction_type="sample", clip_sample=clip)
+        scheduler.set_timesteps(2, device=device)
+        def clean_sample(value):
+            return scheduler.step(value, scheduler.timesteps[0], torch.zeros_like(value)).pred_original_sample
+        torch.testing.assert_close(limits.unnormalize(clean_sample(bounded)), physical, rtol=0, atol=0)
+        expected = outside.clamp(-1, 1) if clip else outside
+        torch.testing.assert_close(clean_sample(outside), expected, rtol=0, atol=0)
+
 
 def check_rgb(device):
     architecture = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
@@ -1165,7 +1207,7 @@ def check_codebook_pipeline(device):
                     camera_intrinsic=9, camera_extrinsic=12, action=19)
         policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
         description = dict(
-            attrs=dict(hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
+            hand_coordinates=dict(hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
                        hand_units="radians"),
             action_key="action",
         )
@@ -1310,17 +1352,358 @@ def check_policies(device):
         torch.testing.assert_close(value, replay, rtol=0, atol=0)
 
 
+def check_resume_logging(root):
+    for index, history in enumerate((b'{"step": 99}\n', b'broken\n{"step": 99}\n', b'broken', b'')):
+        directory = root / f"logging-{index}"
+        directory.mkdir()
+        path = directory / "metrics.jsonl"
+        path.write_bytes(history)
+        logger = ExperimentLogger(directory, resume=True, wandb_enabled=False)
+        try:
+            logger.log({"loss": 1.}, step=2)
+            logger.log({"loss": 0.5}, step=2)
+        finally:
+            logger.close()
+        boundary = b"\n" if history and not history.endswith(b"\n") else b""
+        prefix = history + boundary
+        assert path.read_bytes().startswith(prefix)
+        records = [json.loads(line) for line in path.read_bytes()[len(prefix):].splitlines()]
+        assert [record["step"] for record in records] == [2, 2]
+        assert list(directory.iterdir()) == [path]
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
+        directory = root / f"fresh-{name}"
+        directory.mkdir()
+        (directory / name).touch()
+        try:
+            ExperimentLogger(directory, wandb_enabled=False)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("Fresh training overwrote an existing experiment")
+
+
+def check_normalizer_restore(root, device):
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    from dexmani_policy.evaluation.rollout import evaluate_policy
+    from dexmani_policy.evaluation.seeds import split_evaluation_seeds
+
+    cfg = load_policy_config("dp3", ["agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16",
+                                     "agent.pc_dim=3"])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    dims = dict(joint_state=19, point_cloud=3, action=19)
+    model.configure_normalizer(dims, dict(joint_state=(19,), action=(19,), hand_latent=(4,)))
+    raw = model.state_dict()
+    raw["normalizer.fields.action.scale"].fill_(2)
+    averaged = {key: value.clone() for key, value in raw.items()}
+    averaged["normalizer.fields.action.scale"].fill_(3)
+    for part in ("scale", "offset"):
+        averaged[f"normalizer.fields.hand_latent.{part}"] = torch.ones(5)
+    config: dict[str, Any] = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims,
+                  eval=dict(use_ema=True, inference_steps=2), dataset={},
+                  policy_metadata=dict(action_start_index=model.action_start_index),
+                  env_runner=dict(task_name="synthetic", eval_seeds=list(range(10))))
+    checkpoint = Checkpoint(7, raw, averaged, {"momentum": torch.ones(1)},
+                            {"step": torch.ones(1)}, {"torch": torch.ones(1)}, config)
+    path = root / "normalizer.pt"
+    save_checkpoint(path, checkpoint)
+    torch_load, instantiate = torch.load, hydra.utils.instantiate
+    obs = dict(joint_state=torch.randn(1, model.n_obs_steps, 19, device=device),
+               point_cloud=torch.rand(1, model.n_obs_steps, 8, 3, device=device))
+    for use_ema, state in ((False, raw), (True, averaged)):
+        unused_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+
+        def read_checkpoint(*args, **kwargs):
+            payload = torch_load(*args, **kwargs)
+            unselected = payload["model_state" if use_ema else "ema_model_state"]
+            unused_refs[:] = [weakref.ref(next(iter(unselected.values())))] + [
+                weakref.ref(next(iter(payload[key].values())))
+                for key in ("optimizer_state", "scheduler_state", "rng_state")
+            ]
+            return payload
+
+        def construct(*args, **kwargs):
+            assert unused_refs and all(ref() is None for ref in unused_refs)
+            return instantiate(*args, **kwargs)
+
+        def episodes(runner, agent, *, seeds, inference_steps, action_steps, video_save_dir):
+            assert runner.task_name == "synthetic" and video_save_dir is None
+            assert seeds == split_evaluation_seeds(config["env_runner"]["eval_seeds"], 1024, 2)[0]
+            assert inference_steps == 2 and action_steps == model.n_action_steps
+            assert agent.checkpoint_step == 7 and not agent.training
+            assert all(p.dtype == torch.float32 and p.device == obs["joint_state"].device for p in agent.parameters())
+            assert torch.equal(torch.get_rng_state(), torch.Generator().manual_seed(1024).get_state())
+            assert agent.normalizer["hand_latent"].scale.shape == restored.normalizer["hand_latent"].scale.shape
+            for key, value in restored.state_dict().items():
+                torch.testing.assert_close(agent.state_dict()[key], value, rtol=0, atol=0)
+            expected = restored.predict_action(obs, inference_steps=inference_steps,
+                generator=torch.Generator(device=device).manual_seed(17))["future_actions"]
+            actual = agent.predict_action(obs, inference_steps=inference_steps,
+                generator=torch.Generator(device=device).manual_seed(17))["future_actions"]
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for seed in seeds:
+                yield dict(success=True, steps=2, total_steps=3, seed=seed)
+
+        with patch("torch.load", side_effect=read_checkpoint) as load, \
+             patch("hydra.utils.instantiate", side_effect=construct), \
+             patch.object(SimRunner, "run", autospec=True, side_effect=episodes):
+            restored = restore_policy(path, use_ema=use_ema, device=device)
+            assert load.call_count == 1
+            load.reset_mock()
+            record, result_path = evaluate_policy(path, weights=None if use_ema else "raw",
+                episodes=2, device=device, video=False, output_dir=root / f"evaluation-{use_ema}")
+            assert load.call_count == 1
+            assert record["weights"] == ("ema" if use_ema else "raw") and record["global_step"] == 7
+            assert json.loads(result_path.read_text())["seeds"] == record["seeds"]
+            assert record["runtime"]["parameter_dtypes"] == ["torch.float32"]
+        assert "point_cloud" not in restored.normalizer.fields
+        assert restored.normalization_dims["point_cloud"] == 3
+        assert tuple(restored.normalizer["hand_latent"].scale.shape) == ((5,) if use_ema else (4,))
+        for key, value in state.items():
+            torch.testing.assert_close(restored.state_dict()[key], value.to(device), rtol=0, atol=0)
+    for bad_key in ("scale", "offset", "shape"):
+        state = dict(raw)
+        if bad_key == "shape":
+            state["normalizer.fields.action.offset"] = torch.zeros(18)
+        else:
+            del state[f"normalizer.fields.action.{bad_key}"]
+        invalid = save_checkpoint(root / f"invalid-normalizer-{bad_key}.pt",
+                                  Checkpoint(7, state, None, {}, {}, {}, config))
+        try:
+            restore_policy(invalid, use_ema=False, device=device)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Strict loading accepted invalid affine {bad_key}")
+    checkpoint.ema_model_state = None
+    save_checkpoint(path, checkpoint)
+    try:
+        restore_policy(path, use_ema=True, device=device)
+    except ValueError as error:
+        assert "EMA" in str(error)
+    else:
+        raise AssertionError("Missing EMA silently selected raw weights")
+    try:
+        evaluate_policy(path, seeds=[1], device=device, video=False,
+                        output_dir=root / "evaluation-missing-ema")
+    except ValueError as error:
+        assert "EMA" in str(error)
+    else:
+        raise AssertionError("Evaluation silently selected raw weights for missing EMA")
+    assert not (root / "evaluation-missing-ema/result_details.json").exists()
+
+
+def check_deployment_facts(root):
+    path = root / "deployment.zarr"
+    source = make_source(path, [3])
+    source.create_dataset("data/depth", data=np.ones((3, 4, 5), dtype=np.uint16))
+    source.create_dataset("data/fingertip_xyz", data=np.zeros((3, 5, 3), dtype=np.float32))
+    cfg = load_policy_config("dp3", [f"zarr_path={path}", "horizon=2", "n_obs_steps=1", "n_action_steps=1",
+        "dataset.sensor_modalities=[joint_state,point_cloud,hand_pointcloud,fingertip_xyz,depth]"])
+    cfg.workspace.output_dir = str(root / "deployment-run")
+    _, description = build_dataset(cfg)
+    assert description["deployment_metadata"] == {"depth_config": {"shape": [4, 5], "depth_scale_m": None}}
+    source.attrs.update(dt=0.02, pointcloud_config={"num_points": 8},
+                        hand_pointcloud_config={"num_points": 8},
+                        fingertip_link_names=["a", "b", "c", "d", "e"], depth_scale_m_per_unit=0.001,
+                        hand_units="radians", hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
+                        unused_collector_note={"large": "irrelevant"})
+    _, description = build_dataset(cfg)
+    assert "format" not in source.attrs
+    assert "attrs" not in description and "unused_collector_note" not in description
+    assert description["hand_coordinates"] == {
+        "hand_units": "radians", "hand_joint_order": ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
+    }
+    assert description["deployment_metadata"] == {
+        "control_dt_s": 0.02, "pointcloud_config": {"num_points": 8},
+        "hand_pointcloud_config": {"num_points": 8}, "fingertip_link_names": ["a", "b", "c", "d", "e"],
+        "depth_config": {"shape": [4, 5], "depth_scale_m": 0.001},
+    }
+    model = SimpleNamespace(normalization_dims={"joint_state": 19, "action": 19},
+                            consumed_observation_fields=("joint_state",),
+                            inference_metadata={"action_start_index": 0, "control_action_dim": 19},
+                            effective_config={})
+    effective = assemble_effective_config(cfg, description, model)
+    assert effective.deployment_metadata == {"control_dt_s": 0.02}
+    assert not OmegaConf.is_readonly(effective)
+    cfg.agent.action_dim = 3
+    assert effective.agent.action_dim == 19
+
+
+def check_inherited_policy(root, method, device=torch.device("cpu")):
+    from dexmani_policy.agents.policies.afro import AFROEncoder
+    from dexmani_policy.agents.policies.cordvip import CordViPEncoder
+
+    path = root / f"{method}.zarr"
+    source = make_source(path, [6, 12, 18])
+    encoder = AFROEncoder(2).pc_encoder if method == "afro" else CordViPEncoder(2).interaction_encoder
+    fields = ("point_cloud",) if method == "afro" else ("hand_pointcloud", "object_pointcloud", "joint_state")
+    state = {} if method == "afro" else {
+        "fields.hand_pointcloud.scale": torch.full((3,), 1.5),
+        "fields.hand_pointcloud.offset": torch.full((3,), 2.),
+        "fields.joint_state.scale": torch.full((19,), 2.),
+        "fields.joint_state.offset": torch.full((19,), 3.),
+    }
+    modes = {key: "identity" for key in fields}
+    if method == "cordvip":
+        modes.update(hand_pointcloud="gaussian", joint_state="limits")
+    artifact = root / f"{method}-encoder.pt"
+    torch.save(dict(encoder_state=encoder.state_dict(), normalizer_state=state, normalization=modes), artifact)
+    overrides = [
+        f"zarr_path={path}", f"initialization.encoder={artifact}", f"workspace.output_dir={root / method}",
+        "workspace.wandb_cfg=null", f"training.device={device}", "training.use_compile=false",
+        "training.lr_warmup_steps=0", "training.loop.total_train_steps=8", "training.loop.log_interval_steps=1",
+        "horizon=4", "n_obs_steps=2", "n_action_steps=2", "agent.down_dims=[16,32]",
+        "agent.diffusion_step_embed_dim=16", "agent.num_inference_steps=2",
+        "dataloader.batch_size=2", "dataloader.num_workers=0", "dataloader.pin_memory=false",
+    ]
+    if method == "cordvip":
+        overrides += ["normalization.hand_pointcloud=identity"]
+    else:
+        overrides += ["~normalization.point_cloud"]
+    extra = "object_pointcloud" if method == "afro" else "point_cloud"
+    sensors = ("point_cloud", "joint_state", extra) if method == "afro" else (*fields, extra)
+    overrides += [f"dataset.sensor_modalities=[{','.join(sensors)}]"]
+    cfg = prepare_training(load_policy_config(method, overrides))
+    if method == "afro":
+        incomplete = load_policy_config(method, [*overrides, "~normalization.action"])
+        with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Fit before required config")):
+            try:
+                run_training(incomplete, max_updates=1)
+            except ValueError as error:
+                assert "Missing normalization modes" in str(error) and "action" in str(error)
+            else:
+                raise AssertionError("Missing action normalization accepted")
+    original = DemonstrationDataset.iter_normalization_data
+
+    def only_new_fields(dataset, key):
+        assert key not in (*fields, extra), f"Fitted inherited or unused field {key}"
+        yield from original(dataset, key)
+
+    with patch.object(DemonstrationDataset, "iter_normalization_data", only_new_fields):
+        assert run_training(cfg, max_updates=2) == 2
+    checkpoint_path = root / method / "checkpoints/latest.pt"
+    checkpoint = load_checkpoint(checkpoint_path)
+    assert {key: checkpoint.effective_config["normalization"][key] for key in fields} == modes
+    assert extra not in checkpoint.effective_config["normalization_dims"]
+    for key, value in state.items():
+        torch.testing.assert_close(checkpoint.model_state[f"normalizer.{key}"], value, rtol=0, atol=0)
+    artifact.unlink()
+    info = inspect_policy(root / method, checkpoint="latest", weights="ema" if cfg.training.use_ema else "raw")
+    assert extra not in info.observation_fields
+    runtime = load_policy(info, device=device)
+    restored = runtime.agent
+    observation = {key: source[f"data/{key}"][:2] for key in info.observation_fields}
+    assert runtime.predict(observation).shape == (3, 19)
+    validate_observation_fields(restored, [*restored.consumed_observation_fields, extra])
+    assert restored._preprocess_obs({extra: torch.empty(1, 2, 8, 6, device=device)}) == {}
+    resumed_cfg, checkpoint = prepare_resume(root / method, device=str(device))
+    with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
+        assert run_training(resumed_cfg, checkpoint=checkpoint, max_updates=1) == 3
+
+
+def check_codebook_training(root, device=torch.device("cpu")):
+    from dexmani_policy.agents.hand_prior.codebook import load_codebook
+
+    path = root / "dqrise.zarr"
+    source = make_source(path, [6, 12, 18])
+    rng = np.random.default_rng(9)
+    points = rng.uniform(-0.1, 0.1, (18, 32, 3)).astype(np.float32)
+    points[..., 2] += 1
+    source.create_dataset("data/point_cloud", data=points, overwrite=True)
+    source.create_dataset("data/rgb", data=rng.integers(256, size=(18, 28, 28, 3), dtype=np.uint8))
+    intrinsic = np.array([[20, 0, 13.5], [0, 20, 13.5], [0, 0, 1]], dtype=np.float32)
+    source.create_dataset("data/camera_intrinsic", data=np.tile(intrinsic.reshape(1, 9), (18, 1)))
+    source.create_dataset("data/camera_extrinsic", data=np.tile(np.eye(4, dtype=np.float32)[:3].reshape(1, 12), (18, 1)))
+    artifact = root / "codebook.npz"
+    scale = np.linspace(1, 2, 12, dtype=np.float32)
+    offset = np.linspace(-0.5, 0.5, 12, dtype=np.float32)
+    np.savez(artifact, sorted_hand_poses=rng.uniform(-1, 1, (3, 12)).astype(np.float32),
+             hand_normalizer_scale=scale, hand_normalizer_offset=offset)
+    cfg = load_policy_config("dqrise", [
+        f"zarr_path={path}", f"initialization.codebook={artifact}", "initialization.rgb=null",
+        f"workspace.output_dir={root / 'dqrise'}", "workspace.wandb_cfg=null",
+        "horizon=4", "n_action_steps=2", "dataloader.batch_size=2", "dataloader.num_workers=0",
+        "dataset.max_train_episodes=100",
+        "dataloader.pin_memory=false", f"training.device={device}", "training.use_compile=false",
+        "training.lr_warmup_steps=0", "training.loop.total_train_steps=8", "training.loop.log_interval_steps=1",
+    ])
+    with open_dict(cfg.agent):
+        cfg.agent.update(dict(
+            num_points=32, n_layers=1, hidden_dim=32, n_head=4, num_inference_steps=2,
+            pc_encoder_config=dict(channels=48, num_patches=8, group_size=4, depth=2, num_heads=4),
+            fps_random_config=dict(use_random=False, use_random_start=False),
+            rgb_backbone_config=dict(tune_mode="freeze", image_size=[28, 28], architecture=dict(
+                model_type="dinov2", hidden_size=24, intermediate_size=48,
+                num_hidden_layers=1, num_attention_heads=4, image_size=28, patch_size=14,
+            )),
+        ))
+    prepare_training(cfg)
+    with patch("dexmani_policy.agents.hand_prior.codebook.load_codebook", wraps=load_codebook) as load:
+        assert run_training(cfg, max_updates=2) == 2
+        assert load.call_count == 1
+    checkpoint_path = root / "dqrise/checkpoints/latest.pt"
+    checkpoint = load_checkpoint(checkpoint_path)
+    assert checkpoint.effective_config["agent"]["num_codes"] == 3
+    assert "rgb_keep_uint8" not in checkpoint.effective_config["dataset"]
+    torch.testing.assert_close(checkpoint.model_state["normalizer.fields.action.scale"][-12:], torch.from_numpy(scale))
+    torch.testing.assert_close(checkpoint.model_state["normalizer.fields.action.offset"][-12:], torch.from_numpy(offset))
+    artifact.unlink()
+    info = inspect_policy(root / "dqrise", checkpoint="latest", weights="raw")
+    runtime = load_policy(info, device=device)
+    observation = {key: source[f"data/{key}"][:2] for key in info.observation_fields}
+    assert runtime.predict(observation).shape == (3, 19)
+    resumed_cfg, checkpoint = prepare_resume(root / "dqrise", device=str(device))
+    assert resumed_cfg.dataset.max_train_episodes == 100
+    assert "rgb_keep_uint8" not in resumed_cfg.dataset
+    with patch("dexmani_policy.agents.hand_prior.codebook.load_codebook", side_effect=AssertionError("Reload on resume")), \
+         patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
+        assert run_training(resumed_cfg, checkpoint=checkpoint, max_updates=1) == 3
+    for value in (True, False):
+        checkpoint.effective_config["dataset"]["rgb_keep_uint8"] = value
+        unsupported = save_checkpoint(root / "unsupported-rgb-option.pt", checkpoint)
+        try:
+            load_checkpoint(unsupported)
+        except ValueError as error:
+            assert "Unsupported dataset option" in str(error)
+        else:
+            raise AssertionError("Unsupported RGB option accepted")
+
+
+def check_configs(_device):
+    for method in ("dp", "dp3", "r3d", "afro", "cordvip", "maniflow", "sat", "dqrise", "dexlatent", "adaptac", "interact_dex"):
+        cfg = load_policy_config(method)
+        validate_config(cfg)
+        assert cfg.dataset.max_train_episodes is None
+        assert "rgb_keep_uint8" not in cfg.dataset
+    validate_config(load_policy_config("dp3", ["normalization.action=gaussian", "agent.clip_sample=false",
+                                               "normalization.point_cloud=identity"]))
+
+
+def check_training_lifecycle(device):
+    with tempfile.TemporaryDirectory(prefix="dexmani-training-checks-") as directory:
+        root = Path(directory)
+        check_resume_logging(root)
+        check_normalizer_restore(root, device)
+        check_deployment_facts(root)
+        for method in ("afro", "cordvip"):
+            check_inherited_policy(root, method, device)
+            print(f"PASS {method} inherited affine/identity and resume without source ({device})", flush=True)
+        check_codebook_training(root, device)
+        print(f"PASS DQ-RISE fresh/save/inference/resume and saved budget ({device})", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
     args = parser.parse_args()
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_training_input_filter, check_evaluation, check_sampler, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
+    for check in (check_configs, check_training_input_filter, check_evaluation, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
                   check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb,
                   check_rgb_deployment, check_dinov3, check_vq,
-                  check_codebook, check_vq_training, check_codebook_pipeline, check_policies, check_output_boundaries):
+                  check_codebook, check_vq_training, check_codebook_pipeline, check_policies, check_output_boundaries,
+                  check_sim_observations, check_image_geometry, check_ddim_clipping, check_training_lifecycle):
         check(device)
         print(f"PASS {check.__name__} ({device})", flush=True)
 

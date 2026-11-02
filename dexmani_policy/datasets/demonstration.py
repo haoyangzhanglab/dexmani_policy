@@ -38,13 +38,12 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         pad_before: int = 0,
         pad_after: int = 0,
         val_episodes: int = 0,
-        max_train_episodes: int | None = 100,
+        max_train_episodes: int | None = None,
         augmentation_cfg: dict | None = None,
         action_key: str = "action",
         rgb_preprocess_size: tuple[int, int] | None = None,
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: Callable | None = None,
-        rgb_keep_uint8: bool = False,
         pc_dim: int | None = None,
     ) -> None:
         super().__init__()
@@ -62,7 +61,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
-        self.rgb_keep_uint8 = rgb_keep_uint8
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -130,7 +128,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         return (
             f"{Path(self.zarr_path).name}: total episodes={self.episode_store.n_episodes:,}, "
             f"train episodes={int(self.train_mask.sum()):,}, "
-            f"val episodes={int(self.val_mask.sum()):,}, "
+            f"val episodes={int(self.val_mask.sum()):,} (留出但未验证), "
             f"unused episodes={int((~(self.train_mask | self.val_mask)).sum()):,}, train windows={len(self):,}, "
             f"fields={', '.join(self.data_keys)}"
         )
@@ -167,12 +165,11 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                     data["obs"]["rgb"],
                     resize_hw=self.rgb_preprocess_size,
                     random_crop_hw=self.rgb_random_crop_size,
-                    keep_uint8=self.rgb_keep_uint8,
                     color_augmentation=self.rgb_color_aug,
                 )
             else:
                 data["obs"]["rgb"] = preprocess_rgb_eval(
-                    data["obs"]["rgb"], resize_hw=None, center_crop_hw=None, keep_uint8=self.rgb_keep_uint8,
+                    data["obs"]["rgb"], resize_hw=None, center_crop_hw=None,
                 )
 
         return dict_apply(data, torch.as_tensor)

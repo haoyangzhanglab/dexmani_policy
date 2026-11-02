@@ -15,13 +15,10 @@ def split_episodes(
         positive_int(max_train_episodes, "max_train_episodes")
     if type(val_episodes) is not int or val_episodes < 0:
         raise ValueError("val_episodes must be a nonnegative integer")
-    train_count = (n_episodes - val_episodes if max_train_episodes is None
-                   else min(max_train_episodes, n_episodes))
-    if train_count <= 0 or train_count + val_episodes > n_episodes:
-        raise ValueError(
-            f"Cannot select {train_count} train and {val_episodes} val episodes from {n_episodes}; "
-            "require nonempty train and enough remaining episodes for val"
-        )
+    if val_episodes >= n_episodes:
+        raise ValueError("val_episodes must be smaller than n_episodes to leave training episodes")
+    available = n_episodes - val_episodes
+    train_count = available if max_train_episodes is None else min(max_train_episodes, available)
     order = np.random.default_rng(seed).permutation(n_episodes)
     train_mask = np.zeros(n_episodes, dtype=bool)
     val_mask = np.zeros(n_episodes, dtype=bool)

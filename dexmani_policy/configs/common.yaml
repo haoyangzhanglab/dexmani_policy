@@ -13,7 +13,7 @@ dataloader:
 dataset:
   seed: 42  # 数据划分与训练 seed 独立。
   val_episodes: 0
-  max_train_episodes: 100
+  max_train_episodes: null
 
 normalization:
   action: limits

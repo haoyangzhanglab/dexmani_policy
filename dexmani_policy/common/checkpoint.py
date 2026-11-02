@@ -36,6 +36,8 @@ def load_checkpoint(path: str | Path) -> Checkpoint:
 
     # Project checkpoints contain trusted training state, not just tensors.
     payload = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    if "rgb_keep_uint8" in payload["effective_config"].get("dataset", {}):
+        raise ValueError("Unsupported dataset option: rgb_keep_uint8")
     return Checkpoint(**payload)
 
 

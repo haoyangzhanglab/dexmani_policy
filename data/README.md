@@ -85,6 +85,6 @@ CordViP 的 `.cordvip.zarr` 自包含 hand/object XYZ、joint_state、contact_ma
 
 格式: `robot_data/<task_name>.zarr`
 
-主策略默认 `dataset.seed=42`、`max_train_episodes=100`、`val_episodes=0`；独立预训练默认训练上限为 null、验证数量为 0。先选 train，再从剩余 episodes 选 val，其余 unused；150 条、训练上限 100、验证 20 得到 100/20/30。新统计只使用本阶段 train 的真实源帧，训练不读取来源身份或自动按 trial 分组。各阶段数据参数独立，主策略保留 val 时不新增离线验证流程。
+主策略和独立预训练均默认 `dataset.seed=42`、`max_train_episodes=null`、`val_episodes=0`。预留 V 条后，训练数量为 `N−V` 或 `min(M,N−V)`；同一排列依次选择 train、val、unused。150 条、上限 100、留出 20 得到 100/20/30；80 条、上限 100、留出 10 得到 70/10/0。主策略从原先最多 100 条改为全部数据属于训练配方变化，100 条预算需显式设置；resume 沿用保存的参数。新统计只使用本阶段 train 的真实源帧，训练不读取来源身份或自动按 trial 分组。各阶段数据参数独立，主策略 val 仅留出，未运行离线验证。
 
 训练使用的数据版本不就地修改。远程同步显式指定路径，例如 `bash scripts/remote/sync_data.sh --host <host> --local robot_data --remote /data/project/robot_data`；脚本保留目标独有文件。启动时的 `--data-root /data/project` 为源码副本提供 `robot_data/`、`data/` 和 `pretrained_models/` 链接，实验目录另外由 `--run` 指定，详见 [SSH 文档](../docs/SSH服务器训练部署.md)。

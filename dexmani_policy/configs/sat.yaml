@@ -27,7 +27,6 @@ dataloader:
 dataset:
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   sensor_modalities: ["joint_state", "point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"]
-  rgb_keep_uint8: true
 
   augmentation_cfg:
     state:

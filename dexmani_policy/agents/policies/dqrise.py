@@ -100,7 +100,7 @@ class DQRISE(Policy):
         return {**super().effective_config, "num_codes": self.hand_codebook.num_codes}
 
     def initialize_training(self, data_description, codebook) -> None:
-        validate_hand_coordinates(data_description["attrs"])
+        validate_hand_coordinates(data_description["hand_coordinates"])
         if data_description["action_key"] != "action":
             raise ValueError("DQ-RISE requires joint policy data with action_key=action")
         self.hand_codebook = codebook

@@ -93,12 +93,9 @@ class PolicyTrainer:
             spec = {key: cfg.normalization[key] for key in fields}
             normalizer = fit_normalizer(
                 dataset, spec, initial_state=pretrained_state,
-                feature_dims=model.normalization_dims,
+                feature_dims=model.normalization_dims, hand_affine=hand_affine,
             )
             print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
-            if hand_affine is not None:
-                normalizer["action"].scale[-model.hand_dim:].copy_(hand_affine["scale"])
-                normalizer["action"].offset[-model.hand_dim:].copy_(hand_affine["offset"])
             model.normalizer = normalizer
             if method == "dexlatent":
                 model.fit_latent_normalizer(dataset)

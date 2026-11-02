@@ -26,7 +26,6 @@ dataset:
   sensor_modalities: ["joint_state", "rgb"]
   rgb_preprocess_size: [240, 240]
   rgb_random_crop_size: [224, 224]
-  rgb_keep_uint8: true
 
   # 配置颜色增强时，训练与评测均使用浮点插值。
   rgb_color_aug:

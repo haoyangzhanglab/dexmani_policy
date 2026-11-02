@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import require_tactile_source
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, require_tactile_source
 from dexmani_policy.common.image_util import preprocess_rgb_eval
 from dexmani_policy.common.io_util import close_resources
 
@@ -52,13 +52,15 @@ class SimRunner:
 
         return {name: buffer[indices] for name, buffer in self.obs_buffer.items()}
 
-    def get_obs_batch(self, device) -> dict[str, torch.Tensor]:
+    def get_obs_batch(self, device, *, normalization_dims) -> dict[str, torch.Tensor]:
         batch = {}
         for name, observation in self.get_stacked_obs().items():
             value = (
                 preprocess_rgb_eval(observation, **self.rgb_preprocessing)
                 if name == "rgb" else observation
             )
+            if name in POINT_CLOUD_FIELDS:
+                value = np.ascontiguousarray(value[..., :normalization_dims[name]])
             dtype = None if name == "rgb" else torch.float32
             batch[name] = torch.as_tensor(value, device=device, dtype=dtype).unsqueeze(0)
         return batch
@@ -100,7 +102,7 @@ class SimRunner:
         task_done_step = None
 
         while True:
-            obs_batch = self.get_obs_batch(device=device)
+            obs_batch = self.get_obs_batch(device=device, normalization_dims=agent.normalization_dims)
             action_chunk = self.predict_action_chunk(
                 obs_batch, agent, inference_steps=inference_steps,
                 action_steps=action_steps, generator=generator,
