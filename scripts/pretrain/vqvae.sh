@@ -1,7 +1,7 @@
 #!/bin/bash
 # DQ-RISE 码本预训练：vqvae.sh [key=value ...]
-# 结束后自动保存所选 best 的 codebook.npz；独立 exporter 仅用于重导出。
-# 同源两阶段传入相同 dataset.split_manifest，主策略仍检查训练回合上限。
+# 默认从 last 导出 codebook.npz；显式 val 时使用 val lookup_mse best。
+# 如需 holdout：dataset.max_train_episodes=100 dataset.val_episodes=20。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

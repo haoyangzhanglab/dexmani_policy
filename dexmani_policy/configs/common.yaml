@@ -12,9 +12,11 @@ dataloader:
 
 dataset:
   seed: 42  # 数据划分与训练 seed 独立。
-  val_ratio: 0.1
+  val_episodes: 0
   max_train_episodes: 100
-  split_manifest: null
+
+normalization:
+  action: limits
 
 ema:
   _target_: dexmani_policy.training.common.optimization.EMA

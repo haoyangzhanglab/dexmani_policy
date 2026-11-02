@@ -1,4 +1,4 @@
-"""Train single-step hand-state quantization using the target DQ-RISE episode split."""
+"""Train single-step hand-state quantization on selected episodes."""
 
 from __future__ import annotations
 
@@ -54,22 +54,24 @@ def prepare_hand_data(cfg):
     buffer = EpisodeStore(cfg.dataset.zarr_path, keys=["action"])
     if buffer["action"].shape[1:] != (19,):
         raise ValueError("VQ pretraining requires action shape [T,19]")
-    train, val, split = split_episodes(
-        buffer, manifest=cfg.dataset.split_manifest, seed=cfg.dataset.seed,
-        val_ratio=cfg.dataset.val_ratio, max_train_episodes=cfg.dataset.max_train_episodes,
+    train, val = split_episodes(
+        buffer.n_episodes, seed=cfg.dataset.seed,
+        val_episodes=cfg.dataset.val_episodes, max_train_episodes=cfg.dataset.max_train_episodes,
     )
     validate_hand_coordinates(buffer.attrs)
 
     train_hand = load_hand_array(buffer, train)
-    val_hand = load_hand_array(buffer, val)
+    val_hand = load_hand_array(buffer, val) if val.any() else None
     normalizer = LinearNormalizer()
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
     cfg.dataset.zarr_path = buffer.path
-    cfg.dataset.split_manifest = split
-    metadata = dict(split_manifest=split)
+    logger.info("VQ episodes: total=%d train=%d val=%d unused=%d; train frames=%d",
+                buffer.n_episodes, train.sum(), val.sum(), (~(train | val)).sum(), len(train_hand))
+    logger.info("Hand normalization: fitted from train episodes only")
     train_hand = normalizer["hand"].normalize(train_hand).numpy()
-    val_hand = normalizer["hand"].normalize(val_hand).numpy()
-    return train_hand, val_hand, normalizer, metadata
+    if val_hand is not None:
+        val_hand = normalizer["hand"].normalize(val_hand).numpy()
+    return train_hand, val_hand, normalizer
 
 
 @torch.no_grad()
@@ -112,11 +114,10 @@ def train(cfg):
     logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
-    train_norm, val_norm, normalizer, split_metadata = prepare_hand_data(cfg)
+    train_norm, val_norm, normalizer = prepare_hand_data(cfg)
     cfg.vq_vae.output_dir = str(output_dir)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
-    val_ds = TensorDataset(torch.from_numpy(val_norm))
     if len(train_ds) < recipe.batch_size:
         raise ValueError("VQ training requires a full batch; reduce vq_vae.batch_size")
     train_loader = DataLoader(
@@ -126,13 +127,14 @@ def train(cfg):
         drop_last=True,
         pin_memory=device.type == "cuda",
     )
-    has_validation = len(val_ds) > 0
-    selection_loader = DataLoader(
-        val_ds if has_validation else train_ds,
-        batch_size=codebook_chunk_size(recipe.codebook_size ** recipe.num_groups, 4096),
-        pin_memory=device.type == "cuda",
-        generator=torch.Generator().manual_seed(recipe.seed),
-    )
+    val_loader = None
+    if val_norm is not None:
+        val_loader = DataLoader(
+            TensorDataset(torch.from_numpy(val_norm)),
+            batch_size=codebook_chunk_size(recipe.codebook_size ** recipe.num_groups, 4096),
+            pin_memory=device.type == "cuda",
+            generator=torch.Generator().manual_seed(recipe.seed),
+        )
     vqvae = HandVQVAE(
         hand_dim=hand_dim,
         latent_dim=recipe.latent_dim,
@@ -160,12 +162,7 @@ def train(cfg):
         optimizer, "cosine", num_warmup_steps=recipe.warmup_steps, num_training_steps=total_steps
     )
 
-    selection_metric = "val_lookup_mse" if has_validation else "train_lookup_mse"
-    split_metadata["selection_metric"] = selection_metric
-    split_metadata["selection_split"] = (
-        "validation" if has_validation else "train_no_holdout"
-    )
-    logger.info("VQ selection: %s (%s)", selection_metric, split_metadata["selection_split"])
+    logger.info("VQ export: %s", "validation lookup_mse best" if val_loader is not None else "last checkpoint")
     best_lookup_mse = float("inf")
 
     for epoch in range(1, recipe.num_epochs + 1):
@@ -200,15 +197,15 @@ def train(cfg):
         train_total = (
             recipe.enc_loss_weight * train_metrics["enc"] + recipe.vq_loss_weight * train_metrics["vq"]
         )
-        selection_metrics = evaluate_vq(vqvae, selection_loader, device)
         metrics = {
             "train_enc": train_metrics["enc"],
             "train_vq": train_metrics["vq"],
             "train_mse": train_metrics["mse"],
             "train_total": train_total,
-            selection_metric: selection_metrics["lookup_mse"],
             "lr": lr,
         }
+        if val_loader is not None:
+            metrics["val_lookup_mse"] = evaluate_vq(vqvae, val_loader, device)["lookup_mse"]
         logger.info(
             "epoch %4d | lr %.2e | train recon %.5f commitment %.5f recon_mse %.5f",
             epoch,
@@ -217,16 +214,16 @@ def train(cfg):
             metrics["train_vq"],
             metrics["train_mse"],
         )
-        logger.info("%s %.7f", selection_metric, metrics[selection_metric])
+        if val_loader is not None:
+            logger.info("val_lookup_mse %.7f", metrics["val_lookup_mse"])
         with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps({"epoch": epoch, **metrics}, allow_nan=False) + "\n")
 
         checkpoint_paths = []
         if epoch % recipe.save_epochs == 0 or epoch == recipe.num_epochs:
             checkpoint_paths.append(output_dir / f"vqvae_hand_epoch={epoch:04d}.pt")
-        lookup_mse = metrics[selection_metric]
-        if lookup_mse < best_lookup_mse:
-            best_lookup_mse = lookup_mse
+        if val_loader is not None and metrics["val_lookup_mse"] < best_lookup_mse:
+            best_lookup_mse = metrics["val_lookup_mse"]
             checkpoint_paths.append(output_dir / "vqvae_hand_best.pt")
         if epoch == recipe.num_epochs:
             checkpoint_paths.append(output_dir / "vqvae_hand_last.pt")
@@ -236,7 +233,6 @@ def train(cfg):
                 "model_state_dict": vqvae.state_dict(),
                 "normalizer_state_dict": normalizer.state_dict(),
                 "model_config": vqvae.model_config,
-                "split_metadata": split_metadata,
                 "metrics": metrics,
             }
             for checkpoint_path in checkpoint_paths:
@@ -244,7 +240,7 @@ def train(cfg):
                     torch.save(payload, temporary)
                 logger.info("checkpoint saved: %s", checkpoint_path)
 
-    selected_path = output_dir / "vqvae_hand_best.pt"
+    selected_path = output_dir / ("vqvae_hand_best.pt" if val_loader is not None else "vqvae_hand_last.pt")
     codebook_path = output_dir / "codebook.npz"
     export_codebook(selected_path, codebook_path, device="cpu")
     print(f"Saved selected runtime codebook: {codebook_path}")

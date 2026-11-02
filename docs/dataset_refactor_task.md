@@ -1,6 +1,6 @@
 # 数据集模块精简重构任务书
 
-> 状态：待实施。本文是实现任务，不表示下列改动已经完成。
+> 状态：已实施。已完成 CPU 与 CUDA 合成数据验收；未执行真实数据长训。实际验证与产物说明见第 12.5 节。
 >
 > 仓库：haoyangzhanglab/dexmani_policy  
 > 编写日期：2026-11-02  
@@ -38,12 +38,12 @@
 
 ### 2.1 必须完成
 
-- [ ] 统一 episode 划分语义及默认值，更新主策略与所有独立预训练入口。
-- [ ] 删除 manifest、数据身份比较、自动 trial 分组以及附属配置、CLI、测试和文档。
-- [ ] 明确 normalizer 的数据范围、所有权和预训练继承行为。
-- [ ] 简化 AFRO/CordViP 的可选验证与 DQ-RISE 码本预训练、导出、加载。
-- [ ] 移除妨碍正常实验的重复或流程性检查；保持必要的数学、时序和几何约束。
-- [ ] 同步运行脚本、说明文档、相关检查工具，并完成第 12 节的验收。
+- [x] 统一 episode 划分语义及默认值，更新主策略与所有独立预训练入口。
+- [x] 删除 manifest、数据身份比较、自动 trial 分组以及附属配置、CLI、测试和文档。
+- [x] 明确 normalizer 的数据范围、所有权和预训练继承行为。
+- [x] 简化 AFRO/CordViP 的可选验证与 DQ-RISE 码本预训练、导出、加载。
+- [x] 移除妨碍正常实验的重复或流程性检查；保持必要的数学、时序和几何约束。
+- [x] 同步运行脚本、说明文档、相关检查工具，并完成第 12 节的验收。
 
 ### 2.2 本轮不扩展
 
@@ -485,18 +485,81 @@ agent_checks.py 已有 check_sampler、check_codebook、check_codebook_pipeline 
 
 ### 12.4 最终完成清单
 
-- [ ] 当前配置、构造参数、脚本与文档使用同一套 val_episodes 语义。
-- [ ] train / val / unused 三者准确，主策略默认用满实际可用的最多 100 条训练数据。
-- [ ] manifest、自动 trial 分组和跨阶段集合比较退出运行路径。
-- [ ] 数据统计 train-only；继承参数与 identity 正确；resume 不重新拟合。
-- [ ] 默认预训练不依赖 val；VQ 无 train-best 回退；任意完整 checkpoint 可导出。
-- [ ] 运行时码表只依赖实际表和 affine，不依赖 VQ 分组或选模身份。
-- [ ] 原有时序、辅助目标、接触标签、几何与动作含义未被“统一化”改变。
-- [ ] 必要检查集中，新增抽象/配置/回退没有超过已证明的需求。
-- [ ] 相关测试和短训结果如实记录；缺少依赖或未验证项明确列出。
-- [ ] 最终 diff 无无关模型重构、数据改写或用户改动丢失。
+- [x] 当前配置、构造参数、脚本与文档使用同一套 val_episodes 语义。
+- [x] train / val / unused 三者准确，主策略默认用满实际可用的最多 100 条训练数据。
+- [x] manifest、自动 trial 分组和跨阶段集合比较退出运行路径。
+- [x] 数据统计 train-only；继承参数与 identity 正确；resume 不重新拟合。
+- [x] 默认预训练不依赖 val；VQ 无 train-best 回退；任意完整 checkpoint 可导出。
+- [x] 运行时码表只依赖实际表和 affine，不依赖 VQ 分组或选模身份。
+- [x] 原有时序、辅助目标、接触标签、几何与动作含义未被“统一化”改变。
+- [x] 必要检查集中，新增抽象/配置/回退没有超过已证明的需求。
+- [x] 相关测试和短训结果如实记录；缺少依赖或未验证项明确列出。
+- [x] 最终 diff 无无关模型重构、数据改写或用户改动丢失。
 
 完成后用中文报告：改了什么、删了什么、保留了什么、运行了哪些检查及结果、是否有旧产物需要重新导出。不承诺未经实验验证的成功率或训练速度收益。
+
+### 12.5 本次实际验证（2026-11-02）
+
+使用现有 `policy` 环境在 CPU 上运行，下列检查均通过：
+
+```bash
+conda activate policy
+python -m compileall -q dexmani_policy
+python -m dexmani_policy.test_tools.dataset_checks
+python -m dexmani_policy.test_tools.pretrain_checks --device cpu
+python - <<'PY_CHECKS'
+import torch
+from dexmani_policy.test_tools.agent_checks import (
+    check_sampler, check_vq, check_codebook, check_vq_training, check_codebook_pipeline,
+)
+torch.set_num_threads(2)
+for check in (check_sampler, check_vq, check_codebook, check_vq_training, check_codebook_pipeline):
+    check(torch.device("cpu"))
+PY_CHECKS
+git diff --check
+```
+
+`dataset_checks` 覆盖数量例子、数据 seed 独立、train/val/unused 统计隔离、窗口和增强不污染统计、已有 affine 数学与多维触觉、identity 零读取、R3D 和未来触觉源行。AFRO/CordViP 主策略及 DQ-RISE 均实际运行 2 次 fresh updates 与 1 次 resume update；继承字段不重新拟合，删除外部 encoder/NPZ 后仍恢复。DQ fresh 单次读取码表并保存实际 K。
+
+`pretrain_checks` 覆盖接触预处理的串行/spawn 一致性、失败清理、AFRO stride、CordViP 接触对齐、两方法 train-only、验证尾批加权、teacher 不更新、完整预训练恢复及导出。VQ 两分支各短训 2 epochs，验证无 val 时没有 selection loader/pass、默认 last、有 val 才选 best，以及不带 epoch/选模信息的完整 checkpoint 导出。码表检查包含 K=1/3/256/512、非 identity affine、FP32 距离、half-up decode、DQ loss/backward/推理和删除外部 NPZ 后的 raw/EMA 恢复。
+
+最初 sandbox 内的 CUDA 检测返回不可用；经用户授权，在 sandbox 外确认 RTX 4090 可用（Torch 2.4.1+cu124），并补跑以下 CUDA 检查，全部退出 0：
+
+```bash
+python -m dexmani_policy.test_tools.dataset_checks --device cuda:0
+python -m dexmani_policy.test_tools.pretrain_checks --device cuda:0
+python - <<'PY_CUDA_CHECKS'
+import torch
+from dexmani_policy.test_tools.agent_checks import (
+    check_sampler, check_vq, check_codebook, check_vq_training, check_codebook_pipeline,
+)
+torch.set_num_threads(2)
+for check in (check_sampler, check_vq, check_codebook, check_vq_training, check_codebook_pipeline):
+    check(torch.device("cuda:0"))
+PY_CUDA_CHECKS
+```
+
+CUDA 检查实际覆盖 AFRO/CordViP 预训练的 train-only、验证、严格恢复与导出，以及三种主策略各 2 次 fresh updates 和 1 次 resume update。VQ 有/无 val 两分支各在 CUDA 上短训 2 epochs；码表、BF16 loss/backward、推理及删除 NPZ 后的 raw/EMA 恢复均通过。采样、统计和离线接触预处理仍在 CPU 执行。为保证设备选择真实生效，`dataset_checks` 增加 `--device`，`check_vq_training(device)` 消除原有硬编码 CPU。
+
+未执行真实数据完整训练、rollout 或性能 profiling；以上结果不代表这些验证已通过。Store/Sampler 读取主体保留，V=0 的额外训练集选模遍历已删除，不报告推测加速倍数。
+
+当前 encoder 独立导出与恢复命令见 [观测预训练](观测预训练.md#续训与评测)；完整 VQ checkpoint 的三数组码表导出命令见 [手部动作表示](手部动作表示.md#dq-rise-码本)。
+
+### 12.6 后续系统审查与收敛
+
+沿 Dataset、训练装配、产物导入、恢复、部署和仿真调用链完成复核，并直接清理以下问题：
+
+- `fit_normalizer` 依赖已加载 affine 和最终模式，删除重复的继承字段参数；已有 affine 优先于 identity 默认值，缺失的必需配置在训练装配处明确失败。
+- Dataset 声明但模型未消费的字段不要求归一化配置、不读取统计，也不进入模型的 `normalization_dims`。数据描述用 `field_dims` 表示声明字段维度；部署与仿真从保存的模型维度选择实际输入，避免要求未消费的传感器。
+- DQ 初始化直接安装已验证码表，不再传入/返回同一 affine 或复制内部码表 buffers。`num_codes` 为必需构造参数，由 fresh 导入时取得并保存；VQ 删除不可达空 val 帧检查，验证 loader 统一命名为 `val_loader`。
+- AFRO 在现有 Dataset 形状边界拒绝空点云，避免延迟到 PointNet 内部报错。保留真实坐标、有限性、动作布局、原子保存及资源清理约束。
+- 操作文档仅描述当前接口，移除旧产物迁移和兼容流程说明。当前数据运行路径没有 SHA-256、来源身份或格式兼容协议。
+
+当前版本的 `dataset_checks`、`pretrain_checks` 及 sampler/VQ/codebook 相关检查在 CPU 与 RTX 4090 上均通过。新增回归覆盖未声明归一化的额外观测、预训练输入模式由产物补齐、必需 action 配置缺失、公开部署 Runtime 仅凭消费字段完成预测，以及删除外部产物后的主策略恢复；AFRO 空点云负例单独验证通过。
+
+`compileall` 与 `git diff --check` 通过。21 个相关 Python 文件通过局部 mypy 检查，使用 `--check-untyped-defs --follow-imports=skip --ignore-missing-imports`，不表示第三方依赖已完整类型检查。通过 `pip wheel --no-build-isolation --no-deps --no-index` 离线构建，并确认 wheel 包含当前检查模块、部署模块和预训练 YAML。
+
+本轮未执行真实数据长训、闭环 rollout 或性能 profiling，不报告未经测量的性能收益。
 
 ## 13. 研究依据与采用范围
 

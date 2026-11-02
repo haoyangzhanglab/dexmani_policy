@@ -11,6 +11,9 @@ n_action_steps: 4
 interaction_horizon: 4
 
 normalization:
+  point_cloud: identity
+  eef_pose: identity
+  fingertip_xyz: identity
   joint_state: limits
 
 dataloader:

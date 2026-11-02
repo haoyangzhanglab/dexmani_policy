@@ -12,7 +12,14 @@ n_action_steps: 8
 
 initialization:
   rgb: data/pretrained/dinov2-small
-  codebook: null  # 新训练须提供与实际 train split 匹配的码本。
+  codebook: null  # 新训练提供有序姿态表及其 hand affine。
+
+normalization:
+  point_cloud: identity
+  joint_state: limits
+  rgb: identity
+  camera_intrinsic: identity
+  camera_extrinsic: identity
 
 dataloader:
   batch_size: 128
@@ -29,8 +36,6 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.dqrise.DQRISE
-  codebook_num_groups: 2
-  codebook_size: 4
 
   pc_dim: 3
   state_dim: 19

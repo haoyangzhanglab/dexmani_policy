@@ -16,6 +16,9 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.policies.afro import AFROEncoder
 from dexmani_policy.agents.policies.cordvip import CordViPEncoder
 from dexmani_policy.common.pytorch_util import get_rng_state
+from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
+from dexmani_policy.datasets.pretrain.afro import AFROPretrainDataset
+from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
 from dexmani_policy.datasets.preprocess.contact_map import generate
 from dexmani_policy.training.common.config import load_policy_config, validate_config
 from dexmani_policy.training.pretrain.obs import common
@@ -125,7 +128,7 @@ def check_training(root, method, device=torch.device("cpu")):
     source = root / ("source.zarr" if method == "afro" else "parallel.zarr")
     overrides = [
         f"zarr_path={source}", "dataset.horizon=3", "dataset.pad_before=0", "dataset.pad_after=0",
-        "dataset.val_ratio=0.34", "dataloader.batch_size=4", "dataloader.num_workers=0",
+        "dataset.val_episodes=1", "dataloader.batch_size=4", "dataloader.num_workers=0",
         "dataloader.pin_memory=false", f"training.device={device}", "training.lr_warmup_steps=0",
         "training.val_every_epochs=1", "training.loop.log_interval_steps=1",
     ]
@@ -156,9 +159,13 @@ def check_training(root, method, device=torch.device("cpu")):
     assert full["global_step"] == updates
     records = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
     assert any("val/loss" in record for record in records)
-    common.export_encoder(resumed["model_state"], root / "export.pt")
+    common.export_encoder(resumed["model_state"], cfg.normalization, root / "export.pt")
     package = torch.load(root / "export.pt", weights_only=True)
-    torch.testing.assert_close(package, torch.load(directory / "encoder.pt", weights_only=True), rtol=0, atol=0)
+    assert package["normalization"] == dict(cfg.normalization)
+    saved = torch.load(directory / "encoder.pt", weights_only=True)
+    assert package["normalization"] == saved["normalization"]
+    for key in ("encoder_state", "normalizer_state"):
+        torch.testing.assert_close(package[key], saved[key], rtol=0, atol=0)
     encoder = AFROEncoder(2).pc_encoder if method == "afro" else CordViPEncoder(2).interaction_encoder
     encoder.load_state_dict(package["encoder_state"], strict=True)
 
@@ -168,6 +175,10 @@ def check_training(root, method, device=torch.device("cpu")):
     model = AFRO(cfg.normalization) if method == "afro" else CordViP(cfg.normalization, n_obs_steps=2, **cfg.model)
     model.load_state_dict(resumed["model_state"], strict=True)
     model.to(device)
+    teacher = copy.deepcopy(model.teacher.state_dict()) if method == "afro" else None
+    common.evaluate(model, dataset, 4, device, stop_requested=lambda: False)
+    if teacher is not None:
+        torch.testing.assert_close(teacher, model.teacher.state_dict(), rtol=0, atol=0)
     state = get_rng_state(device)
     with patch.object(model, "forward", side_effect=RuntimeError("validation failure")):
         try:
@@ -193,6 +204,83 @@ def check_training(root, method, device=torch.device("cpu")):
         torch.testing.assert_close(state[key], actual_rng[key], rtol=0, atol=0)
 
 
+def check_train_only(root, method, device=torch.device("cpu")):
+    source = root / ("source.zarr" if method == "afro" else "parallel.zarr")
+    overrides = [
+        f"zarr_path={source}", "dataset.horizon=3", "dataset.pad_before=0", "dataset.pad_after=0",
+        "dataloader.batch_size=4", "dataloader.num_workers=0", "dataloader.pin_memory=false",
+        f"training.device={device}", "training.lr_warmup_steps=0", "training.val_every_epochs=0",
+    ]
+    if method == "afro":
+        overrides += ["dataset.frame_stride=1", "training.num_epochs=1", "normalization.point_cloud=identity"]
+    else:
+        overrides += [
+            "n_obs_steps=2", "training.loop.total_train_steps=2",
+            "normalization.hand_pointcloud=identity", "normalization.object_pointcloud=identity",
+            "normalization.joint_state=identity",
+        ]
+    cfg = load_policy_config(f"pretrain/obs/{method}", overrides)
+    cfg.workspace.output_dir = str(root / method / "train_only")
+    assert cfg.dataset.val_episodes == 0
+    with (
+        patch.object(ObservationPretrainDataset, "get_validation_dataset", side_effect=AssertionError("Built val view")),
+        patch.object(ObservationPretrainDataset, "iter_normalization_data", side_effect=AssertionError("Read identity stats")),
+        patch.object(common, "evaluate", side_effect=AssertionError("Evaluated without val")),
+    ):
+        common.train(method, cfg, max_updates=1)
+    package = torch.load(Path(cfg.workspace.output_dir) / "encoder.pt", weights_only=True)
+    assert package["normalizer_state"] == {}
+    assert all(mode == "identity" for mode in package["normalization"].values())
+    records = [json.loads(line) for line in (Path(cfg.workspace.output_dir) / "metrics.jsonl").read_text().splitlines()]
+    assert all(not any(key.startswith("val/") for key in record) for record in records)
+
+
+def check_pretrain_samples(root):
+    path = root / "points_only.zarr"
+    source = zarr.open_group(str(path), mode="w")
+    source.create_dataset("meta/episode_ends", data=np.array([5, 6]))
+    points = np.arange(6 * 2 * 6, dtype=np.float32).reshape(6, 2, 6)
+    source.create_dataset("data/point_cloud", data=points)
+    dataset = AFROPretrainDataset(path, frame_stride=2, horizon=5, pad_after=0, seed=0, val_episodes=1)
+    assert dataset.episode_store.keys() == ("point_cloud",)
+    with patch.object(dataset.episode_store, "read", wraps=dataset.episode_store.read) as read:
+        sample = dataset[0]["obs"]["point_cloud"]
+    np.testing.assert_array_equal(sample, points[[0, 2, 4], :, :3])
+    np.testing.assert_array_equal(read.call_args.args[1], [0, 2, 4])
+    try:
+        dataset.get_validation_dataset()
+    except ValueError as error:
+        assert "validation windows" in str(error)
+    else:
+        raise AssertionError("Explicit val without windows was accepted")
+
+    dataset = CordViPPretrainDataset(
+        root / "parallel.zarr", horizon=5, obs_horizon=2, pad_before=0, pad_after=0, val_episodes=1,
+    )
+    sample = dataset[0]
+    rows = dataset.sampler.sample_source_rows(0)[:2]
+    for key in dataset.sensor_modalities:
+        columns = dataset.normalization_fields[key]
+        np.testing.assert_array_equal(sample["obs"][key], dataset.episode_store.read(key, rows, columns=columns))
+    np.testing.assert_array_equal(sample["contact_map"], dataset.episode_store.read("contact_map", rows))
+    assert "contact_map" not in sample["obs"]
+    validation = dataset.get_validation_dataset()
+    assert validation.episode_store is dataset.episode_store and not validation.training
+
+
+def check_validation_weighting(device):
+    class MeanModel(torch.nn.Module):
+        def forward(self, batch):
+            value = batch["obs"]["point_cloud"].mean()
+            return value, {"value": value}
+
+    model = MeanModel().to(device).train()
+    dataset = [{"obs": {"point_cloud": torch.tensor([value])}} for value in (1.0, 2.0, 9.0)]
+    metrics = common.evaluate(model, dataset, 2, device, stop_requested=lambda: False)
+    torch.testing.assert_close(metrics["val/value"], torch.tensor(4.0, device=device, dtype=torch.float64))
+    assert model.training
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu", type=torch.device)
@@ -200,14 +288,18 @@ def main():
     torch.set_num_threads(2)
     check_tactile_configs()
     check_afro_directions(args.device)
+    check_validation_weighting(args.device)
     print("PASS tactile configs and AFRO bidirectional loss/gradients", flush=True)
     with tempfile.TemporaryDirectory(prefix="dexmani-pretrain-checks-") as directory:
         root = Path(directory)
         check_contact_data(root)
         print("PASS serial/spawn preprocessing and failure cleanup", flush=True)
+        check_pretrain_samples(root)
+        print("PASS AFRO stride and CordViP source-row/contact alignment", flush=True)
         for method in ("afro", "cordvip"):
+            check_train_only(root, method, args.device)
             check_training(root, method, args.device)
-            print(f"PASS {method} resume, validation and export", flush=True)
+            print(f"PASS {method} train-only, resume, validation and export", flush=True)
 
 
 if __name__ == "__main__":

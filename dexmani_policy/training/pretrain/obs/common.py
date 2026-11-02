@@ -68,7 +68,7 @@ def load_run(method):
     return cfg, checkpoint, args.max_updates
 
 
-def export_encoder(state, output_path):
+def export_encoder(state, normalization, output_path):
     payload = {
         f"{name}_state": {
             key.removeprefix(f"{name}."): value.detach().cpu()
@@ -76,6 +76,7 @@ def export_encoder(state, output_path):
         }
         for name in ("encoder", "normalizer")
     }
+    payload["normalization"] = dict(normalization)
     if not payload["encoder_state"]:
         raise ValueError("Checkpoint has no encoder.* parameters")
     output_path = Path(output_path)
@@ -131,7 +132,6 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
 def train(method, cfg, checkpoint=None, max_updates=None):
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
-    positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
     positive_int(cfg.training.loop.log_interval_steps, "training.loop.log_interval_steps")
     is_afro = method == "afro"
     if is_afro:
@@ -148,7 +148,12 @@ def train(method, cfg, checkpoint=None, max_updates=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    cfg.dataset.split_manifest = dataset.split_manifest
+    print(f"[Dataset] {dataset.training_summary()}")
+    validation = None
+    if dataset.val_mask.any():
+        validation = dataset.get_validation_dataset()
+        positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
+        print(f"[Dataset] val windows={len(validation):,}")
     loader = build_train_loader(cfg, dataset)
     batches_per_epoch = loader.batch_sampler.batches_per_epoch
     accumulation = cfg.training.loop.gradient_accumulation_steps
@@ -168,7 +173,6 @@ def train(method, cfg, checkpoint=None, max_updates=None):
             dataset, cfg.normalization,
             feature_dims={key: field.scale.numel() for key, field in model.normalizer.fields.items()},
         )
-    validation = dataset.get_validation_dataset()
     device = torch.device(cfg.training.device)
     model.to(device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
@@ -253,9 +257,9 @@ def train(method, cfg, checkpoint=None, max_updates=None):
                 if stop_requested:
                     break
                 if (
-                    epoch > current_epoch
+                    validation is not None
+                    and epoch > current_epoch
                     and epoch % cfg.training.val_every_epochs == 0
-                    and validation is not None
                 ):
                     metrics = evaluate(
                         model, validation, cfg.dataloader.batch_size, device,
@@ -270,7 +274,7 @@ def train(method, cfg, checkpoint=None, max_updates=None):
                 ):
                     save_run(model, optimizer, scheduler, cfg, step)
             save_run(model, optimizer, scheduler, cfg, step)
-            export_encoder(model.state_dict(), Path(cfg.workspace.output_dir) / "encoder.pt")
+            export_encoder(model.state_dict(), cfg.normalization, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[{type(model).__name__}] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
         finally:
             close_resources(lambda: close_data_loader(loader, iterator), logger.close)
@@ -282,7 +286,7 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    export_encoder(checkpoint["model_state"], args.output)
+    export_encoder(checkpoint["model_state"], checkpoint["effective_config"]["normalization"], args.output)
 
 
 if __name__ == "__main__":

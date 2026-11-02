@@ -6,13 +6,13 @@ from dexmani_policy.datasets.split import split_episodes
 
 
 class ObservationPretrainDataset(Dataset):
-    def __init__(self, episode_store, *, normalization_fields, seed, val_ratio,
-                 max_train_episodes, split_manifest):
+    def __init__(self, episode_store, *, normalization_fields, seed, val_episodes,
+                 max_train_episodes):
         self.episode_store = episode_store
         self.normalization_fields = normalization_fields
-        self.train_mask, self.val_mask, self.split_manifest = split_episodes(
-            episode_store, manifest=split_manifest, seed=seed,
-            val_ratio=val_ratio, max_train_episodes=max_train_episodes,
+        self.train_mask, self.val_mask = split_episodes(
+            episode_store.n_episodes, seed=seed,
+            val_episodes=val_episodes, max_train_episodes=max_train_episodes,
         )
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
@@ -21,6 +21,14 @@ class ObservationPretrainDataset(Dataset):
 
     def __len__(self):
         return len(self.sampler)
+
+    def training_summary(self):
+        return (
+            f"{self.episode_store.path}: total episodes={self.episode_store.n_episodes:,}, "
+            f"train={int(self.train_mask.sum()):,}, val={int(self.val_mask.sum()):,}, "
+            f"unused={int((~(self.train_mask | self.val_mask)).sum()):,}, "
+            f"train windows={len(self):,}"
+        )
 
     def build_sampler(self, mask):
         raise NotImplementedError
@@ -39,4 +47,6 @@ class ObservationPretrainDataset(Dataset):
         result = copy.copy(self)
         result.training = False
         result.sampler = self.build_sampler(self.val_mask)
-        return result if len(result) else None
+        if not len(result):
+            raise ValueError(f"No {type(self).__name__} validation windows in selected val episodes")
+        return result

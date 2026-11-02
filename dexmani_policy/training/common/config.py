@@ -35,7 +35,7 @@ def load_policy_config(config, overrides=()):
 
 
 def assemble_policy_config(cfg):
-    """Derive fixed recipe fields; YAML only exposes research choices."""
+    """Derive action layouts and sampling windows from the recipe."""
     if "policy_name" not in cfg:
         return cfg
     with open_dict(cfg):
@@ -46,23 +46,6 @@ def assemble_policy_config(cfg):
         auxiliary = method == "r3d" and cfg.use_aux_ee
         if auxiliary and action_key != "action":
             raise ValueError("R3D auxiliary targets require joint action")
-
-        fixed = {"action": "limits"}
-        if "rgb" in cfg.dataset.sensor_modalities:
-            fixed["rgb"] = "identity"
-        if method == "r3d":
-            fixed["point_cloud"] = "limits"
-        if method in {"sat", "dqrise", "dexlatent", "adaptac", "interact-dex"}:
-            fixed["point_cloud"] = "identity"
-        if method in {"sat", "dqrise", "dexlatent"}:
-            fixed.update(joint_state="limits", camera_intrinsic="identity", camera_extrinsic="identity")
-        if method == "interact-dex":
-            fixed.update(eef_pose="identity", fingertip_xyz="identity")
-        choices = cfg.get("normalization", {})
-        overlap = fixed.keys() & choices.keys()
-        if overlap:
-            raise ValueError(f"Normalization fields are fixed by the recipe; remove inputs: {sorted(overlap)}")
-        cfg.normalization = {**choices, **fixed}
 
         cfg.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
         for key in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
@@ -115,15 +98,24 @@ def prepare_training(cfg):
 def validate_config(cfg):
     spec = cfg.normalization
     expected = set(cfg.dataset.sensor_modalities) | {"action"}
-    if spec.keys() != expected:
-        raise ValueError(
-            f"Normalization field mismatch: missing={sorted(expected - spec.keys())}, "
-            f"extra={sorted(spec.keys() - expected)}"
-        )
+    extra = spec.keys() - expected
+    if extra:
+        raise ValueError(f"Normalization fields are not present in dataset: {sorted(extra)}")
     for key, mode in spec.items():
         allowed = {"rms", "max_abs"} if key in TACTILE_FEATURE_SHAPES else {"identity", "limits", "gaussian", "rms", "max_abs"}
         if mode not in allowed:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected {sorted(allowed)}")
+
+    physical = set()
+    if cfg.policy_name in {"sat", "dqrise", "dexlatent"}:
+        physical = {"point_cloud", "camera_intrinsic", "camera_extrinsic"}
+    elif cfg.policy_name == "interact-dex":
+        physical = {"point_cloud", "eef_pose", "fingertip_xyz"}
+    if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
+        physical.add("rgb")
+    for key in physical:
+        if key in spec and spec[key] != "identity":
+            raise ValueError(f"{key} must use identity for image preprocessing or physical geometry")
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
@@ -145,7 +137,7 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     metadata = model.inference_metadata
     if checkpoint is not None:
-        if checkpoint.effective_config["normalization_dims"] != data_description["normalization_dims"]:
+        if checkpoint.effective_config["normalization_dims"] != model.normalization_dims:
             raise ValueError("Resume data/model mismatch: normalization_dims")
         for key in ("action_start_index", "control_action_dim"):
             if checkpoint.effective_config["policy_metadata"][key] != metadata[key]:
@@ -153,9 +145,8 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
 
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
-        effective.normalization_dims = data_description["normalization_dims"]
+        effective.normalization_dims = model.normalization_dims
         effective.normalizer_shapes = {key: list(field.scale.shape) for key, field in model.normalizer.fields.items()}
-        effective.dataset.split_manifest = data_description["split_manifest"]
         effective.policy_metadata = metadata
         effective.deployment_metadata = data_description["deployment_metadata"]
         if checkpoint is None:

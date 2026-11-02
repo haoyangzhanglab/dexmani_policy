@@ -105,6 +105,8 @@ class Policy(nn.Module):
     def _preprocess_obs(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
+            if key not in self.consumed_observation_fields:
+                continue
             if key in POINT_CLOUD_FIELDS:
                 value = value[..., : self.normalization_dims[key]]
             if key in self.normalizer.fields:

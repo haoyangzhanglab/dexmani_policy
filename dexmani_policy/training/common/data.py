@@ -8,7 +8,9 @@ from torch.utils.data import BatchSampler, DataLoader, RandomSampler, Sequential
 from dexmani_policy.common.config import (
     FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS,
 )
-from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes, validate_normalizer_state
+from dexmani_policy.common.normalizer import (
+    FieldNormalizer, LinearNormalizer, normalization_feature_shapes, validate_normalizer_state,
+)
 from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 
 
@@ -22,13 +24,19 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
     expected_shapes = normalization_feature_shapes(feature_dims)
     initial_state = {} if initial_state is None else initial_state
     normalizer = LinearNormalizer({
-        key: expected_shapes[key] for key, mode in spec.items()
-        if mode != "identity" and f"fields.{key}.scale" in initial_state
+        key: expected_shapes[key] for key in spec
+        if any(f"fields.{key}.{part}" in initial_state for part in ("scale", "offset"))
     })
     normalizer.load_state_dict(initial_state, strict=True)
     validate_normalizer_state(normalizer)
     for key, mode in spec.items():
-        if mode == "identity" or key in normalizer.fields:
+        if key in normalizer.fields:
+            continue
+        if mode == "identity":
+            if key == "action":
+                # Action consumers always use an affine, including the identity.
+                shape = expected_shapes[key]
+                normalizer.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
             continue
         normalizer.fit_field(
             key, dataset.iter_normalization_data(key),
@@ -45,13 +53,11 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
 
 
 def build_dataset(cfg):
-    """Admit one train/val source before choosing the model's affine initialization."""
-    spec = cfg.normalization
+    """Construct training samples and describe their stored field dimensions."""
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
     dims = {
-        key: int(buffer[key].shape[-1]) for key, mode in spec.items()
-        if key != "action" and (mode != "identity" or key in POINT_CLOUD_FIELDS)
+        key: int(buffer[key].shape[-1]) for key in dataset.sensor_modalities
     }
     for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
@@ -62,7 +68,7 @@ def build_dataset(cfg):
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     description = {
-        "normalization_dims": dims, "split_manifest": dataset.split_manifest,
+        "field_dims": dims,
         "action_key": dataset.action_key, "attrs": buffer.attrs,
         "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],

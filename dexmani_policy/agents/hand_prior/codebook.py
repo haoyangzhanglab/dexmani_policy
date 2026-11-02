@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -35,18 +34,12 @@ class HandStateCodebook(nn.Module):
     def __init__(
         self,
         hand_dim: int,
-        num_groups: int = 2,
-        codebook_size: int = 4,
+        num_codes: int,
     ) -> None:
         super().__init__()
         self.hand_dim = positive_int(hand_dim, "hand_dim")
-        self.num_groups = positive_int(num_groups, "num_groups")
-        self.codebook_size = positive_int(codebook_size, "codebook_size")
-        self.register_buffer("sorted_hand_poses", torch.empty(self.num_codes, self.hand_dim))
-
-    @property
-    def num_codes(self) -> int:
-        return self.codebook_size**self.num_groups
+        self.num_codes = positive_int(num_codes, "num_codes")
+        self.register_buffer("sorted_hand_poses", torch.empty(self.num_codes, self.hand_dim, dtype=torch.float32))
 
     @torch.no_grad()
     def set_prototypes(self, poses: Tensor) -> None:
@@ -81,19 +74,16 @@ class HandStateCodebook(nn.Module):
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}"
 
 
-def load_codebook(path: str | Path, codebook: HandStateCodebook) -> tuple[dict, dict]:
+def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict]:
     with np.load(Path(path).expanduser(), allow_pickle=False) as data:
-        if data["pose_space"].item() != "normalized":
-            raise ValueError("Hand codebook requires normalized poses; regenerate the codebook")
-        dimensions = tuple(data[name].item() for name in ("hand_dim", "num_groups", "codebook_size"))
-        if dimensions != (codebook.hand_dim, codebook.num_groups, codebook.codebook_size):
-            raise ValueError(f"Hand codebook dimensions do not match Policy: {dimensions}")
         poses = torch.from_numpy(data["sorted_hand_poses"])
         affine = {
             key: torch.from_numpy(data[f"hand_normalizer_{key}"])
             for key in ("scale", "offset")
         }
-        metadata = json.loads(data["metadata_json"].item())
+    if poses.ndim != 2 or poses.shape[1] != 12:
+        raise ValueError("Hand codebook requires sorted_hand_poses shape [K,12]")
+    codebook = HandStateCodebook(hand_dim=poses.shape[1], num_codes=poses.shape[0])
     for key, values in affine.items():
         if values.shape != (codebook.hand_dim,) or values.is_complex() or values.dtype == torch.bool:
             raise ValueError(f"Hand normalizer {key} requires {codebook.hand_dim} real values")
@@ -101,4 +91,4 @@ def load_codebook(path: str | Path, codebook: HandStateCodebook) -> tuple[dict, 
     if any(not torch.isfinite(value).all() for value in affine.values()) or (affine["scale"] == 0).any():
         raise ValueError("Hand normalizer must be finite and invertible in runtime dtype")
     codebook.set_prototypes(poses)
-    return metadata, affine
+    return codebook, affine

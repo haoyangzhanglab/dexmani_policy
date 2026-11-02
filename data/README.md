@@ -38,6 +38,12 @@ data/
 
 DQ-RISE 的码本仍由项目原有预训练流程生成，下载 DINO 不会准备码本。自定义 RGB 型号沿用配置中的初始化来源。
 
+### 项目内预训练产物
+
+AFRO/CordViP 的 `encoder.pt` 保存在线 encoder、输入 affine 和归一化模式，identity 也随模块继承；`resume.pt` 另存完整预训练恢复状态。可从完整 `resume.pt` 独立导出 encoder，见 [观测预训练](../docs/观测预训练.md)。完整策略 checkpoint 内嵌 encoder 和最终 normalizer，恢复无需原 encoder 文件。
+
+DQ-RISE 的 `codebook.npz` 只需 `sorted_hand_poses [K,12]`、`hand_normalizer_scale [12]`、`hand_normalizer_offset [12]`，姿态为 normalized FP32 坐标。运行时不依赖预训练分组或数据划分。默认 VQ 从 last 导出，显式 val 时从 lookup_mse best 导出；任意完整 VQ checkpoint 均可重导出，命令见 [手部动作表示](../docs/手部动作表示.md)。fresh 策略保存实际 `num_codes`，完整策略恢复无需原 NPZ。
+
 ### Uni3D（R3D 策略的 3D 点云编码器）
 
 - **来源**: [eddie-cui/r3d-weights](https://huggingface.co/eddie-cui/r3d-weights) @ HuggingFace Hub
@@ -76,5 +82,7 @@ DQ-RISE 的码本仍由项目原有预训练流程生成，下载 DINO 不会准
 原因：训练数据体积大且常跨磁盘 symlink，独立目录便于管理。
 
 格式: `robot_data/<task_name>.zarr`
+
+主策略默认 `dataset.seed=42`、`max_train_episodes=100`、`val_episodes=0`；独立预训练默认训练上限为 null、验证数量为 0。先选 train，再从剩余 episodes 选 val，其余 unused；150 条、训练上限 100、验证 20 得到 100/20/30。新统计只使用本阶段 train 的真实源帧，训练不读取来源身份或自动按 trial 分组。各阶段数据参数独立，主策略保留 val 时不新增离线验证流程。
 
 训练使用的数据版本不就地修改。远程同步显式指定路径，例如 `bash scripts/remote/sync_data.sh --host <host> --local robot_data --remote /data/project/robot_data`；脚本保留目标独有文件。启动时的 `--data-root /data/project` 为源码副本提供 `robot_data/`、`data/` 和 `pretrained_models/` 链接，实验目录另外由 `--run` 指定，详见 [SSH 文档](../docs/SSH服务器训练部署.md)。

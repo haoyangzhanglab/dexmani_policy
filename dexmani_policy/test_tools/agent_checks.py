@@ -44,6 +44,7 @@ from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
+from dexmani_policy.training.pretrain.hand_prior import vqvae as vq_training
 
 
 def check_sampler(_device):
@@ -640,7 +641,7 @@ def check_rgb_deployment(device):
     from dexmani_policy.common.checkpoint import load_checkpoint
 
     for kind in ("dino", "siglip", "dinov3"):
-        architecture = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+        architecture: dict[str, Any] = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
                             num_attention_heads=4, image_size=32, patch_size=16)
         if kind == "dino":
             architecture["model_type"] = "dinov2"
@@ -770,7 +771,7 @@ def check_dinov3(device):
         assert cfg.agent.rgb_backbone_name == "dinov3"
 
     for kind in ("dino", "siglip", "dinov3"):
-        arch = architecture if kind == "dinov3" else dict(
+        arch: dict[str, Any] = architecture if kind == "dinov3" else dict(
             hidden_size=32, intermediate_size=64, num_hidden_layers=1,
             num_attention_heads=4, image_size=32, patch_size=16,
         )
@@ -857,7 +858,7 @@ def check_vq(device):
 
 def check_codebook(device):
     for size in (256, 512):
-        table = HandStateCodebook(12, num_groups=1, codebook_size=size).to(device)
+        table = HandStateCodebook(12, num_codes=size).to(device)
         table.set_prototypes(torch.randn(size, 12, device=device))
         for dtype in (torch.float16, torch.bfloat16, torch.float32):
             _, index = table.decode(torch.tensor([-2, -1, 1, 2], device=device, dtype=dtype))
@@ -878,13 +879,68 @@ def check_codebook(device):
             continuous, indices = table.encode(torch.ones(shape, device=device))
             assert indices.shape == shape[:-1] and (indices == 1).all()
             assert continuous.shape == (*shape[:-1], 1)
-        restored = HandStateCodebook(12, num_groups=1, codebook_size=size).to(device)
+        restored = HandStateCodebook(12, num_codes=size).to(device)
         restored.load_state_dict(table.state_dict(), strict=True)
         assert set(restored.state_dict()) == {"sorted_hand_poses"}
+    single = HandStateCodebook(12, num_codes=1).to(device)
+    single.set_prototypes(torch.ones(1, 12, device=device))
+    continuous, indices = single.encode(torch.ones(2, 12, device=device))
+    assert (continuous == -1).all() and (indices == 0).all()
+    assert (single.decode(torch.tensor([-3., 0., 3.], device=device))[1] == 0).all()
+    odd = HandStateCodebook(12, num_codes=3).to(device)
+    odd.set_prototypes(torch.arange(3, device=device)[:, None].expand(-1, 12))
+    assert odd.decode(torch.tensor([-0.5, 0., 0.5], device=device))[1].tolist() == [1, 1, 2]
+
+
+def check_vq_training(device):
+    with tempfile.TemporaryDirectory(prefix="dexmani-vq-training-check-") as directory:
+        source = Path(directory) / "commands.zarr"
+        ends = np.cumsum([7, 9, 11, 13])
+        action = np.arange(int(ends[-1]) * 19, dtype=np.float32).reshape(-1, 19) / 100
+        group = zarr.open_group(str(source), mode="w")
+        group.create_dataset("meta/episode_ends", data=ends)
+        group.create_dataset("data/action", data=action, chunks=(5, 19))
+        for val_episodes in (0, 1):
+            output = Path(directory) / f"val{val_episodes}"
+            cfg = load_policy_config("pretrain/hand_prior/vqvae", [
+                f"dataset.zarr_path={source}", "dataset.max_train_episodes=2",
+                f"dataset.val_episodes={val_episodes}", f"vq_vae.output_dir={output}",
+                "vq_vae.num_epochs=2", "vq_vae.batch_size=4", "vq_vae.save_epochs=1",
+                "vq_vae.latent_dim=8", "vq_vae.hidden_dim=16", "vq_vae.num_layers=1",
+                "vq_vae.num_groups=1", "vq_vae.codebook_size=3", "vq_vae.warmup_steps=0",
+                f"vq_vae.device={device}",
+            ])
+            with patch.object(vq_training, "load_hand_array", wraps=vq_training.load_hand_array) as read:
+                _, val, _ = vq_training.prepare_hand_data(cfg)
+                assert read.call_count == 1 + val_episodes
+                assert (val is None) == (val_episodes == 0)
+            evaluation = ({"wraps": evaluate_vq} if val_episodes else
+                          {"side_effect": AssertionError("V=0 must not evaluate training data")})
+            with patch.object(vq_training, "evaluate_vq", **evaluation) as evaluate, \
+                 patch.object(vq_training, "DataLoader", wraps=DataLoader) as loaders, \
+                 patch.object(vq_training, "export_codebook", wraps=export_codebook) as export:
+                vq_training.train(cfg)
+                assert evaluate.call_count == 2 * val_episodes
+                assert loaders.call_count == 1 + val_episodes
+                selected = "best" if val_episodes else "last"
+                assert export.call_args.args[0] == output / f"vqvae_hand_{selected}.pt"
+            assert (output / "vqvae_hand_last.pt").exists()
+            assert (output / "vqvae_hand_best.pt").exists() == bool(val_episodes)
+            periodic = torch.load(output / "vqvae_hand_epoch=0001.pt", weights_only=True)
+            assert "split_metadata" not in periodic
+            assert ("val_lookup_mse" in periodic["metrics"]) == bool(val_episodes)
+            # Export needs neither selection information nor the training epoch.
+            for key in ("metrics", "epoch"):
+                del periodic[key]
+            minimal = output / "minimal.pt"
+            torch.save(periodic, minimal)
+            table = export_codebook(minimal, output / "reexported.npz")
+            assert table.num_codes == 3
 
 
 def check_codebook_pipeline(device):
-    model = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=1).to(device)
+    model = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=1,
+                      num_groups=1, codebook_size=3).to(device)
     rows = torch.randn(19, 12).clamp(-1, 1)
     loader = DataLoader(TensorDataset(rows), batch_size=7)
     before = {key: value.clone() for key, value in model.state_dict().items()}
@@ -892,22 +948,20 @@ def check_codebook_pipeline(device):
     assert model.training
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, before[key], rtol=0, atol=0)
-    manifest = dict(source_id="agent-check", episode_ends=[10, 19], episode_ids=["train", "val"],
-                    train_indices=[0], val_indices=[1])
     with tempfile.TemporaryDirectory(prefix="dexmani-codebook-check-") as directory:
         vq_checkpoint, artifact = Path(directory) / "vq.pt", Path(directory) / "codebook.npz"
+        hand_scale = torch.linspace(0.5, 2., 12)
+        hand_offset = torch.linspace(-0.2, 0.3, 12)
         torch.save(dict(
-            model_config=model.model_config, model_state_dict=model.state_dict(), epoch=1,
-            metrics={"val_lookup_mse": metrics["lookup_mse"]},
-            normalizer_state_dict={"fields.hand.scale": torch.ones(12), "fields.hand.offset": torch.zeros(12)},
-            split_metadata=dict(split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
+            model_config=model.model_config, model_state_dict=model.state_dict(),
+            normalizer_state_dict={"fields.hand.scale": hand_scale, "fields.hand.offset": hand_offset},
         ), vq_checkpoint)
-        table, metadata = export_codebook(vq_checkpoint, artifact)
-        loaded_table = HandStateCodebook(
-            model.hand_dim, num_groups=model.num_groups, codebook_size=model.codebook_size,
-        )
-        loaded_metadata, _ = load_codebook(artifact, loaded_table)
-        assert loaded_metadata == metadata
+        table = export_codebook(vq_checkpoint, artifact)
+        with np.load(artifact) as payload:
+            assert set(payload.files) == {"sorted_hand_poses", "hand_normalizer_scale", "hand_normalizer_offset"}
+        loaded_table, affine = load_codebook(artifact)
+        torch.testing.assert_close(affine["scale"], hand_scale)
+        torch.testing.assert_close(affine["offset"], hand_offset)
         for name, value in table.state_dict().items():
             torch.testing.assert_close(value, loaded_table.state_dict()[name], rtol=0, atol=0)
         lookup_mse = (rows[:, None] - table.sorted_hand_poses).square().sum(-1).amin(-1).mean() / model.hand_dim
@@ -915,6 +969,7 @@ def check_codebook_pipeline(device):
                                    lookup_mse, rtol=1e-5, atol=1e-7)
         policy_config: dict[str, Any] = dict(
             horizon=4, n_obs_steps=2, n_action_steps=2, action_dim=19,
+            num_codes=loaded_table.num_codes,
             n_layers=1, hidden_dim=32, n_head=4,
             num_inference_steps=2, num_points=32,
             pc_encoder_config=dict(channels=48, num_patches=8, group_size=4, depth=2, num_heads=4),
@@ -937,19 +992,11 @@ def check_codebook_pipeline(device):
         description = dict(
             attrs=dict(hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
                        hand_units="radians"),
-            action_key="action", split_manifest=manifest,
+            action_key="action",
         )
-        try:
-            policy.initialize_training(
-                {**description, "split_manifest": {**manifest, "train_indices": [1]}}, artifact,
-            )
-        except ValueError as error:
-            assert "split mismatch" in str(error)
-        else:
-            raise AssertionError("DQ accepted a different VQ training split")
-        imported_affine = policy.initialize_training(description, artifact)
-        policy.normalizer["action"].scale[-12:].copy_(imported_affine["scale"])
-        policy.normalizer["action"].offset[-12:].copy_(imported_affine["offset"])
+        policy.initialize_training(description, loaded_table)
+        policy.normalizer["action"].scale[-12:].copy_(affine["scale"])
+        policy.normalizer["action"].offset[-12:].copy_(affine["offset"])
         policy.to(device)
         xyz = torch.rand(2, 2, 32, 3, device=device) * 0.2 - 0.1
         xyz[..., 2] += 1
@@ -1099,7 +1146,7 @@ def main():
     for check in (check_sampler, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
                   check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb,
                   check_rgb_deployment, check_dinov3, check_vq,
-                  check_codebook, check_codebook_pipeline, check_policies, check_output_boundaries):
+                  check_codebook, check_vq_training, check_codebook_pipeline, check_policies, check_output_boundaries):
         check(device)
         print(f"PASS {check.__name__} ({device})", flush=True)
 

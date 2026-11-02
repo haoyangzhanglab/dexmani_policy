@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
 
 from dexmani_policy.common.image_util import (
     preprocess_rgb_train,
@@ -28,35 +26,6 @@ from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler
 
 
-def validate_tactile_source(attrs, source):
-    if source == "real":
-        if attrs.get("format") != "dexmani.real.canonical":
-            raise ValueError("tactile_source=real requires dexmani.real.canonical data")
-    elif source == "sim":
-        required = {"dt", "physics_dt", "frame_skip", "action_dim", "action_space", "obs_alignment"}
-        missing = required - attrs.keys()
-        if attrs.get("format") is not None or missing:
-            raise ValueError(
-                "tactile_source=sim requires sim exporter metadata; "
-                f"format={attrs.get('format')!r}, missing={sorted(missing)}"
-            )
-        physics_dt, skip = attrs["physics_dt"], attrs["frame_skip"]
-        if (
-            type(skip) is not int or skip <= 0
-            or type(physics_dt) not in (float, int) or not math.isfinite(physics_dt) or physics_dt <= 0
-            or attrs["obs_alignment"] != "obs[t]_before_action[t]"
-            or attrs["action_space"] not in {"joint", "ee"} or attrs["action_dim"] != 19
-        ):
-            raise ValueError("Invalid sim exporter tactile/timing contract")
-    else:
-        raise ValueError(f"tactile_source must be sim or real, got {source!r}")
-    dt = attrs.get("dt")
-    if type(dt) not in (float, int) or not math.isfinite(dt) or dt <= 0:
-        raise ValueError("Tactile data requires finite positive dt")
-    if source == "sim" and not math.isclose(dt, physics_dt * skip, rel_tol=1e-6, abs_tol=0):
-        raise ValueError("Sim dt must equal physics_dt * frame_skip")
-
-
 class DemonstrationDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -68,15 +37,14 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         horizon: int = 1,
         pad_before: int = 0,
         pad_after: int = 0,
-        val_ratio: float = 0.0,
-        max_train_episodes: int | None = None,
+        val_episodes: int = 0,
+        max_train_episodes: int | None = 100,
         augmentation_cfg: dict | None = None,
         action_key: str = "action",
         rgb_preprocess_size: tuple[int, int] | None = None,
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: Callable | None = None,
         rgb_keep_uint8: bool = False,
-        split_manifest: dict | DictConfig | str | Path | None = None,
         pc_dim: int | None = None,
         tactile_source: str | None = None,
     ) -> None:
@@ -103,8 +71,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.sensor_modalities = sensor_modalities
         self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys)
         self.zarr_path = self.episode_store.path
-        if require_tactile_source(sensor_modalities, tactile_source) is not None:
-            validate_tactile_source(self.episode_store.attrs, tactile_source)
+        require_tactile_source(sensor_modalities, tactile_source)
 
         if "rgb" in sensor_modalities:
             rgb = self.episode_store["rgb"]
@@ -126,8 +93,8 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             ):
                 raise ValueError("Calibrated RGB/point clouds cannot use independent XYZ coordinate noise")
 
-        self.train_mask, self.val_mask, self.split_manifest = split_episodes(
-            self.episode_store, manifest=split_manifest, val_ratio=val_ratio,
+        self.train_mask, self.val_mask = split_episodes(
+            self.episode_store.n_episodes, val_episodes=val_episodes,
             seed=seed, max_train_episodes=max_train_episodes,
         )
         for key in FIELD_FEATURE_SHAPES.keys() & set(sensor_modalities):
@@ -163,8 +130,10 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
     def training_summary(self):
         return (
-            f"{Path(self.zarr_path).name}: train episodes={int(self.train_mask.sum()):,}, "
-            f"val episodes={int(self.val_mask.sum()):,}, train windows={len(self):,}, "
+            f"{Path(self.zarr_path).name}: total episodes={self.episode_store.n_episodes:,}, "
+            f"train episodes={int(self.train_mask.sum()):,}, "
+            f"val episodes={int(self.val_mask.sum()):,}, "
+            f"unused episodes={int((~(self.train_mask | self.val_mask)).sum()):,}, train windows={len(self):,}, "
             f"fields={', '.join(self.data_keys)}"
         )
 

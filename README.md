@@ -16,15 +16,13 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 
 `pyproject.toml` 声明直接依赖和必要 API 范围；`requirements.txt` 固定已验证环境版本。更新依赖时只在环境文件维护精确版本，不顺带升级。文本组件所需 transformers/tokenizers 等依赖继续保留。
 
-数据划分与接触标签生成使用独立工具：
+CordViP 接触标签使用独立工具生成：
 
 ```bash
-python -m dexmani_policy.datasets.split --zarr-path INPUT --output split.json \
-  --seed 42 --val-ratio 0.1 --max-train-episodes 100
 python -m dexmani_policy.datasets.preprocess.contact_map --zarr-path INPUT --output OUTPUT
 ```
 
-接触标签生成需要 Open3D；数据划分及常规数据读取不加载它。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
+接触标签生成需要 Open3D，常规数据读取不加载它。Episode 划分由训练入口按 seed 和数量参数直接完成。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
 
 ## 快速开始
 
@@ -54,17 +52,17 @@ python -m dexmani_policy.eval_pipeline \
   --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
-续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
+续训复用 Checkpoint 中的训练配方和 normalizer，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
 新训练默认使用 FP32，包括 RGB 主干及 LoRA 参数；通过 `training.use_bfloat16=true` 可选启用 BF16 autocast。续训沿用保存的训练配置及训练状态恢复方式。正式部署、仿真评测及 warmup 在严格加载完整策略后统一转为 FP32，并合并 RGB LoRA 权重；预测入口显式关闭 autocast。合并仅作用于推理实例，训练 checkpoint 保留适配器。
 
-动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ/DexLatent 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ/DexLatent 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
+归一化默认模式写在 YAML，可通过 `normalization.*` 覆盖；默认 joint action 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity。几何输入、DQ/DexLatent 手部 affine、R3D 辅助目标和触觉字段保留各自数学约束。新统计仅来自本阶段 train episodes 的真实源帧，不包含 val、unused、padding 或随机增强。AFRO/CordViP encoder 所属输入的 affine 与 identity 均直接继承，只有新字段重新拟合；有效配置记录实际使用的模式。续训、评测和部署直接复用完整策略 checkpoint 保存的最终统计。
 
 FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测关闭随机起点、选点噪声和输出 shuffle。
 
-主策略默认最多使用 100 个训练 episodes，在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。选点使用显式候选列表和相同评测预算。
+主策略默认 `dataset.seed=42`、`max_train_episodes=100`、`val_episodes=0`，不建立离线验证流程。显式 `dataset.val_episodes=20` 只保留数据，不参与本次训练；150 条配合训练上限 100 时得到 100 train、20 val、30 unused。先选 train，再从剩余 episodes 选 val；数据不足时报错。训练在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。选点使用显式候选列表和相同评测预算。
 
-DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 使用预训练初始化时先导出 `encoder.pt`，预训练与从头训练流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
+独立预训练默认 `dataset.seed=42`、`max_train_episodes=null`、`val_episodes=0`，数据与预算独立于主策略。DQ-RISE 默认从 VQ last 导出三键码表，显式 val 时按 `lookup_mse` 选 best；运行时仅依赖有序姿态表与 hand affine，fresh 自动保存实际 `num_codes`。详见 [手部动作表示](docs/手部动作表示.md)。AFRO/CordViP 使用包含输入归一化的轻量 `encoder.pt`，独立导出命令及继承规则见 [观测预训练](docs/观测预训练.md)。
 
 ## SAT / DQ-RISE / DexLatent dense observation
 
@@ -168,7 +166,7 @@ python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>
 
 默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复使用同一 checkpoint 的实际配置、保存的 affine 与严格张量赋值，部署参数统一转为 FP32，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径以实验 checkpoints 目录解析；默认 best 恢复选优时的执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。Runtime 返回完整未来动作窗口，由调用方按 `info.n_action_steps` 消费。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用同一 checkpoint 的实际配置、保存的 affine 与严格张量赋值，部署参数统一转为 FP32，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径以实验 checkpoints 目录解析；默认 best 恢复选优时的执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。Runtime 返回完整未来动作窗口，由调用方按 `info.n_action_steps` 消费。
 
 训练将 Canonical 实际使用的数值配方保存到配置和 checkpoint，由公开 `PolicyInfo` 提供给 Real。非 Canonical 的训练、inspect 和纯策略推理不要求真机配方；设备入口负责拒绝缺失事实。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 
@@ -199,7 +197,7 @@ source_id: <实际 Canonical source_id>
 
 Git 已跟踪的模板可用对应提交和路径恢复；不同处理阶段使用不同版本时分别记录仓库、SHA 和模板路径。未提交的代码或自定义模板应随实验手动归档，或先提交再记录。缺少历史记录时如实注明未知，不猜测补写。修改加工算法或模板后须重新导出数据。
 
-Canonical 数据的 `source_id` 可选；已有 ID 必须保留，并与保存的 split 一致，一方缺失或 ID 不同仍拒绝 resume。双方均无 ID 的旧数据，在 episode 边界、episode/trial 身份与实际划分匹配时可续训，由研究者保证使用同一份未改写的数据。同结构但内容不同的数据在双方无 ID 时无法区分，`source_id` 本身也只是 producer 标签，不是内容哈希。原样搬迁保留已有身份；重新导出数据应开启新实验，不能靠删除 ID 绕过匹配或复用旧 normalizer。
+训练划分只依赖 episode 顺序、数量、dataset seed 和数量参数，不读取或比较 `source_id`、episode/trial 身份，也不自动按 trial 分组。续训由研究者保证使用同一份未改写、未重排的数据；原样搬迁可更新路径。重新导出或改变数据顺序应开启新实验，避免复用失配的模型状态和 normalizer。若要避免同一长轨迹的片段跨集合，应在该实验的数据准备阶段处理。
 
 ## 文档
 

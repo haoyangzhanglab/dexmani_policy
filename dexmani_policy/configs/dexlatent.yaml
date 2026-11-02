@@ -14,6 +14,13 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 
+normalization:
+  point_cloud: identity
+  joint_state: limits
+  rgb: identity
+  camera_intrinsic: identity
+  camera_extrinsic: identity
+
 dataloader:
   batch_size: 128
   drop_last: true

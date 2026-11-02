@@ -39,7 +39,7 @@ class LinearNormalizer(nn.Module):
 
     @torch.no_grad()
     def fit_field(self, key: str, chunks: Iterable, *, mode="limits", last_n_dims=1):
-        """Merge chunk statistics in FP64, preserving the trailing feature axes."""
+        """Preserve feature axes and use FP64 for moment accumulation."""
         if mode not in {"limits", "gaussian", "rms", "max_abs"}:
             raise ValueError(f"Unknown normalization mode: {mode}")
 
@@ -49,7 +49,11 @@ class LinearNormalizer(nn.Module):
         elif mode == "max_abs":
             max_abs = torch.zeros((), dtype=torch.float64)
         for chunk in chunks:
-            values = torch.as_tensor(chunk, dtype=torch.float64)
+            values = torch.as_tensor(chunk)
+            if mode in {"gaussian", "rms"}:
+                values = values.double()
+            elif not values.is_floating_point():
+                values = values.float()
             if not values.numel():
                 continue
             feature_shape = values.shape[-last_n_dims:]

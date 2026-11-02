@@ -7,7 +7,7 @@ import torch
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.codebook import (
-    HandStateCodebook, load_codebook, validate_hand_coordinates,
+    HandStateCodebook, validate_hand_coordinates,
 )
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
@@ -21,12 +21,12 @@ class DQRISE(Policy):
 
     def __init__(
         self,
+        *,
+        num_codes: int,
         horizon: int = 16,
         n_obs_steps: int = 2,
         n_action_steps: int = 8,
         action_dim: int = 19,
-        codebook_num_groups: int = 2,
-        codebook_size: int = 4,
         pc_dim: int = 3,
         state_dim: int = 19,
         num_points: int = 1024,
@@ -92,20 +92,18 @@ class DQRISE(Policy):
         )
         self.hand_codebook = HandStateCodebook(
             hand_dim=self.hand_dim,
-            num_groups=codebook_num_groups,
-            codebook_size=codebook_size,
+            num_codes=num_codes,
         )
 
-    def initialize_training(self, data_description, codebook_path) -> dict[str, torch.Tensor]:
-        if codebook_path is None:
-            raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
+    @property
+    def effective_config(self) -> dict:
+        return {**super().effective_config, "num_codes": self.hand_codebook.num_codes}
+
+    def initialize_training(self, data_description, codebook) -> None:
         validate_hand_coordinates(data_description["attrs"])
-        metadata, hand_affine = load_codebook(codebook_path, self.hand_codebook)
         if data_description["action_key"] != "action":
             raise ValueError("DQ-RISE requires joint policy data with action_key=action")
-        if data_description["split_manifest"] != metadata["split_manifest"]:
-            raise ValueError("Pretraining/policy split mismatch")
-        return hand_affine
+        self.hand_codebook = codebook
 
     def compute_loss(
         self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,

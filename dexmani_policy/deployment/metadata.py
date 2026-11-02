@@ -98,7 +98,7 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         inference_steps=steps,
         policy_name=cfg["policy_name"],
         task_name=cfg["task_name"],
-        observation_fields=tuple(dataset["sensor_modalities"]),
+        observation_fields=tuple(key for key in cfg["normalization_dims"] if key != "action"),
         n_obs_steps=agent["n_obs_steps"],
         n_action_steps=agent["n_action_steps"] if selection is None else defaults["action_steps"],
         horizon=agent["horizon"],

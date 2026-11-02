@@ -11,9 +11,8 @@ dataset:
   pad_before: 0
   pad_after: 7
   seed: 42
-  val_ratio: 0.1
+  val_episodes: 0
   max_train_episodes: null
-  split_manifest: null
 dataloader:
   batch_size: 128
   shuffle: true

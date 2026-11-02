@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import hydra
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
@@ -33,14 +33,25 @@ class PolicyTrainer:
         if cfg.get("resume_from") is not None and checkpoint is None:
             raise ValueError("Resume requires the checkpoint loaded by the training entry point")
         device = torch.device(cfg.training.device)
+        codebook = hand_affine = None
+        if checkpoint is None and cfg.policy_name == "dqrise":
+            from dexmani_policy.agents.hand_prior.codebook import load_codebook
+
+            source = cfg.get("initialization", {}).get("codebook")
+            if source is None:
+                raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
+            codebook, hand_affine = load_codebook(source)
+            with open_dict(cfg.agent):
+                cfg.agent.num_codes = codebook.num_codes
         model = hydra.utils.instantiate(cfg.agent, _convert_="all")
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
         if data_description["action_start_index"] != model.action_start_index:
             raise ValueError("Dataset/policy action_start_index mismatch")
         if data_description["control_action_dim"] != model.control_action_dim:
             raise ValueError("Dataset primary action width must match policy control output")
+        fields = (*model.consumed_observation_fields, "action")
         model.configure_normalizer(
-            data_description["normalization_dims"],
+            {key: data_description["field_dims"][key] for key in fields},
             {} if checkpoint is None else checkpoint.effective_config["normalizer_shapes"],
         )
         if checkpoint is None:
@@ -51,9 +62,9 @@ class PolicyTrainer:
             elif method == "r3d":
                 model.obs_encoder.pc_encoder.initialize_weights(sources.get("uni3d"))
             pretrained_state = None
-            hand_affine = None
+            inherited_fields: tuple[str, ...] = ()
             if method == "dqrise":
-                hand_affine = model.initialize_training(data_description, sources.get("codebook"))
+                model.initialize_training(data_description, codebook)
             elif method == "dexlatent":
                 hand_affine = model.hand_prior.initialize_weights(sources.get("dexlatent"))
             elif method in {"afro", "cordvip"}:
@@ -70,9 +81,22 @@ class PolicyTrainer:
                     encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
                     encoder.load_state_dict(payload["encoder_state"], strict=True)
                     pretrained_state = payload["normalizer_state"]
+                    inherited_fields = (("point_cloud",) if method == "afro" else
+                                        ("hand_pointcloud", "object_pointcloud", "joint_state"))
+                    with open_dict(cfg.normalization):
+                        for key in inherited_fields:
+                            has_affine = any(f"fields.{key}.{part}" in pretrained_state for part in ("scale", "offset"))
+                            cfg.normalization[key] = payload["normalization"][key] if has_affine else "identity"
                     del payload
-            normalizer = fit_normalizer(dataset, cfg.normalization, initial_state=pretrained_state,
-                                        feature_dims=data_description["normalization_dims"])
+            missing = set(fields) - cfg.normalization.keys()
+            if missing:
+                raise ValueError(f"Missing normalization modes for model fields: {sorted(missing)}")
+            spec = {key: cfg.normalization[key] for key in fields}
+            normalizer = fit_normalizer(
+                dataset, spec, initial_state=pretrained_state,
+                feature_dims=model.normalization_dims,
+            )
+            print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
             if hand_affine is not None:
                 normalizer["action"].scale[-model.hand_dim:].copy_(hand_affine["scale"])
                 normalizer["action"].offset[-model.hand_dim:].copy_(hand_affine["offset"])

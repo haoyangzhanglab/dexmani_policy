@@ -53,8 +53,7 @@ def validate_observation_fields(agent, declared):
     consumed = set(agent.consumed_observation_fields)
     declared = set(declared)
     missing = consumed - declared
-    unused = declared - consumed
-    if missing or unused:
+    if missing:
         raise ValueError(
-            f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}"
+            f"Model observation mismatch: missing={sorted(missing)}"
         )

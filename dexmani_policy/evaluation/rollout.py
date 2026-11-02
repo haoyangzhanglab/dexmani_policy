@@ -55,7 +55,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     options = dict(cfg["env_runner"])
     options.pop("eval_seeds", None)
     options.update(n_obs_steps=cfg["agent"]["n_obs_steps"],
-                   sensor_modalities=cfg["dataset"]["sensor_modalities"],
+                   sensor_modalities=[key for key in cfg["normalization_dims"] if key != "action"],
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     directory = create_run_directory(checkpoint.parent.parent / "eval_dexsim", output_dir)
     path = directory / "result_details.json"

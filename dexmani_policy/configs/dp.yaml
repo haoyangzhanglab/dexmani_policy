@@ -14,6 +14,7 @@ n_obs_steps: 2
 n_action_steps: 8
 
 normalization:
+  rgb: identity
   joint_state: limits
 
 dataloader:
