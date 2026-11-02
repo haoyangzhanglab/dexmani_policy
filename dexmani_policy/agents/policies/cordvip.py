@@ -1,49 +1,65 @@
+from __future__ import annotations
+
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D, validate_unet_horizon
+from dexmani_policy.agents.action_decoders.backbones.unet1d import (
+    ConditionalUNet1D,
+    validate_unet_horizon,
+)
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.interaction.correspondence import (
     ContactCoordinationEncoder,
 )
-from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
+from dexmani_policy.agents.policies.base import Policy, module_parameter_group
 
 
-class CordViPObservationEncoder(nn.Module):
+class CordViPEncoder(nn.Module):
     consumed_observation_fields = ("hand_pointcloud", "object_pointcloud", "joint_state")
 
     def __init__(self, n_obs_steps):
         super().__init__()
-        self.encoder = ContactCoordinationEncoder()
+        self.interaction_encoder = ContactCoordinationEncoder()
         self.n_obs_steps = n_obs_steps
 
     @property
     def out_dim(self) -> int:
-        return self.encoder.out_dim
+        return self.n_obs_steps * self.interaction_encoder.out_dim
 
     def forward(self, obs):
         sequence = {
             key: value.unflatten(0, (-1, self.n_obs_steps))
             for key, value in obs.items()
         }
-        return torch.cat(self.encoder(sequence), dim=-1).flatten(1)
+        return torch.cat(self.interaction_encoder(sequence), dim=-1).flatten(1)
 
 
-class CordViPPolicy(BasePolicy):
+class CordViP(Policy):
+    supported_execution_modes = ("sync", "async", "rtc")
     supported_action_keys = ("action",)
 
-    def __init__(self, horizon=12, n_obs_steps=4, n_action_steps=6, action_dim=19,
-                 state_dim=19, pc_dim=3,
-                 down_dims=(512, 1024, 2048), diffusion_step_embed_dim=64,
-                 kernel_size=5, n_groups=8, cond_predict_scale=True,
-                 num_training_steps=100, num_inference_steps=10,
-                 prediction_type="sample", clip_sample=True):
-        if (action_dim, state_dim, pc_dim) != (19, 19, 3):
+    def __init__(
+        self,
+        horizon: int = 12,
+        n_obs_steps: int = 4,
+        n_action_steps: int = 6,
+        action_dim: int = 19,
+        down_dims: tuple[int, ...] = (512, 1024, 2048),
+        diffusion_step_embed_dim: int = 64,
+        kernel_size: int = 5,
+        n_groups: int = 8,
+        cond_predict_scale: bool = True,
+        num_training_steps: int = 100,
+        num_inference_steps: int = 10,
+        prediction_type: str = "sample",
+        clip_sample: bool = True,
+    ) -> None:
+        if action_dim != 19:
             raise ValueError("CordViP uses XYZ and arm7+hand12 state/actions")
         validate_unet_horizon(horizon, down_dims)
-        obs_encoder = CordViPObservationEncoder(n_obs_steps)
+        obs_encoder = CordViPEncoder(n_obs_steps)
         backbone = ConditionalUNet1D(
-            action_dim, n_obs_steps * obs_encoder.out_dim, diffusion_step_embed_dim,
+            action_dim, obs_encoder.out_dim, diffusion_step_embed_dim,
             down_dims, kernel_size, n_groups, cond_predict_scale,
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)

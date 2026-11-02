@@ -31,9 +31,9 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
 )
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder, XHandPatchEncoder
-from dexmani_policy.agents.policies.dp import DPPolicy
-from dexmani_policy.agents.policies.dp3 import DP3Policy
-from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
+from dexmani_policy.agents.policies.dp import DP
+from dexmani_policy.agents.policies.dp3 import DP3
+from dexmani_policy.agents.policies.dqrise import DQRISE
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.config import validate_observation_fields
 from dexmani_policy.common.normalizer import normalization_feature_shapes
@@ -138,6 +138,57 @@ def check_precision(device):
         assert seen == [torch.bfloat16] and torch.isfinite(output).all()
 
 
+def check_decoder_precision(device):
+    from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+    from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
+
+    class Head(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gain = torch.nn.Parameter(torch.tensor(0.1, device=device))
+
+        def prepare_context_kv(self, context):
+            return None
+
+        def forward(self, x, timestep, context, **kwargs):
+            self.input = x.detach()
+            return x * self.gain.to(x.dtype)
+
+    cond = torch.zeros(2, 4, device=device, dtype=torch.bfloat16)
+    shape = (2, 4, 3)
+    for kind in ("sample", "epsilon", "v_prediction"):
+        model = Head()
+        decoder = Diffusion(model, prediction_type=kind)
+        for dtype in (torch.float32, torch.bfloat16):
+            actions = torch.zeros(shape, device=device, dtype=dtype)
+            noise = torch.ones_like(actions)
+            t = torch.zeros(2, device=device, dtype=torch.long)
+            with patch("torch.randn_like", return_value=noise), patch("torch.randint", return_value=t):
+                loss, _ = decoder.compute_loss(cond, actions)
+            a = decoder.noise_scheduler.alphas_cumprod[0].float()
+            expected = ((1 - a).sqrt() * noise).to(dtype)
+            torch.testing.assert_close(model.input, expected, rtol=0, atol=0)
+            assert model.input.abs().min() > 0
+            target = actions if kind == "sample" else noise if kind == "epsilon" else (a.sqrt() * noise).to(dtype)
+            torch.testing.assert_close(loss, F.mse_loss((expected * model.gain.to(dtype)).float(), target.float()))
+            loss.backward()
+            assert torch.isfinite(model.gain.grad)
+
+    for decoder in (Diffusion(Head()), RectifiedFlow(Head()), ConsistencyFlow(Head())):
+        decoder.eval()
+        def sample(**kwargs):
+            return decoder.predict_action(cond, shape, 4,
+                generator=torch.Generator(device=device).manual_seed(10), **kwargs)
+        with torch.inference_mode():
+            ordinary = sample()
+            assert ordinary.dtype == torch.float32
+            torch.testing.assert_close(ordinary, sample(dtype=torch.float32), rtol=0, atol=0)
+            torch.testing.assert_close(ordinary, sample(rtc_prefix=ordinary[:, :2], rtc_guidance_cap=0), rtol=0, atol=0)
+            assert sample(dtype=torch.bfloat16).dtype == torch.bfloat16
+            guided = sample(rtc_prefix=ordinary[:, :2], rtc_guidance_cap=2)
+            assert guided.dtype == torch.float32 and torch.isfinite(guided).all()
+
+
 def check_tactile(device):
     encoder = XHandPatchEncoder().to(device)
     for mode in ("random", "zero", "ties"):
@@ -167,7 +218,7 @@ def check_tactile(device):
     with patch.object(XHandPatchEncoder, "__init__", autospec=True,
                       side_effect=XHandPatchEncoder.__init__) as constructor:
         policy = hydra.utils.instantiate({
-            "_target_": "dexmani_policy.agents.policies.adaptac.AdapTacPolicy",
+            "_target_": "dexmani_policy.agents.policies.adaptac.AdapTac",
             "horizon": 4, "n_obs_steps": 1, "n_action_steps": 2, "action_dim": 19,
             "tactile_source": "real", "tactile_encoder": encoder.effective_config,
             "pc_dim": 3, "num_points": 16, "feature_dim": 16, "state_out_dim": 8,
@@ -330,12 +381,13 @@ def check_token_decoders(device):
 
 
 def check_policy_roundtrips(device):
-    for method, auxiliary in (("cordvip", False), ("adaptac", False), ("interact_dex", False),
+    for method, auxiliary in (("dp", False), ("afro", False), ("maniflow", False),
+                              ("dexlatent", False), ("cordvip", False), ("adaptac", False), ("interact_dex", False),
                               ("sat", False), ("r3d", False), ("r3d", True)):
         overrides = ["horizon=8", "n_action_steps=2", "agent.num_inference_steps=2"]
-        if method != "r3d":
+        if method not in ("r3d", "cordvip", "afro", "dp"):
             overrides += ["agent.pc_dim=3"]
-        if method in ("interact_dex", "sat"):
+        if method in ("interact_dex", "sat", "dexlatent", "maniflow"):
             overrides += ["agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=4",
                           "agent.timestep_embed_dim=32"]
         elif method == "r3d":
@@ -348,7 +400,7 @@ def check_policy_roundtrips(device):
         else:
             overrides += ["agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=32",
                           "agent.num_training_steps=10"]
-        if method not in ("cordvip", "r3d"):
+        if method not in ("cordvip", "r3d", "afro", "dp", "maniflow"):
             overrides += ["agent.num_points=32", "agent.pc_encoder_config.channels=24",
                           "agent.pc_encoder_config.num_patches=12", "agent.pc_encoder_config.group_size=8",
                           "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4",
@@ -356,11 +408,19 @@ def check_policy_roundtrips(device):
         if method == "adaptac":
             overrides += ["agent.feature_dim=32", "agent.state_out_dim=8", "agent.force_num_inference_steps=2",
                           "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=32"]
-        if method == "sat":
+        if method in ("sat", "dexlatent"):
             overrides += ["agent.rgb_backbone_config.image_size=[28,28]",
                           "+agent.rgb_backbone_config.architecture={model_type:dinov2,hidden_size:24,"
                           "intermediate_size:48,num_hidden_layers:1,num_attention_heads:4,image_size:28,patch_size:14}"]
+        if method == "dp":
+            overrides += ["agent.rgb_backbone_name=resnet"]
+        if method == "maniflow":
+            overrides += ["agent.num_points=32",
+                          "agent.pc_encoder_config.out_channels=32", "agent.state_out_dim=8",
+                          "agent.fps_random_config.use_random=false"]
         cfg = load_policy_config(method, overrides)
+        if method == "dp":
+            cfg.agent.rgb_backbone_config = {}
         agent_cfg = OmegaConf.to_container(cfg.agent, resolve=True)
         policy = hydra.utils.instantiate(agent_cfg, _convert_="all")
         validate_observation_fields(policy, cfg.dataset.sensor_modalities)
@@ -374,7 +434,7 @@ def check_policy_roundtrips(device):
                for key in cfg.dataset.sensor_modalities}
         if "eef_pose" in obs:
             obs["eef_pose"][..., 3:] = torch.tensor([1., 0., 0., 0., 1., 0.], device=device)
-        if method == "sat":
+        if method in ("sat", "dexlatent"):
             obs["rgb"] = torch.randint(256, obs["rgb"].shape, device=device, dtype=torch.uint8)
             obs["point_cloud"][..., 2] = obs["point_cloud"][..., 2].abs() + 1
             intrinsic = torch.tensor([[20., 0., 13.5], [0., 20., 13.5], [0., 0., 1.]], device=device)
@@ -384,6 +444,8 @@ def check_policy_roundtrips(device):
         dims["action"] = cfg.action_dim
         normalizer_shapes = {key: shape for key, shape in normalization_feature_shapes(dims).items()
                              if cfg.normalization[key] != "identity"}
+        if method == "dexlatent":
+            normalizer_shapes["hand_latent"] = (32,)
         policy.configure_normalizer(dims, normalizer_shapes)
         policy.to(device)
         optimizer = build_optimizer(policy, **cfg.optimizer)
@@ -393,10 +455,15 @@ def check_policy_roundtrips(device):
             valid = torch.ones(2, count, dtype=torch.bool, device=device)
             valid[1, -1] = False
             batch.update(future_force=torch.randn(2, count, 5, 3, device=device), future_force_valid=valid)
+        ema = copy.deepcopy(policy).eval().requires_grad_(False) if method == "maniflow" else None
         for _ in range(2):
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device.type, dtype=torch.bfloat16):
-                loss, _ = policy.compute_loss(batch)
+                loss, metrics = policy.compute_loss(batch, **policy.get_training_loss_kwargs(ema))
+            if policy.loss_groups is not None:
+                expected = sum(metrics[f"loss_{name}"] * weight
+                               for name, (_, _, weight) in policy.loss_groups.items())
+                torch.testing.assert_close(metrics["loss_action"], expected)
             loss.backward()
             assert torch.isfinite(loss)
             assert all(torch.isfinite(p.grad).all() for p in policy.parameters() if p.grad is not None)
@@ -419,8 +486,56 @@ def check_policy_roundtrips(device):
             with torch.no_grad():
                 actual = restored.predict_action(obs, generator=torch.Generator(device=device).manual_seed(11))
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            if "rtc" in restored.supported_execution_modes:
+                restored.zero_grad(set_to_none=True)
+                prefix = expected["future_actions"][:, :3]
+                with torch.inference_mode():
+                    unguided = restored.predict_action(
+                        obs, rtc_prefix=prefix, delay_steps=1, rtc_guidance_cap=0,
+                        generator=torch.Generator(device=device).manual_seed(11),
+                    )
+                    guided = restored.predict_action(
+                        obs, rtc_prefix=prefix, delay_steps=1, rtc_guidance_cap=2,
+                        generator=torch.Generator(device=device).manual_seed(11),
+                    )["future_actions"]
+                torch.testing.assert_close(unguided, expected, rtol=0, atol=0)
+                assert guided.shape == expected["future_actions"].shape
+                assert torch.isfinite(guided).all() and not guided.requires_grad
+                assert all(p.grad is None for p in restored.parameters())
         print(f"PASS policy roundtrip: {method}, auxiliary={auxiliary} ({device})", flush=True)
 
+
+
+def check_output_boundaries(device):
+    from types import SimpleNamespace
+    from dexmani_policy.deployment.runtime import PolicyRuntime
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+
+    class OutputPolicy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros((), device=device))
+            self.output = torch.zeros(1, 3, 19, device=device)
+
+        def predict_action(self, *args, **kwargs):
+            return {"future_actions": self.output}
+
+    agent = OutputPolicy()
+    runtime = PolicyRuntime(agent, SimpleNamespace(inference_steps=2), seed=0)
+    runner = SimRunner("test", 2, [], {})
+    with patch.object(runtime, "prepare_observations", return_value={}):
+        assert runtime.predict({}).shape == (3, 19)
+        assert runner.predict_action_chunk({}, agent, action_steps=1).shape == (1, 19)
+        for value in (float("nan"), float("inf")):
+            agent.output[0, -1, 0] = value
+            for predict in (lambda: runtime.predict({}),
+                            lambda: runner.predict_action_chunk({}, agent, action_steps=1)):
+                try:
+                    predict()
+                except ValueError as error:
+                    assert "Nonfinite physical" in str(error)
+                else:
+                    raise AssertionError("Nonfinite future actions escaped the CPU boundary")
 
 def check_rgb(device):
     architecture = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
@@ -428,18 +543,22 @@ def check_rgb(device):
     for mode in ("freeze", "full", "lora"):
         model = ViTEncoder("siglip", tune_mode=mode, out_dim=16,
                            architecture=architecture).to(device)
+        assert all(p.dtype == torch.float32 for p in model.parameters())
         assert not hasattr(model.backbone.vision_model, "head")
         assert model.effective_config["architecture"]["vision_use_head"] is False
         optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-3)
         rgb = torch.randn(2, 3, 32, 32, device=device)
         model.train()
-        with torch.autocast(device.type, dtype=torch.bfloat16):
-            loss = model(rgb)["global_token"].float().square().mean()
-        loss.backward()
-        assert model.proj.weight.grad is not None and model.proj.weight.grad.abs().sum() > 0
-        if mode == "freeze":
-            assert not model.backbone.training and all(p.grad is None for p in model.backbone.parameters())
-        optimizer.step()
+        for amp in (False, True):
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                loss = model(rgb)["global_token"].float().square().mean()
+            loss.backward()
+            assert model.proj.weight.grad is not None and model.proj.weight.grad.abs().sum() > 0
+            assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+            if mode == "freeze":
+                assert not model.backbone.training and all(p.grad is None for p in model.backbone.parameters())
+            optimizer.step()
         restored = ViTEncoder("siglip", **model.effective_config)
         snapshot = {name: value.clone() for name, value in model.state_dict().items()}
         restored.load_state_dict(snapshot, strict=True, assign=True)
@@ -466,7 +585,7 @@ def check_rgb(device):
             config = config_class(**architecture)
             if kind == "siglip":
                 config.vision_use_head = False
-            source_model = model_class(config).to(dtype=torch.bfloat16)
+            source_model = model_class(config)
             with tempfile.TemporaryDirectory(prefix="dexmani-rgb-source-") as directory:
                 source_model.save_pretrained(directory)
                 cfg = load_policy_config("dp", [
@@ -480,7 +599,7 @@ def check_rgb(device):
                 plain = cast(dict[str, Any], OmegaConf.to_container(cfg.agent, resolve=True))
                 plain.pop("_target_")
                 rng = torch.get_rng_state()
-                reference = DPPolicy(**plain)
+                reference = DP(**plain)
                 initialized_rng = torch.get_rng_state()
                 torch.set_rng_state(rng)
                 with patch.object(ViTEncoder, "__init__", autospec=True,
@@ -492,8 +611,9 @@ def check_rgb(device):
                 assert list(actual_state) == list(expected_state)
                 for key in expected_state:
                     torch.testing.assert_close(actual_state[key], expected_state[key], rtol=0, atol=0)
-                model = policy.obs_encoder.backbone
+                model = policy.obs_encoder.rgb_encoder
                 model.initialize_weights(directory)
+                assert all(p.dtype == torch.float32 for p in model.parameters())
                 base = model.backbone.get_base_model() if mode == "lora" else model.backbone
                 source_state = source_model.state_dict()
                 for key, value in base.state_dict().items():
@@ -513,6 +633,170 @@ def check_rgb(device):
                 assert name == other_name
                 if parameter.grad is not None:
                     torch.testing.assert_close(parameter.grad, other.grad, rtol=0, atol=0)
+
+
+def check_rgb_deployment(device):
+    from peft import PeftModel
+    from dexmani_policy.common.checkpoint import load_checkpoint
+
+    for kind in ("dino", "siglip", "dinov3"):
+        architecture = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+                            num_attention_heads=4, image_size=32, patch_size=16)
+        if kind == "dino":
+            architecture["model_type"] = "dinov2"
+        elif kind == "dinov3":
+            architecture = dict(embed_dim=32, depth=1, num_heads=4)
+        kwargs = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, state_dim=19,
+                      rgb_backbone_name=kind, state_out_dim=8, down_dims=[16, 32],
+                      diffusion_step_embed_dim=32, num_training_steps=10, num_inference_steps=2,
+                      rgb_backbone_config=dict(tune_mode="lora", architecture=architecture,
+                                               out_dim=16, image_size=[32, 32]))
+        policy = DP(**kwargs)
+        dims = dict(joint_state=19, rgb=3, action=19)
+        shapes = dict(joint_state=(19,), action=(19,))
+        policy.configure_normalizer(dims, shapes)
+        policy.to(device)
+        obs = dict(joint_state=torch.randn(2, 2, 19, device=device),
+                   rgb=torch.rand(2, 2, 3, 32, 32, device=device))
+        batch = dict(obs=obs, action=torch.randn(2, 8, 19, device=device))
+        optimizer = build_optimizer(policy, lr=1e-3, weight_decay=0)
+        for amp in (False, True):
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                loss, _ = policy.compute_loss(batch)
+            loss.backward()
+            assert torch.isfinite(loss)
+            assert all(torch.isfinite(p.grad).all() for p in policy.parameters() if p.grad is not None)
+            optimizer.step()
+        assert any(p.detach().abs().sum() > 0 for n, p in policy.named_parameters() if ".lora_B." in n)
+        ema = copy.deepcopy(policy)
+        with torch.no_grad():
+            for name, param in ema.named_parameters():
+                if ".lora_B." in name:
+                    param.mul_(0.8)
+        config = dict(agent={"_target_": "dexmani_policy.agents.policies.dp.DP", **kwargs},
+                      normalization_dims=dims, normalizer_shapes=shapes)
+        with tempfile.TemporaryDirectory(prefix="dexmani-lora-restore-") as directory:
+            raw, averaged = copy.deepcopy(policy), copy.deepcopy(ema)
+            for model in (raw, averaged):
+                model.eval()
+            path = save_checkpoint(Path(directory) / "model.pt", Checkpoint(
+                2, raw.state_dict(), averaged.state_dict(), {}, {}, {}, config,
+            ))
+            for use_ema, reference in ((False, raw), (True, averaged)):
+                reference.float()
+                restored = restore_policy(path, use_ema=use_ema, device=device)
+                assert not isinstance(restored.obs_encoder.rgb_encoder.backbone, PeftModel)
+                assert not any("lora_" in name for name in restored.state_dict())
+                assert all(p.dtype == torch.float32 for p in restored.parameters())
+                with torch.no_grad():
+                    torch.testing.assert_close(restored._encode_obs(obs), reference._encode_obs(obs),
+                                               atol=2e-6, rtol=2e-6)
+                for rtc in (False, True):
+                    options = dict(rtc_prefix=batch["action"][:, :3], delay_steps=1,
+                                   rtc_guidance_cap=2) if rtc else {}
+                    # Isolate FP32 merge error from TF32 convolution rounding.
+                    with torch.inference_mode(), torch.backends.cudnn.flags(allow_tf32=False):
+                        expected = reference.predict_action(obs, **options,
+                            generator=torch.Generator(device=device).manual_seed(31))
+                        actual = restored.predict_action(obs, **options,
+                            generator=torch.Generator(device=device).manual_seed(31))
+                    torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5,
+                        msg=lambda message: f"{kind}, EMA={use_ema}, RTC={rtc}: {message}")
+            saved = load_checkpoint(path)
+            assert any("lora_" in name for name in saved.model_state)
+            resumed = DP(**kwargs)
+            resumed.configure_normalizer(dims, shapes)
+            resumed.load_state_dict(saved.model_state, strict=True, assign=True)
+            assert isinstance(resumed.obs_encoder.rgb_encoder.backbone, PeftModel)
+            assert all(p.dtype == torch.float32 for p in resumed.parameters())
+
+
+def check_dinov3(device):
+    from safetensors.torch import save_file
+    from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
+    from dexmani_policy.training.common.config import prepare_training
+
+    architecture = dict(embed_dim=32, depth=1, num_heads=4)
+    source = ViTEncoder("dinov3", architecture=architecture).backbone.state_dict()
+    rgb = torch.randn(2, 3, 32, 48, device=device)
+    for mode in ("freeze", "full", "lora"):
+        model = ViTEncoder("dinov3", tune_mode=mode, architecture=architecture, out_dim=16)
+        with tempfile.TemporaryDirectory(prefix="dexmani-dinov3-source-") as directory:
+            save_file(source, str(Path(directory) / "model.safetensors"))
+            model.initialize_weights(directory)
+        base = model.backbone.get_base_model() if mode == "lora" else model.backbone
+        for name, value in base.state_dict().items():
+            if ".lora_" not in name:
+                torch.testing.assert_close(value, source[name.replace(".base_layer.", ".")], rtol=0, atol=0)
+        assert model.num_prefix_tokens == 5 and model.patch_size == 16
+        assert all(p.dtype == torch.float32 for p in model.parameters())
+        model.to(device).eval()
+        with torch.no_grad():
+            hidden = model.backbone.forward_features(rgb)
+            output = model(rgb)
+            assert output["patch_tokens"].shape == (2, 6, 16)
+            torch.testing.assert_close(output["patch_tokens"], model.proj(hidden[:, 5:]))
+            torch.testing.assert_close(output["global_token"], output["patch_tokens"].mean(1))
+            model.global_token_type = "cls"
+            torch.testing.assert_close(model(rgb)["global_token"], model.proj(hidden[:, 0]))
+            model.global_token_type = "avg"
+        model.train()
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-3)
+        for amp in (False, True):
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                loss = model(rgb)["global_token"].float().square().mean()
+            loss.backward()
+            assert torch.isfinite(loss)
+            if mode == "freeze":
+                assert not model.backbone.training and all(p.grad is None for p in model.backbone.parameters())
+            else:
+                gradients = [p.grad for p in model.backbone.parameters() if p.requires_grad]
+                assert all(g is not None and torch.isfinite(g).all() for g in gradients)
+            if mode == "lora":
+                qkv = model.backbone.get_base_model().blocks[0].attn.qkv
+                assert qkv.lora_B["default"].weight.grad.abs().sum() > 0
+            optimizer.step()
+        restored = ViTEncoder("dinov3", **model.effective_config).to(device)
+        restored.load_state_dict(model.state_dict(), strict=True)
+        with torch.no_grad():
+            torch.testing.assert_close(restored.eval()(rgb), model.eval()(rgb), rtol=0, atol=0)
+
+    for method in ("dp", "sat", "dqrise", "dexlatent"):
+        cfg = load_policy_config(method, ["agent.rgb_backbone_name=dinov3"])
+        with patch("transformers.AutoConfig.from_pretrained", side_effect=AssertionError("unexpected HF config")):
+            prepare_training(cfg)
+        assert cfg.agent.rgb_backbone_name == "dinov3"
+
+    for kind in ("dino", "siglip", "dinov3"):
+        arch = architecture if kind == "dinov3" else dict(
+            hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+            num_attention_heads=4, image_size=32, patch_size=16,
+        )
+        if kind == "dino":
+            arch = {"model_type": "dinov2", **arch}
+        encoder = SpatialObservationEncoder(
+            num_points=32, n_obs_steps=2, rgb_backbone_name=kind,
+            rgb_backbone_config=dict(architecture=arch, image_size=[32, 32]),
+            pc_encoder_config=dict(channels=24, num_patches=12, group_size=8, depth=1, num_heads=4),
+            fps_random_config=dict(use_random=False, use_random_start=False),
+        ).to(device).eval()
+        intrinsic = torch.tensor([[20., 0., 15.5], [0., 20., 15.5], [0., 0., 1.]], device=device)
+        points = torch.rand(2, 32, 3, device=device) * 0.2
+        points[..., 2] += 1
+        obs = dict(point_cloud=points, joint_state=torch.randn(2, 19, device=device),
+                   rgb=torch.randint(256, (2, 3, 32, 32), dtype=torch.uint8, device=device),
+                   camera_intrinsic=intrinsic.expand(2, -1, -1),
+                   camera_extrinsic=torch.eye(4, device=device)[:3].expand(2, -1, -1))
+        output = encoder(obs)
+        assert output.shape == (1, 26, 256) and torch.isfinite(output).all()
+        output.square().mean().backward()
+        assert encoder.alignment.proj.weight.grad.abs().sum() > 0
+        restored = SpatialObservationEncoder(num_points=32, n_obs_steps=2, **encoder.effective_config).to(device).eval()
+        restored.load_state_dict(encoder.state_dict(), strict=True)
+        with torch.no_grad():
+            torch.testing.assert_close(restored(obs), output, rtol=0, atol=0)
 
 
 def check_vq(device):
@@ -644,7 +928,7 @@ def check_codebook_pipeline(device):
                 ),
             ),
         )
-        policy = DQRISEPolicy(**policy_config)
+        policy = DQRISE(**policy_config)
         spec = dict(joint_state="limits", point_cloud="identity", rgb="identity",
                     camera_intrinsic="identity", camera_extrinsic="identity", action="limits")
         dims = dict(joint_state=19, point_cloud=3, rgb=3,
@@ -684,7 +968,7 @@ def check_codebook_pipeline(device):
         prediction = policy.eval().predict_action(obs)["future_actions"]
         assert prediction.shape == (2, 3, 19) and torch.isfinite(prediction).all()
         try:
-            policy.predict_action_from_condition(
+            policy._predict_from_condition(
                 torch.zeros(2, 256, device=device), rtc_prefix=prediction[:, :1],
             )
         except NotImplementedError:
@@ -697,7 +981,7 @@ def check_codebook_pipeline(device):
             next(ema.parameters()).add_(0.01)
         saved = Path(directory) / "policy.pt"
         effective = dict(
-            agent={"_target_": "dexmani_policy.agents.policies.dqrise.DQRISEPolicy",
+            agent={"_target_": "dexmani_policy.agents.policies.dqrise.DQRISE",
                    **policy_config, **policy.effective_config},
             normalization_dims=dims,
             normalizer_shapes={key: tuple(field.scale.shape) for key, field in policy.normalizer.fields.items()},
@@ -749,7 +1033,7 @@ def check_policies(device):
                   pc_dim=3, pc_out_dim=16, state_dim=19, num_points=64, state_out_dim=8,
                   down_dims=(32, 64), diffusion_step_embed_dim=32, n_groups=8,
                   num_training_steps=10, num_inference_steps=2)
-    policy = DP3Policy(**kwargs)
+    policy = DP3(**kwargs)
     spec = dict(joint_state="limits", point_cloud="identity", action="limits")
     dims = dict(joint_state=19, point_cloud=3, action=19)
     policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
@@ -785,7 +1069,7 @@ def check_policies(device):
     torch.save(dict(model=policy.state_dict(), optimizer=optimizer.state_dict()), storage)
     storage.seek(0)
     saved = torch.load(storage, map_location=device, weights_only=True)
-    restored = DP3Policy(**kwargs)
+    restored = DP3(**kwargs)
     restored.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
     restored.load_state_dict(saved["model"], strict=True, assign=True)
     restored.to(device)
@@ -812,9 +1096,10 @@ def main():
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_sampler, check_time, check_precision, check_tactile, check_interaction,
-                  check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb, check_vq,
-                  check_codebook, check_codebook_pipeline, check_policies):
+    for check in (check_sampler, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
+                  check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb,
+                  check_rgb_deployment, check_dinov3, check_vq,
+                  check_codebook, check_codebook_pipeline, check_policies, check_output_boundaries):
         check(device)
         print(f"PASS {check.__name__} ({device})", flush=True)
 

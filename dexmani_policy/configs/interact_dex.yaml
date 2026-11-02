@@ -8,7 +8,7 @@ policy_name: interact-dex
 horizon: 16
 n_obs_steps: 4
 n_action_steps: 4
-future_force_offsets: [4]
+interaction_horizon: 4
 
 normalization:
   joint_state: limits
@@ -28,10 +28,9 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  _target_: dexmani_policy.agents.policies.interact_dex.InterActDexPolicy
+  _target_: dexmani_policy.agents.policies.interact_dex.InterActDex
   future_force_loss_weight: 0.1
   pc_dim: 6
-  state_dim: 19
   num_points: 1024
 
   fps_random_config:
@@ -70,7 +69,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: false
   use_ema: true
   lr_warmup_steps: 500

@@ -34,7 +34,7 @@ dataset:
 
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.policies.r3d.R3DPolicy
+  _target_: dexmani_policy.agents.policies.r3d.R3D
   use_aux_ee: ${use_aux_ee}
   aux_loss_weight: 1.0
 
@@ -74,7 +74,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: true  # 仅编译 OneWayTransformer。
   use_ema: true
   lr_warmup_steps: 500

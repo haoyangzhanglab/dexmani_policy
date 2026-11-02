@@ -15,13 +15,12 @@ dataloader:
   batch_size: 128
   drop_last: false
 dataset:
+  pc_dim: 3
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   sensor_modalities: [point_cloud, joint_state]
   augmentation_cfg: null
 agent:
-  _target_: dexmani_policy.agents.policies.afro.AFROPolicy
-  state_dim: 19
-  pc_dim: 3
+  _target_: dexmani_policy.agents.policies.afro.AFRO
   freeze_visual: true
   down_dims: [512, 1024, 2048]
   diffusion_step_embed_dim: 128

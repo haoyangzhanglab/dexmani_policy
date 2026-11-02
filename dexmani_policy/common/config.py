@@ -26,11 +26,6 @@ def positive_int(value: int, name: str) -> int:
     return value
 
 
-def validate_future_force_offsets(values) -> tuple[int]:
-    offset, = values
-    return (positive_int(offset, "future_force_offset"),)
-
-
 def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start_index) -> None:
     for name, value in (
         ("horizon", horizon),

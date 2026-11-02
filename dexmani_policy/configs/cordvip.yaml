@@ -17,13 +17,12 @@ dataloader:
   batch_size: 256
   drop_last: false
 dataset:
+  pc_dim: 3
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   sensor_modalities: [hand_pointcloud, object_pointcloud, joint_state]
   augmentation_cfg: null
 agent:
-  _target_: dexmani_policy.agents.policies.cordvip.CordViPPolicy
-  state_dim: 19
-  pc_dim: 3
+  _target_: dexmani_policy.agents.policies.cordvip.CordViP
   down_dims: [512, 1024, 2048]
   diffusion_step_embed_dim: 64
   kernel_size: 5

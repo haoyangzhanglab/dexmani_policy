@@ -1,8 +1,6 @@
-"""DQ-RISE: flow matching over arm joints and quantized hand-state indices."""
-
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -12,11 +10,14 @@ from dexmani_policy.agents.hand_prior.codebook import (
     HandStateCodebook, load_codebook, validate_hand_coordinates,
 )
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class DQRISEPolicy(BasePolicy):
+class DQRISE(Policy):
     supported_action_keys = ("action",)
+    arm_dim = 7
+    hand_dim = 12
+    flow_action_dim = 8
 
     def __init__(
         self,
@@ -24,7 +25,6 @@ class DQRISEPolicy(BasePolicy):
         n_obs_steps: int = 2,
         n_action_steps: int = 8,
         action_dim: int = 19,
-        tcp_dim: int = 7,
         codebook_num_groups: int = 2,
         codebook_size: int = 4,
         pc_dim: int = 3,
@@ -33,6 +33,7 @@ class DQRISEPolicy(BasePolicy):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         fusion_stage: str = "post_global",
         semantic_pool_sigma: float | None = None,
         n_layers: int = 8,
@@ -46,10 +47,8 @@ class DQRISEPolicy(BasePolicy):
         num_inference_steps: int = 10,
         modality_dropout_probs: dict | None = None,
     ) -> None:
-        if (n_obs_steps, action_dim, tcp_dim) != (2, 19, 7):
+        if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DQ-RISE requires n_obs_steps=2 and joint action=7+12")
-        hand_dim = action_dim - tcp_dim
-        flow_action_dim = tcp_dim + 1
         obs_encoder = SpatialObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -58,12 +57,13 @@ class DQRISEPolicy(BasePolicy):
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
+            rgb_backbone_name=rgb_backbone_name,
             fusion_stage=fusion_stage,
             semantic_pool_sigma=semantic_pool_sigma,
         )
         backbone = DiTX(
             horizon=horizon,
-            action_dim=flow_action_dim,
+            action_dim=self.flow_action_dim,
             n_obs_steps=n_obs_steps,
             obs_token_dim=obs_encoder.out_dim,
             timestep_embed_dim=timestep_embed_dim,
@@ -90,11 +90,8 @@ class DQRISEPolicy(BasePolicy):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-        self.tcp_dim = tcp_dim
-        self.hand_dim = hand_dim
-        self.flow_action_dim = flow_action_dim
         self.hand_codebook = HandStateCodebook(
-            hand_dim=hand_dim,
+            hand_dim=self.hand_dim,
             num_groups=codebook_num_groups,
             codebook_size=codebook_size,
         )
@@ -113,11 +110,11 @@ class DQRISEPolicy(BasePolicy):
     def compute_loss(
         self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,
     ) -> tuple[torch.Tensor, dict]:
-        condition = self.encode_observation(batch["obs"])
+        condition = self._encode_obs(batch["obs"])
 
         normed = self.normalizer["action"].normalize(batch["action"])
-        arm_part = normed[..., : self.tcp_dim]
-        hand_part = normed[..., self.tcp_dim :]
+        arm_part = normed[..., : self.arm_dim]
+        hand_part = normed[..., self.arm_dim :]
         index, _ = self.hand_codebook.encode(hand_part)
 
         flow_target = torch.cat([arm_part, index], dim=-1)
@@ -126,7 +123,7 @@ class DQRISEPolicy(BasePolicy):
         )
 
     @torch.no_grad()
-    def predict_action_from_condition(
+    def _predict_from_condition(
         self, condition: torch.Tensor, inference_steps: int | None = None,
         *, generator: torch.Generator | None = None,
         rtc_prefix: torch.Tensor | None = None,
@@ -140,17 +137,17 @@ class DQRISEPolicy(BasePolicy):
             inference_steps=inference_steps, dtype=torch.float32, generator=generator,
         )
 
-        arm_pred = reduced_action[..., : self.tcp_dim]
+        arm_pred = reduced_action[..., : self.arm_dim]
         idx_pred = reduced_action[..., -1]
         hand_pred, _ = self.hand_codebook.decode(idx_pred)
 
         normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)
-        return self.format_action_output(prediction)
+        return self._action_output(prediction)
 
     def extra_repr(self) -> str:
         return (
-            f"action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
+            f"action_dim={self.action_dim}, arm_dim={self.arm_dim}, "
             f"hand_dim={self.hand_dim}, "
             f"flow_action_dim={self.flow_action_dim}, "
             f"codes={self.hand_codebook.num_codes}"

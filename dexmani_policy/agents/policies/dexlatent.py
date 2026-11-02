@@ -1,6 +1,6 @@
-"""Flow matching over arm joints and frozen, framewise DexLatent hand means."""
-
 from __future__ import annotations
+
+from typing import Literal
 
 import torch
 
@@ -8,10 +8,10 @@ from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.dexlatent import DexLatentHandPrior
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class DexLatentPolicy(BasePolicy):
+class DexLatent(Policy):
     supported_action_keys = ("action",)
     hand_dim = 12
     flow_action_dim = 39
@@ -23,11 +23,11 @@ class DexLatentPolicy(BasePolicy):
         n_action_steps: int = 8,
         action_dim: int = 19,
         pc_dim: int = 3,
-        state_dim: int = 19,
         num_points: int = 1024,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         fusion_stage: str = "post_global",
         semantic_pool_sigma: float | None = None,
         n_layers: int = 8,
@@ -41,16 +41,17 @@ class DexLatentPolicy(BasePolicy):
         num_inference_steps: int = 10,
         modality_dropout_probs: dict | None = None,
     ) -> None:
-        if (n_obs_steps, action_dim, state_dim) != (2, 19, 19):
+        if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DexLatent requires two observations and 19D joint actions/state")
         obs_encoder = SpatialObservationEncoder(
             pc_dim=pc_dim,
-            state_dim=state_dim,
+            state_dim=19,
             num_points=num_points,
             n_obs_steps=n_obs_steps,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
+            rgb_backbone_name=rgb_backbone_name,
             fusion_stage=fusion_stage,
             semantic_pool_sigma=semantic_pool_sigma,
         )
@@ -95,7 +96,7 @@ class DexLatentPolicy(BasePolicy):
         self.normalizer.fit_field("hand_latent", latents, mode="limits")
 
     def compute_loss(self, batch: dict, *, log_metrics: bool = True, **kwargs) -> tuple[torch.Tensor, dict]:
-        condition = self.encode_observation(batch["obs"])
+        condition = self._encode_obs(batch["obs"])
         arm, latent = self._encode_actions(batch["action"])
         flow_target = torch.cat([arm, self.normalizer["hand_latent"].normalize(latent)], dim=-1)
         return self.action_decoder.compute_loss(
@@ -103,7 +104,7 @@ class DexLatentPolicy(BasePolicy):
         )
 
     @torch.no_grad()
-    def predict_action_from_condition(
+    def _predict_from_condition(
         self, condition: torch.Tensor, inference_steps: int | None = None,
         *, generator: torch.Generator | None = None,
         rtc_prefix: torch.Tensor | None = None,
@@ -119,4 +120,4 @@ class DexLatentPolicy(BasePolicy):
         latent = self.normalizer["hand_latent"].unnormalize(prediction[..., 7:])
         hand = self.hand_prior.decode(latent)
         prediction = self.normalizer["action"].unnormalize(torch.cat([prediction[..., :7], hand], dim=-1))
-        return self.format_action_output(prediction)
+        return self._action_output(prediction)

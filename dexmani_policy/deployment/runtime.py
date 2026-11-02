@@ -113,6 +113,8 @@ class PolicyRuntime:
 
         # Return the full physical future window, excluding auxiliary predictions.
         prediction = result["future_actions"][0].to(device="cpu", dtype=torch.float64).numpy()
+        if not np.isfinite(prediction).all():
+            raise ValueError("Nonfinite physical policy prediction")
         return np.ascontiguousarray(prediction)
 
     def warmup(self, observation, *, samples=5, rtc_delay=0, rtc_guidance_cap=None):

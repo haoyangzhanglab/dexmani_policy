@@ -56,7 +56,7 @@ python -m dexmani_policy.eval_pipeline \
 
 续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
-训练沿用 `training.use_bfloat16` 配方及原有参数存储、训练状态恢复方式。正式部署、仿真评测及 warmup 在严格加载完整策略后统一转为 FP32，预测入口显式关闭 autocast；该转换可能增加显存和耗时，不保证与旧 BF16 推理逐位相同。
+新训练默认使用 FP32，包括 RGB 主干及 LoRA 参数；通过 `training.use_bfloat16=true` 可选启用 BF16 autocast。续训沿用保存的训练配置及训练状态恢复方式。正式部署、仿真评测及 warmup 在严格加载完整策略后统一转为 FP32，并合并 RGB LoRA 权重；预测入口显式关闭 autocast。合并仅作用于推理实例，训练 checkpoint 保留适配器。
 
 动作归一化由组装代码直接确定，不再作为 YAML 选项：joint 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity；DQ/DexLatent 的手部 affine 和 R3D 辅助目标保留各自规则。metric geometry 的 identity、SAT/DQ/DexLatent 的 joint limits、R3D 的 point cloud limits 也由组装代码确定；重新传入这些固定字段会明确报错。触觉 RMS/MaxAbs 等研究选项继续通过 YAML 覆盖。恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 
@@ -84,7 +84,27 @@ bash scripts/training/train.sh sat 'task_name=<task>' \
 bash scripts/training/train.sh sat 'task_name=<task>' agent.rgb_backbone_config.tune_mode=lora
 ```
 
-下载参数 `sat`、`dqrise`、`dp` 仅准备默认 DINOv2-small，`r3d` 仅准备 Uni3D；无参数或 `all` 准备全部三类权重。DQ-RISE 码本仍需通过原有预训练流程获得。小型检查使用随机视觉模型，不代表闭环性能。数据流、B0–B4 配置覆盖与恢复约定见 [观测编码](docs/项目架构.md#观测编码)；初始权重及 HF 缓存位置见 [数据目录说明](data/README.md)。
+DP、SAT、DQ-RISE、DexLatent 可通过 `agent.rgb_backbone_name` 选择 `dino`、`dinov3` 或 `siglip`。默认仍为 DINOv2-small；DINOv2/SigLIP 保留 Transformers 实现，DINOv3-S 使用 timm 1.0.22，共用冻结、全量微调和 LoRA 接口。切换 DINOv3-S：
+
+```bash
+bash scripts/utils/download_pretrained.sh dinov3
+bash scripts/training/train.sh sat 'task_name=<task>' \
+  agent.rgb_backbone_name=dinov3 \
+  initialization.rgb=data/pretrained/dinov3-small
+```
+
+DINOv3-S 默认输入 224×224，输出 14×14 patch 网格，语义对齐排除 CLS 和 4 个 register tokens；沿用当前双线性图像预处理。默认 DINOv2-small 从 `data/pretrained/dinov2-small` 初始化，DINOv3-S 使用 `data/pretrained/dinov3-small`；`initialization.rgb` 仍支持 HF repo ID。完整 checkpoint 保存架构和权重，续训与部署不访问初始来源。
+
+可选 SigLIP 使用 Google Base patch16 / 224：
+
+```bash
+bash scripts/utils/download_pretrained.sh siglip
+bash scripts/training/train.sh sat 'task_name=<task>' \
+  agent.rgb_backbone_name=siglip \
+  initialization.rgb=data/pretrained/siglip-base-patch16-224
+```
+
+下载参数 `sat`、`dqrise`、`dp` 仅准备默认 DINOv2-small，`r3d` 仅准备 Uni3D，`dinov3` 仅准备可选 DINOv3-S，`siglip` 仅准备可选 SigLIP Base；无参数或 `all` 准备 Uni3D、DINOv2-small、DexLatent。DQ-RISE 码本仍需通过原有预训练流程获得。小型检查使用随机视觉模型，不代表闭环性能。数据流、B0–B4 配置覆盖与恢复约定见 [观测编码](docs/项目架构.md#观测编码)；初始权重的本地路径见 [数据目录说明](data/README.md)。
 
 ## InterAct-Dex 动作耦合交互状态预测
 
@@ -98,7 +118,7 @@ python -m dexmani_policy.test_tools.smoke_test interact_dex \
 
 InterAct-Dex 包含以下四部分：
 
-1. **动作耦合的力残差监督**：单元素 `future_force_offsets=[4]` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为13。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
+1. **动作耦合的力残差监督**：标量 `interaction_horizon=4` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为13。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
 2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
 3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistoryEncoder 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
 4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandSceneFusion 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。

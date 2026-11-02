@@ -33,7 +33,7 @@ dataset:
 
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.policies.dp3.DP3Policy
+  _target_: dexmani_policy.agents.policies.dp3.DP3
 
   encoder_type: dp3  # dp3：MLP；idp3：Conv。
   pc_dim: 6
@@ -65,7 +65,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: true
   use_ema: true
   lr_warmup_steps: 500

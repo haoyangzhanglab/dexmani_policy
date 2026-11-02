@@ -75,8 +75,10 @@ class SimRunner:
             result = agent.predict_action(
                 obs_dict=obs_batch, inference_steps=inference_steps, generator=generator
             )
-        actions = result["future_actions"][0, :action_steps]
-        return np.ascontiguousarray(actions.cpu().numpy())
+        actions = result["future_actions"][0].cpu().numpy()
+        if not np.isfinite(actions).all():
+            raise ValueError("Nonfinite physical policy prediction")
+        return np.ascontiguousarray(actions[:action_steps])
 
     def _run_episode(
         self,

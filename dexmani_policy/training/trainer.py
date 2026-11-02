@@ -46,9 +46,7 @@ class PolicyTrainer:
         if checkpoint is None:
             sources = cfg.get("initialization", {})
             method = cfg.policy_name
-            if method == "dp":
-                model.obs_encoder.backbone.initialize_weights(sources.get("rgb"))
-            elif method in {"sat", "dqrise", "dexlatent"}:
+            if method in {"dp", "sat", "dqrise", "dexlatent"}:
                 model.obs_encoder.rgb_encoder.initialize_weights(sources.get("rgb"))
             elif method == "r3d":
                 model.obs_encoder.pc_encoder.initialize_weights(sources.get("uni3d"))
@@ -69,7 +67,7 @@ class PolicyTrainer:
                         print("[CordViP] Scratch training; all observation encoder parameters are trainable")
                 else:
                     payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
-                    encoder = model.obs_encoder.visual if method == "afro" else model.obs_encoder.encoder
+                    encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
                     encoder.load_state_dict(payload["encoder_state"], strict=True)
                     pretrained_state = payload["normalizer_state"]
                     del payload

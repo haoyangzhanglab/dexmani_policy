@@ -9,6 +9,8 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from dexmani_policy.common.config import positive_int
 
+from .sampling.rtc import guided_ddim, rtc_enabled
+
 
 class Diffusion(nn.Module):
     def __init__(
@@ -54,8 +56,13 @@ class Diffusion(nn.Module):
             device=actions.device,
         )
 
+        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(actions.device)
+        # BF16 can round alpha_bar to one and erase low-noise training steps.
+        alpha_bar = self.noise_scheduler.alphas_cumprod[timestep].float().view(-1, 1, 1)
+        alpha, sigma = alpha_bar.sqrt(), (1 - alpha_bar).sqrt()
+        noisy_actions = (alpha * actions + sigma * noise).to(actions.dtype)
         pred = self.model(
-            x=self.noise_scheduler.add_noise(actions, noise, timestep),
+            x=noisy_actions,
             timestep=timestep,
             context=cond,
         )
@@ -66,25 +73,20 @@ class Diffusion(nn.Module):
         elif pred_type == "sample":
             target = actions
         else:
-            # add_noise places the schedule on-device; v-target coefficients stay in FP32.
-            alpha_bar = self.noise_scheduler.alphas_cumprod[timestep].float()
-            alpha_t = alpha_bar.sqrt()
-            sigma_t = (1 - alpha_bar).sqrt()
-            target = alpha_t.view(-1, 1, 1) * noise - sigma_t.view(-1, 1, 1) * actions
-            target = target.to(dtype=actions.dtype)
+            target = (alpha * noise - sigma * actions).to(actions.dtype)
 
         loss_dict = {}
         # Each group retains its own mean before applying its explicit weight.
         if dim_groups is not None:
             group_losses = []
             for name, (start, end, weight) in dim_groups.items():
-                group_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
+                group_loss = F.mse_loss(pred[..., start:end].float(), target[..., start:end].float())
                 if log_metrics:
                     loss_dict[f"loss_{name}"] = group_loss.detach()
                 group_losses.append(group_loss * weight)
             loss = torch.stack(group_losses).sum()
         else:
-            loss = F.mse_loss(pred, target)
+            loss = F.mse_loss(pred.float(), target.float())
 
         if log_metrics:
             loss_dict.update(loss=loss.detach(), loss_action=loss.detach())
@@ -109,7 +111,7 @@ class Diffusion(nn.Module):
             if inference_steps is None
             else positive_int(inference_steps, "inference_steps")
         )
-        dtype = cond.dtype if dtype is None else dtype
+        dtype = torch.float32 if dtype is None else dtype
 
         # Scheduler tensors are not module buffers; restored and trained instances need the same device.
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
@@ -118,10 +120,8 @@ class Diffusion(nn.Module):
         self.noise_scheduler.final_alpha_cumprod = self.noise_scheduler.final_alpha_cumprod.to(
             cond.device
         )
-        if rtc_prefix is not None and rtc_prefix.shape[-2] and rtc_guidance_cap != 0:
-            from dexmani_policy.agents.action_decoders.sampling.rtc import guided_inference
-
-            return guided_inference(
+        if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
+            return guided_ddim(
                 self,
                 cond,
                 action_shape,
@@ -133,12 +133,7 @@ class Diffusion(nn.Module):
                 dtype=dtype,
                 generator=generator,
             )
-        if rtc_prefix is not None:
-            from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
-
-            prepare_schedule(self.noise_scheduler, num_steps, rtc_guidance_cap)
-        else:
-            self.noise_scheduler.set_timesteps(num_steps)
+        self.noise_scheduler.set_timesteps(num_steps)
         sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         timesteps = self.noise_scheduler.timesteps.to(sample.device)
         for index, timestep in enumerate(self.noise_scheduler.timesteps.tolist()):

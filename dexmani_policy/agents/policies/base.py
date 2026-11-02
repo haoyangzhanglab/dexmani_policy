@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import torch
 from torch import nn
@@ -35,17 +35,16 @@ def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> li
 
 
 def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float) -> dict:
-    """Apply one decay rate to all trainable parameters, in module order."""
     return {
         "params": [p for p in module.parameters() if p.requires_grad],
         "lr": lr, "weight_decay": weight_decay,
     }
 
 
-class BasePolicy(nn.Module):
-    """Shared observation preprocessing, training and action-window interfaces."""
-
+class Policy(nn.Module):
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
+    supported_execution_modes: tuple[str, ...] = ("sync", "async")
+    loss_groups: dict[str, tuple[int, int, float]] | None = None
 
     def __init__(
         self,
@@ -89,8 +88,6 @@ class BasePolicy(nn.Module):
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return self.obs_encoder.consumed_observation_fields
 
-    supported_execution_modes: tuple[str, ...] = ("sync", "async")
-
     def configure_normalizer(self, feature_dims, feature_shapes) -> None:
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
@@ -99,12 +96,13 @@ class BasePolicy(nn.Module):
     def requires_ema_for_loss(self) -> bool:
         return bool(getattr(self.action_decoder, "requires_ema_for_loss", False))
 
-    def get_training_loss_kwargs(self, ema_agent: BasePolicy | None = None) -> dict:
+    def get_training_loss_kwargs(self, ema_agent: Policy | None = None) -> dict:
         if not self.requires_ema_for_loss:
             return {}
-        return {"ema_decoder": cast(BasePolicy, ema_agent).action_decoder}
+        assert ema_agent is not None
+        return {"ema_decoder": ema_agent.action_decoder}
 
-    def preprocess(self, obs_dict: dict) -> dict:
+    def _preprocess_obs(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
             if key in POINT_CLOUD_FIELDS:
@@ -118,12 +116,8 @@ class BasePolicy(nn.Module):
             result[key] = value.flatten(0, 1)
         return result
 
-    def encode_observation(self, obs_dict: dict) -> torch.Tensor:
-        return self.obs_encoder(self.preprocess(obs_dict))
-
-    def loss_groups(self) -> dict[str, tuple[int, int, float]] | None:
-        """Optional named action slices for separate diffusion losses."""
-        return None
+    def _encode_obs(self, obs_dict: dict) -> torch.Tensor:
+        return self.obs_encoder(self._preprocess_obs(obs_dict))
 
     def forward(
         self, batch: dict, *, log_metrics: bool = True, **kwargs
@@ -133,11 +127,10 @@ class BasePolicy(nn.Module):
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs
     ) -> tuple[torch.Tensor, dict]:
-        condition = self.encode_observation(batch["obs"])
+        condition = self._encode_obs(batch["obs"])
         normalized_actions = self.normalizer["action"].normalize(batch["action"])
-        groups = self.loss_groups()
-        if groups is not None:
-            kwargs["dim_groups"] = groups
+        if self.loss_groups is not None:
+            kwargs["dim_groups"] = self.loss_groups
         return self.action_decoder.compute_loss(
             condition, normalized_actions, log_metrics=log_metrics, **kwargs
         )
@@ -153,10 +146,10 @@ class BasePolicy(nn.Module):
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        condition = self.encode_observation(obs_dict)
+        condition = self._encode_obs(obs_dict)
         if rtc_prefix is None:
-            return self.predict_action_from_condition(condition, inference_steps=inference_steps, generator=generator)
-        return self.predict_action_from_condition(
+            return self._predict_from_condition(condition, inference_steps=inference_steps, generator=generator)
+        return self._predict_from_condition(
             condition,
             inference_steps=inference_steps,
             generator=generator,
@@ -171,7 +164,7 @@ class BasePolicy(nn.Module):
         return self.action_dim
 
     @torch.no_grad()
-    def predict_action_from_condition(
+    def _predict_from_condition(
         self,
         condition: torch.Tensor,
         inference_steps: int | None = None,
@@ -200,11 +193,9 @@ class BasePolicy(nn.Module):
             condition, action_shape, inference_steps=inference_steps, generator=generator, **kwargs
         )
         prediction = self.normalizer["action"].unnormalize(prediction)
-        return self.format_action_output(prediction)
+        return self._action_output(prediction)
 
-    def format_action_output(self, prediction: torch.Tensor) -> dict[str, torch.Tensor]:
-        if not torch.isfinite(prediction).all():
-            raise ValueError("Nonfinite physical policy prediction")
+    def _action_output(self, prediction: torch.Tensor) -> dict[str, torch.Tensor]:
         return {"future_actions": prediction[:, self.action_start_index :, : self.control_action_dim]}
 
     @property
@@ -216,7 +207,7 @@ class BasePolicy(nn.Module):
         }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
-        self.action_decoder.model = cast(nn.Module, torch.compile(self.action_decoder.model, **compile_kwargs))
+        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
 
     def optimizer_groups(
         self, lr: float, obs_lr: float, weight_decay: float, obs_weight_decay: float

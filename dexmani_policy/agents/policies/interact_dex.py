@@ -14,15 +14,15 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder, _rotation_6d_to_matrix
-from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
-from dexmani_policy.common.config import require_tactile_source, validate_future_force_offsets
+from dexmani_policy.agents.policies.base import Policy, parameter_groups
+from dexmani_policy.common.config import positive_int, require_tactile_source
 
 
-class InterActDexObservationEncoder(nn.Module):
+class InterActDexEncoder(nn.Module):
     consumed_observation_fields = (
         "joint_state", "point_cloud", "eef_pose", "fingertip_xyz", "finger_tactile_force",
     )
-    obs_token_dim = 192
+    out_dim = 192
 
     def __init__(
         self,
@@ -41,10 +41,10 @@ class InterActDexObservationEncoder(nn.Module):
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
-        self.hand_state = HandStateEncoder(token_dim=self.obs_token_dim)
+        self.hand_state = HandStateEncoder(token_dim=self.out_dim)
         self.hand_scene = HandSceneFusion(self.pc_encoder.out_dim, tactile_encoder)
         self.scene_tokenizer = SceneTokenizer(self.pc_encoder.out_dim)
-        self.scene_projection = nn.Linear(self.pc_encoder.out_dim, self.obs_token_dim)
+        self.scene_projection = nn.Linear(self.pc_encoder.out_dim, self.out_dim)
         self.hand_history = HandHistoryEncoder(n_obs_steps)
 
     @property
@@ -84,8 +84,10 @@ class InterActDexObservationEncoder(nn.Module):
         return torch.cat((interaction, scene), dim=2).flatten(1, 2).float()
 
 
-class InterActDexPolicy(BasePolicy):
+class InterActDex(Policy):
+    supported_execution_modes = ("sync", "async", "rtc")
     supported_action_keys = ("action",)
+    loss_groups = {"arm": (0, 7, 0.5), "hand": (7, 19, 0.5)}
 
     def __init__(
         self,
@@ -96,7 +98,6 @@ class InterActDexPolicy(BasePolicy):
         tactile_source: str,
         tactile_encoder: nn.Module,
         pc_dim: int = 6,
-        state_dim: int = 19,
         num_points: int = 1024,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
@@ -110,20 +111,19 @@ class InterActDexPolicy(BasePolicy):
         qk_norm: bool = False,
         num_inference_steps: int = 10,
         future_force_loss_weight: float = 0.0,
-        future_force_offsets: tuple[int] = (4,),
+        interaction_horizon: int = 4,
         time_shift_alpha: float = 1.0,
     ) -> None:
         future_force_loss_weight = float(future_force_loss_weight)
         if not math.isfinite(future_force_loss_weight) or future_force_loss_weight < 0:
             raise ValueError("future_force_loss_weight must be finite and non-negative")
-        future_force_offsets = validate_future_force_offsets(future_force_offsets)
-        interaction_horizon, = future_force_offsets
+        positive_int(interaction_horizon, "interaction_horizon")
         future_steps = horizon - (n_obs_steps - 1)
         if interaction_horizon > future_steps:
             raise ValueError(
-                f"future_force_offset K ({interaction_horizon}) exceeds available future actions ({future_steps})"
+                f"interaction_horizon K ({interaction_horizon}) exceeds available future actions ({future_steps})"
             )
-        if (action_dim, state_dim) != (19, 19):
+        if action_dim != 19:
             raise ValueError("InterActDex requires 19D joint state and actions")
         require_tactile_source(("finger_tactile_force",), tactile_source)
         if tactile_encoder.input_key != "finger_tactile_force":
@@ -131,7 +131,7 @@ class InterActDexPolicy(BasePolicy):
         if (tactile_encoder.num_tokens, tactile_encoder.out_dim) != (5, 64):
             raise ValueError("InterActDex requires five ordered 64D tactile tokens")
 
-        obs_encoder = InterActDexObservationEncoder(
+        obs_encoder = InterActDexEncoder(
             tactile_encoder=tactile_encoder,
             tactile_source=tactile_source,
             pc_dim=pc_dim,
@@ -144,7 +144,7 @@ class InterActDexPolicy(BasePolicy):
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,
-            obs_token_dim=obs_encoder.obs_token_dim,
+            obs_token_dim=obs_encoder.out_dim,
             interaction_horizon=interaction_horizon,
             timestep_embed_dim=timestep_embed_dim,
             n_layers=n_layers,
@@ -170,7 +170,7 @@ class InterActDexPolicy(BasePolicy):
             action_dim=action_dim,
         )
         self.future_force_loss_weight = future_force_loss_weight
-        self.future_force_offsets = future_force_offsets
+        self.interaction_horizon = interaction_horizon
         self.future_force_head = nn.Sequential(
             nn.Linear(hidden_dim, 128), nn.SiLU(), nn.Linear(128, 3),
         ) if future_force_loss_weight > 0 else None
@@ -188,22 +188,14 @@ class InterActDexPolicy(BasePolicy):
             **super().effective_config,
             "time_shift_alpha": self.action_decoder.time_shift_alpha,
             "future_force_loss_weight": self.future_force_loss_weight,
-            "future_force_offsets": list(self.future_force_offsets),
+            "interaction_horizon": self.interaction_horizon,
         }
-
-    def loss_groups(self) -> dict[str, tuple[int, int, float]]:
-        return {"arm": (0, 7, 0.5), "hand": (7, 19, 0.5)}
 
     def _compute_future_force_loss(
         self, prediction: torch.Tensor, batch: dict,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = prediction.shape[0]
         force = batch["future_force"]
         valid = batch["future_force_valid"]
-        if force.shape != (batch_size, 1, 5, 3):
-            raise ValueError("future_force must have shape [B, 1, 5, 3]")
-        if valid.shape != (batch_size, 1):
-            raise ValueError("future_force_valid must have shape [B, 1]")
 
         with torch.autocast(device_type=force.device.type, enabled=False):
             current = batch["obs"]["finger_tactile_force"][:, -1:].float()
@@ -228,9 +220,9 @@ class InterActDexPolicy(BasePolicy):
         if self.future_force_head is None:
             return super().compute_loss(batch, log_metrics=log_metrics, **kwargs)
 
-        condition = self.encode_observation(batch["obs"])
+        condition = self._encode_obs(batch["obs"])
         actions = self.normalizer["action"].normalize(batch["action"])
-        kwargs["dim_groups"] = self.loss_groups()
+        kwargs["dim_groups"] = self.loss_groups
         kwargs["return_features"] = True
         action_loss, metrics, features = self.action_decoder.compute_loss(
             condition, actions, log_metrics=log_metrics, **kwargs,

@@ -8,10 +8,10 @@ from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNetDense
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class ManiFlowObservationEncoder(nn.Module):
+class ManiFlowEncoder(nn.Module):
     """Dense XYZRGB and state tokens in frame-major order [B,T*N,D]."""
 
     consumed_observation_fields = ("joint_state", "point_cloud")
@@ -27,16 +27,13 @@ class ManiFlowObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        if n_obs_steps <= 0:
-            raise ValueError("n_obs_steps must be greater than 0")
-        pc_encoder_config = dict(pc_encoder_config or {})
-        self.pc_encoder = PointNetDense(input_channels=pc_dim, **pc_encoder_config)
-        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.pc_encoder = PointNetDense(input_channels=pc_dim, **(pc_encoder_config or {}))
+        self.state_encoder = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
 
-        self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+        self.out_dim = self.pc_encoder.out_dim + self.state_encoder.out_dim
 
     @property
     def effective_config(self):
@@ -52,14 +49,16 @@ class ManiFlowObservationEncoder(nn.Module):
 
         pc_features = self.pc_encoder(pc)
 
-        state_features = self.state_mlp(obs["joint_state"])
+        state_features = self.state_encoder(obs["joint_state"])
         state_features = state_features.unsqueeze(1).expand(-1, pc_features.size(1), -1)
         features = torch.cat([pc_features, state_features], dim=-1)
 
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
-class ManiFlowPolicy(BasePolicy):
+class ManiFlow(Policy):
+    supported_execution_modes = ("sync", "async", "rtc")
+
     def __init__(
         self,
         horizon: int,
@@ -91,7 +90,7 @@ class ManiFlowPolicy(BasePolicy):
         target_t_sample_mode: str = "relative",
         modality_dropout_probs: dict | None = None,
     ) -> None:
-        obs_encoder = ManiFlowObservationEncoder(
+        obs_encoder = ManiFlowEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
@@ -105,7 +104,7 @@ class ManiFlowPolicy(BasePolicy):
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,
-            obs_token_dim=obs_encoder.obs_token_dim,
+            obs_token_dim=obs_encoder.out_dim,
             timestep_embed_dim=timestep_embed_dim,
             target_t_embed_dim=target_t_embed_dim,
             n_layers=n_layers,

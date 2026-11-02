@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import validate_future_force_offsets
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 
 
@@ -44,8 +44,8 @@ class AdapTacDataset(DemonstrationDataset):
 
 
 class InterActDexDataset(DemonstrationDataset):
-    def __init__(self, *args, future_force_offsets, sensor_modalities, **kwargs):
-        self.future_force_offsets = validate_future_force_offsets(future_force_offsets)
+    def __init__(self, *args, interaction_horizon, sensor_modalities, **kwargs):
+        self.interaction_horizon = positive_int(interaction_horizon, "interaction_horizon")
         if "finger_tactile_force" not in sensor_modalities:
             raise ValueError("InterAct-Dex requires finger_tactile_force for its future target")
         super().__init__(*args, sensor_modalities=sensor_modalities, **kwargs)
@@ -53,7 +53,7 @@ class InterActDexDataset(DemonstrationDataset):
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
         query = self.sampler.sample_source_rows(idx)[self.action_start_index]
-        force, valid = read_future_force(self.episode_store, query, self.future_force_offsets)
+        force, valid = read_future_force(self.episode_store, query, (self.interaction_horizon,))
         data["future_force"] = torch.from_numpy(force)
         data["future_force_valid"] = torch.from_numpy(valid)
         return data

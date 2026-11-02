@@ -23,7 +23,6 @@ class GeometricPatchEmbedding(nn.Module):
         self.register_buffer("wavelengths", torch.logspace(math.log10(0.02), math.log10(0.32), 8))
         self.register_buffer("pool_sigmas", torch.tensor([0.04, 0.12]))
         self.member_mlp = build_mlp([input_channels + 1 + 48, 64, 128], activate_last=True)
-        self.refine = build_mlp([256, 128, 128])
         # Max, two weighted means, covariance upper triangle, and patch radius.
         self.projection = build_mlp([3 * 128 + 7, channels, channels])
 
@@ -55,15 +54,6 @@ class GeometricPatchEmbedding(nn.Module):
             moments = torch.cat((covariance, radius / self.geometry_scale), dim=-1)
 
         member = self.member_mlp(features.to(self.member_mlp[0].weight.dtype))
-        context = member.amax(dim=2, keepdim=True)
-        # Project the shared context once per patch, keeping the existing refine parameters.
-        linear = self.refine[0]
-        d = member.shape[-1]
-        member = F.linear(member, linear.weight[:, :d], linear.bias) + F.linear(
-            context, linear.weight[:, d:], None
-        )
-        for i in range(1, len(self.refine)):
-            member = self.refine[i](member)
 
         with torch.autocast(device_type=member.device.type, enabled=False):
             weighted = torch.einsum("bmks,bmkd->bmsd", weights, member.float()).flatten(-2)
@@ -100,8 +90,8 @@ class GlobalTransformerBlock(nn.Module):
         update = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
         update = update.transpose(1, 2).reshape(b, m, d)
 
-        tokens = tokens + self.attention_gain * self.projection(update)
-        return tokens + self.ffn_gain * self.ffn(self.norm2(tokens))
+        tokens = tokens + self.attention_gain.to(tokens.dtype) * self.projection(update)
+        return tokens + self.ffn_gain.to(tokens.dtype) * self.ffn(self.norm2(tokens))
 
 
 class Sparse3DEncoder(nn.Module):

@@ -1,15 +1,16 @@
-"""SAT action representation with shared DiTX and standard flow matching."""
-
 from __future__ import annotations
+
+from typing import Literal
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class SATPolicy(BasePolicy):
+class SAT(Policy):
+    supported_execution_modes = ("sync", "async", "rtc")
     supported_action_keys = ("action",)
 
     def __init__(
@@ -24,6 +25,7 @@ class SATPolicy(BasePolicy):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         fusion_stage: str = "post_global",
         semantic_pool_sigma: float | None = None,
         n_layers: int = 8,
@@ -47,6 +49,7 @@ class SATPolicy(BasePolicy):
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
+            rgb_backbone_name=rgb_backbone_name,
             fusion_stage=fusion_stage,
             semantic_pool_sigma=semantic_pool_sigma,
         )

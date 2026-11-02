@@ -6,7 +6,7 @@ from .image_processor import ImageProcessor
 
 
 def build_rgb_encoder(
-    name: Literal["resnet", "dino", "siglip"], config: dict | None = None
+    name: Literal["resnet", "dino", "dinov3", "siglip"], config: dict | None = None
 ) -> tuple[nn.Module, ImageProcessor]:
     config = config or {}
     processor = ImageProcessor.from_preset(name, config)

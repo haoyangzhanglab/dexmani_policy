@@ -31,7 +31,7 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  _target_: dexmani_policy.agents.policies.maniflow.ManiFlowPolicy
+  _target_: dexmani_policy.agents.policies.maniflow.ManiFlow
 
   pc_dim: 6
   state_dim: 19
@@ -78,7 +78,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: true
   use_ema: true
   lr_warmup_steps: 500

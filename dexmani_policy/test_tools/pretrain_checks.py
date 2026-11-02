@@ -13,8 +13,8 @@ import torch
 import zarr
 from omegaconf import OmegaConf
 
-from dexmani_policy.agents.policies.afro import AFROObservationEncoder
-from dexmani_policy.agents.policies.cordvip import CordViPObservationEncoder
+from dexmani_policy.agents.policies.afro import AFROEncoder
+from dexmani_policy.agents.policies.cordvip import CordViPEncoder
 from dexmani_policy.common.pytorch_util import get_rng_state
 from dexmani_policy.datasets.preprocess.contact_map import generate
 from dexmani_policy.training.common.config import load_policy_config, validate_config
@@ -32,6 +32,11 @@ def check_tactile_configs():
         cfg = load_policy_config(method, [f"tactile={tactile}", f"tactile_source={source}"])
         validate_config(cfg)
         assert cfg.agent.tactile_source == cfg.dataset.tactile_source == source
+        if method == "interact_dex":
+            assert cfg.agent.interaction_horizon == cfg.dataset.interaction_horizon == 4
+            disabled = load_policy_config(method, ["agent.future_force_loss_weight=0"])
+            assert "interaction_horizon" not in disabled.dataset
+            assert disabled.agent.interaction_horizon == 4
         encoder = hydra.utils.instantiate(cfg.agent.tactile_encoder)
         assert encoder.input_key in cfg.dataset.sensor_modalities
         assert (encoder.num_tokens, encoder.out_dim) == (5, 64)
@@ -154,7 +159,7 @@ def check_training(root, method, device=torch.device("cpu")):
     common.export_encoder(resumed["model_state"], root / "export.pt")
     package = torch.load(root / "export.pt", weights_only=True)
     torch.testing.assert_close(package, torch.load(directory / "encoder.pt", weights_only=True), rtol=0, atol=0)
-    encoder = AFROObservationEncoder(2).visual if method == "afro" else CordViPObservationEncoder(2).encoder
+    encoder = AFROEncoder(2).pc_encoder if method == "afro" else CordViPEncoder(2).interaction_encoder
     encoder.load_state_dict(package["encoder_state"], strict=True)
 
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all").get_validation_dataset()

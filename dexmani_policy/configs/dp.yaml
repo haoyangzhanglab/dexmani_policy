@@ -7,7 +7,7 @@ defaults:
 policy_name: dp
 
 initialization:
-  rgb: facebook/dinov2-small
+  rgb: data/pretrained/dinov2-small
 
 horizon: 16
 n_obs_steps: 2
@@ -43,12 +43,11 @@ dataset:
 
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.policies.dp.DPPolicy
+  _target_: dexmani_policy.agents.policies.dp.DP
 
   rgb_backbone_name: dino
   rgb_backbone_config:
     tune_mode: lora
-    lora_dtype: float32
     image_size: [224, 224]
 
   state_dim: 19
@@ -70,7 +69,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: true
   use_ema: true
   lr_warmup_steps: 500

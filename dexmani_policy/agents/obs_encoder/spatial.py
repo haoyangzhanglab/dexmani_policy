@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 import torch
 from torch import nn
@@ -30,6 +31,7 @@ class SpatialObservationEncoder(nn.Module):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         fusion_stage: str = "post_global",
         semantic_pool_sigma: float | None = None,
     ) -> None:
@@ -42,6 +44,7 @@ class SpatialObservationEncoder(nn.Module):
             raise ValueError("semantic_pool_sigma must be None or finite and positive")
         self.num_points = num_points
         self.n_obs_steps = n_obs_steps
+        self.rgb_backbone_name = rgb_backbone_name
         self.fusion_stage = fusion_stage
         self.semantic_pool_sigma = semantic_pool_sigma
 
@@ -59,10 +62,10 @@ class SpatialObservationEncoder(nn.Module):
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_config, **pc_config,
         )
-        self.rgb_encoder, self.image_processor = build_rgb_encoder("dino", rgb_config)
+        self.rgb_encoder, self.image_processor = build_rgb_encoder(rgb_backbone_name, rgb_config)
         self.alignment = FeatureAlignment(self.rgb_encoder.out_dim, self.pc_encoder.out_dim)
         self.spatial_projection = nn.Linear(self.pc_encoder.out_dim, self.out_dim)
-        self.state_mlp = StateEncoder(state_dim, self.out_dim)
+        self.state_encoder = StateEncoder(state_dim, self.out_dim)
 
         self.modality_embedding = nn.Parameter(torch.empty(1, 2, self.out_dim))
         nn.init.normal_(self.modality_embedding, std=0.02)
@@ -73,6 +76,7 @@ class SpatialObservationEncoder(nn.Module):
         return {
             "pc_encoder_config": self.pc_encoder.effective_config,
             "fps_random_config": self.pc_encoder.fps_random_config,
+            "rgb_backbone_name": self.rgb_backbone_name,
             "rgb_backbone_config": {
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
             },
@@ -112,7 +116,7 @@ class SpatialObservationEncoder(nn.Module):
             tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
 
         spatial = self.spatial_projection(tokens)
-        state = self.state_mlp(obs["joint_state"]).unsqueeze(1)
+        state = self.state_encoder(obs["joint_state"]).unsqueeze(1)
         spatial = spatial + self.modality_embedding[:, :1].to(spatial.dtype)
         state = state + self.modality_embedding[:, 1:].to(state.dtype)
         frames = self.output_norm(torch.cat((spatial, state), dim=1))

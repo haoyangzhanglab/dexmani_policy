@@ -63,10 +63,11 @@ class ImageProcessor(torch.nn.Module):
     def from_preset(cls, name: str, config: dict | None = None) -> "ImageProcessor":
         """Select preprocessing settings from the combined RGB encoder config."""
         config = config or {}
+        preset = IMAGE_PROCESSOR_PRESETS["dino" if name == "dinov3" else name]
         return cls(
             **{
                 key: config[key] if config.get(key) is not None else default
-                for key, default in IMAGE_PROCESSOR_PRESETS[name].items()
+                for key, default in preset.items()
             }
         )
 

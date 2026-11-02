@@ -12,32 +12,32 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class DPObservationEncoder(nn.Module):
+class DPEncoder(nn.Module):
     consumed_observation_fields = ("joint_state", "rgb")
 
     def __init__(
         self,
-        rgb_backbone_name: Literal["resnet", "dino", "siglip"],
+        rgb_backbone_name: Literal["resnet", "dino", "dinov3", "siglip"],
         state_dim: int,
         n_obs_steps: int,
         state_out_dim: int = 64,
         rgb_backbone_config: dict | None = None,
     ) -> None:
         super().__init__()
-        self.backbone, self.image_processor = build_rgb_encoder(
+        self.rgb_encoder, self.image_processor = build_rgb_encoder(
             rgb_backbone_name, config=rgb_backbone_config
         )
-        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.state_encoder = StateEncoder(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
-        self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
+        self.out_dim = n_obs_steps * (self.rgb_encoder.out_dim + self.state_encoder.out_dim)
 
     @property
     def effective_config(self):
         return {"rgb_backbone_config": {
-            **self.backbone.effective_config, **self.image_processor.config,
+            **self.rgb_encoder.effective_config, **self.image_processor.config,
         }}
 
     def forward(self, obs: dict) -> torch.Tensor:
@@ -45,15 +45,15 @@ class DPObservationEncoder(nn.Module):
 
         features = torch.cat(
             [
-                self.backbone(rgb)["global_token"],
-                self.state_mlp(obs["joint_state"]),
+                self.rgb_encoder(rgb)["global_token"],
+                self.state_encoder(obs["joint_state"]),
             ],
             dim=-1,
         )
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
-class DPPolicy(BasePolicy):
+class DP(Policy):
     supported_execution_modes = ("sync", "async", "rtc")
 
     def __init__(
@@ -62,7 +62,7 @@ class DPPolicy(BasePolicy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        rgb_backbone_name: Literal["resnet", "dino", "siglip"],
+        rgb_backbone_name: Literal["resnet", "dino", "dinov3", "siglip"],
         state_dim: int,
         state_out_dim: int = 64,
         rgb_backbone_config: dict | None = None,
@@ -78,7 +78,7 @@ class DPPolicy(BasePolicy):
         clip_sample: bool = True,
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
-        obs_encoder = DPObservationEncoder(
+        obs_encoder = DPEncoder(
             rgb_backbone_name,
             state_dim,
             n_obs_steps,
@@ -87,7 +87,7 @@ class DPPolicy(BasePolicy):
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
-            context_dim=obs_encoder.out_dim * n_obs_steps,
+            context_dim=obs_encoder.out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=down_dims,
             kernel_size=kernel_size,

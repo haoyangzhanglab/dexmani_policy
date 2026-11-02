@@ -1,28 +1,33 @@
-"""DDIM adaptation of RTC soft inpainting: https://arxiv.org/abs/2506.07339."""
+"""RTC soft inpainting for flow matching and DDIM: https://arxiv.org/abs/2506.07339."""
 
 import math
 
 import torch
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+
+from .time_sampling import euler_time_grid
+
+
+def rtc_enabled(prefix, action_shape, delay, offset, beta):
+    if prefix is None:
+        return False
+    if not math.isfinite(beta) or beta < 0:
+        raise ValueError("RTC guidance cap must be finite and nonnegative")
+    if prefix.ndim != 3 or prefix.shape[0] != action_shape[0]:
+        raise ValueError("RTC prefix must be (batch, length, control_dim)")
+    length, control_dim = prefix.shape[1:]
+    if (
+        offset < 0
+        or not 0 <= delay <= length <= action_shape[1] - offset
+        or not 0 < control_dim <= action_shape[2]
+    ):
+        raise ValueError("Invalid RTC prefix horizon/control dimensions")
+    return length > 0 and beta > 0
 
 
 def soft_mask(length, delay, *, device, dtype):
     position = torch.arange(length, device=device, dtype=dtype)
     decay = ((length - position) / (length - delay + 1)).clamp(max=1)
     return decay * torch.expm1(decay) / math.expm1(1)
-
-
-def prepare_schedule(scheduler, steps, beta):
-    if not isinstance(scheduler, DDIMScheduler) or scheduler.config.thresholding:
-        raise NotImplementedError("RTC supports DDIM without dynamic thresholding only")
-    if not math.isfinite(beta) or beta < 0:
-        raise ValueError("RTC guidance cap must be finite and nonnegative")
-
-    scheduler.set_timesteps(steps)
-    alpha = scheduler.alphas_cumprod[scheduler.timesteps]
-    if not ((alpha > 0) & (alpha < 1)).all():
-        raise ValueError("RTC denoising timesteps require 0 < alpha_bar < 1")
-    return alpha
 
 
 def denoised_estimate(output, sample, alpha, sigma, prediction_type):
@@ -35,23 +40,21 @@ def denoised_estimate(output, sample, alpha, sigma, prediction_type):
     raise NotImplementedError(prediction_type)
 
 
+def prefix_correction(denoised, sample, prefix, weights, offset):
+    denoised = denoised[:, offset : offset + prefix.shape[1], : prefix.shape[2]]
+    residual = weights * (prefix - denoised.detach())
+    # Weight the residual once; the VJP can affect the entire action chunk.
+    return torch.autograd.grad(denoised, sample, grad_outputs=residual)[0]
+
+
 @torch.inference_mode(False)
 @torch.no_grad()
-def guided_inference(
+def guided_ddim(
     decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, dtype, generator=None
 ):
-    if prefix.ndim != 3 or prefix.shape[0] != action_shape[0]:
-        raise ValueError("RTC prefix must be (batch, length, control_dim)")
-    length, control_dim = prefix.shape[1:]
-    if (
-        offset < 0
-        or not 0 <= delay <= length <= action_shape[1] - offset
-        or not 0 < control_dim <= action_shape[2]
-    ):
-        raise ValueError("Invalid RTC prefix horizon/control dimensions")
-
     scheduler = decoder.noise_scheduler
-    alpha_bar = prepare_schedule(scheduler, steps, beta)
+    scheduler.set_timesteps(steps)
+    alpha_bar = scheduler.alphas_cumprod[scheduler.timesteps]
     timesteps = scheduler.timesteps.to(cond.device)
     previous = scheduler.timesteps - scheduler.config.num_train_timesteps // steps
     alpha_bar_previous = torch.where(
@@ -67,7 +70,7 @@ def guided_inference(
     # Deployment conditions may be inference tensors, which autograd cannot save.
     cond = cond.detach().clone()
     prefix = prefix.to(device=cond.device, dtype=dtype).detach()
-    weights = soft_mask(length, delay, device=cond.device, dtype=dtype)[None, :, None]
+    weights = soft_mask(prefix.shape[1], delay, device=cond.device, dtype=dtype)[None, :, None]
     sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
 
     for i, timestep in enumerate(scheduler.timesteps.tolist()):
@@ -76,14 +79,47 @@ def guided_inference(
             output = decoder.model(x=sample, timestep=timesteps[i], context=cond)
             denoised = denoised_estimate(
                 output, sample, alpha[i], sigma[i], scheduler.config.prediction_type
-            )[:, offset : offset + length, :control_dim]
-            residual = weights * (prefix - denoised.detach())
-            # The prefix VJP still propagates to the entire action chunk; weights enter once.
-            correction = torch.autograd.grad(denoised, sample, grad_outputs=residual)[0]
+            )
+            correction = prefix_correction(denoised, sample, prefix, weights, offset)
 
         sample = scheduler.step(output.detach(), timestep, sample, generator=generator).prev_sample
         sample.add_(guidance[i] * correction)
 
     if scheduler.config.clip_sample:
         sample.clamp_(-scheduler.config.clip_sample_range, scheduler.config.clip_sample_range)
+    return sample
+
+
+@torch.inference_mode(False)
+@torch.no_grad()
+def guided_flow(
+    decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, dtype,
+    generator=None, target_t_sample_mode=None,
+):
+    cond = cond.detach().clone()
+    prefix = prefix.to(device=cond.device, dtype=dtype).detach()
+    weights = soft_mask(prefix.shape[1], delay, device=cond.device, dtype=dtype)[None, :, None]
+    sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
+    dt = 1.0 / steps
+    timesteps = euler_time_grid(steps, sample)
+    # Official RTC coefficient; clipping also resolves the t=0 singularity.
+    guidance = ((timesteps.square() + (1 - timesteps).square()) / (timesteps * (1 - timesteps)))
+    guidance = guidance.clamp(max=beta)
+
+    model_kwargs = {}
+    prepare = getattr(decoder.model, "prepare_context_kv", None)
+    if not decoder.training and steps > 1 and prepare is not None:
+        model_kwargs["context_kv"] = prepare(cond)
+
+    for timestep, strength in zip(timesteps, guidance):
+        t = timestep.expand(action_shape[0])
+        if target_t_sample_mode is not None:
+            model_kwargs["target_t"] = torch.full_like(t, dt) if target_t_sample_mode == "relative" else t + dt
+        with torch.enable_grad():
+            sample.requires_grad_(True)
+            velocity = decoder.model(x=sample, timestep=t, context=cond, **model_kwargs)
+            denoised = sample + (1 - timestep) * velocity
+            correction = prefix_correction(denoised, sample, prefix, weights, offset)
+        sample = sample + dt * (velocity + strength * correction)
+
     return sample

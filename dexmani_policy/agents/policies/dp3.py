@@ -11,10 +11,10 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import MultiStagePointNet, PointNet
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class DP3ObservationEncoder(nn.Module):
+class DP3Encoder(nn.Module):
     consumed_observation_fields = ("joint_state", "point_cloud")
 
     def __init__(
@@ -36,11 +36,11 @@ class DP3ObservationEncoder(nn.Module):
         else:
             raise ValueError(f"encoder_type must be 'dp3' or 'idp3', got {encoder_type!r}")
         self.pc_encoder = encoder_cls(input_channels=pc_dim, output_channels=pc_out_dim)
-        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.state_encoder = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
-        self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+        self.out_dim = n_obs_steps * (self.pc_encoder.out_dim + self.state_encoder.out_dim)
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
@@ -52,14 +52,14 @@ class DP3ObservationEncoder(nn.Module):
         features = torch.cat(
             [
                 self.pc_encoder(pc),
-                self.state_mlp(obs["joint_state"]),
+                self.state_encoder(obs["joint_state"]),
             ],
             dim=-1,
         )
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
-class DP3Policy(BasePolicy):
+class DP3(Policy):
     supported_execution_modes = ("sync", "async", "rtc")
 
     def __init__(
@@ -87,7 +87,7 @@ class DP3Policy(BasePolicy):
         clip_sample: bool = True,
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
-        obs_encoder = DP3ObservationEncoder(
+        obs_encoder = DP3Encoder(
             encoder_type,
             pc_dim,
             pc_out_dim,
@@ -99,7 +99,7 @@ class DP3Policy(BasePolicy):
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
-            context_dim=obs_encoder.out_dim * n_obs_steps,
+            context_dim=obs_encoder.out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=down_dims,
             kernel_size=kernel_size,

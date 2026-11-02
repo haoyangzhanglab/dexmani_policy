@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 from dexmani_policy.common.config import positive_int
 
+from .sampling.rtc import guided_flow, rtc_enabled
 from .sampling.time_sampling import TimeSampler, euler_time_grid, shift_time_to_noise
 
 
@@ -82,7 +83,7 @@ class RectifiedFlow(nn.Module):
             pred_v = self.model(x=xt, timestep=t, context=cond)
         metrics = {}
         if dim_groups is None:
-            loss = F.mse_loss(pred_v, target_v)
+            loss = F.mse_loss(pred_v.float(), target_v.float())
         else:
             group_losses = []
             for name, (start, end, weight) in dim_groups.items():
@@ -97,8 +98,8 @@ class RectifiedFlow(nn.Module):
                 metrics.update({
                     "loss": loss.detach(),
                     "loss_action": loss.detach(),
-                    "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
-                    "target_v_magnitude": torch.sqrt(torch.mean(target_v**2)),
+                    "pred_v_magnitude": torch.sqrt(torch.mean(pred_v.float()**2)),
+                    "target_v_magnitude": torch.sqrt(torch.mean(target_v.float()**2)),
                     "t_mean": t.mean(),
                 })
         if return_features:
@@ -114,6 +115,10 @@ class RectifiedFlow(nn.Module):
         *,
         dtype: torch.dtype | None = None,
         generator: torch.Generator | None = None,
+        rtc_prefix=None,
+        delay_steps=0,
+        history_offset=0,
+        rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
         num_steps = (
             self.num_inference_steps
@@ -122,6 +127,13 @@ class RectifiedFlow(nn.Module):
         )
 
         dtype = torch.float32 if dtype is None else dtype
+        if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
+            return guided_flow(
+                self, cond, action_shape, rtc_prefix,
+                delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
+                steps=num_steps, dtype=dtype, generator=generator,
+            )
+
         batch_size = action_shape[0]
         x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         dt = 1.0 / num_steps
@@ -129,9 +141,7 @@ class RectifiedFlow(nn.Module):
         context_kwargs = {}
         prepare = getattr(self.model, "prepare_context_kv", None)
         if not self.training and num_steps > 1 and prepare is not None:
-            context_kv = prepare(cond)
-            if context_kv is not None:
-                context_kwargs["context_kv"] = context_kv
+            context_kwargs["context_kv"] = prepare(cond)
         for timestep in euler_time_grid(num_steps, x):
             t = timestep.expand(batch_size)
             velocity = self.model(x=x, timestep=t, context=cond, **context_kwargs)
@@ -277,8 +287,8 @@ class ConsistencyFlow(nn.Module):
         pred_flow = pred[:flow_batch_size]
         pred_consistency = pred[flow_batch_size:]
 
-        loss_flow = F.mse_loss(pred_flow, flow_targets["vt_target"])
-        loss_consistency = F.mse_loss(pred_consistency, consistency_targets["vt_target"])
+        loss_flow = F.mse_loss(pred_flow.float(), flow_targets["vt_target"].float())
+        loss_consistency = F.mse_loss(pred_consistency.float(), consistency_targets["vt_target"].float())
 
         # Sample proportions are not loss weights.
         loss = loss_flow + loss_consistency
@@ -291,8 +301,8 @@ class ConsistencyFlow(nn.Module):
                 "loss_action": loss.detach(),
                 "loss_flow": loss_flow.detach(),
                 "loss_consistency": loss_consistency.detach(),
-                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_flow**2)),
-                "pred_vt_consistency_magnitude": torch.sqrt(torch.mean(pred_consistency**2)),
+                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_flow.float()**2)),
+                "pred_vt_consistency_magnitude": torch.sqrt(torch.mean(pred_consistency.float()**2)),
                 "flow_batch_size": flow_batch_size,
                 "consistency_batch_size": consistency_batch_size,
                 "t_flow_mean": flow_targets["t"].mean(),
@@ -309,6 +319,10 @@ class ConsistencyFlow(nn.Module):
         *,
         dtype: torch.dtype | None = None,
         generator: torch.Generator | None = None,
+        rtc_prefix=None,
+        delay_steps=0,
+        history_offset=0,
+        rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
         num_steps = (
             self.num_inference_steps
@@ -316,11 +330,22 @@ class ConsistencyFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        dtype = cond.dtype if dtype is None else dtype
+        dtype = torch.float32 if dtype is None else dtype
+        if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
+            return guided_flow(
+                self, cond, action_shape, rtc_prefix,
+                delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
+                steps=num_steps, dtype=dtype, generator=generator,
+                target_t_sample_mode=self.target_t_sample_mode,
+            )
+
         batch_size = action_shape[0]
         x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         dt = 1.0 / num_steps
-        context_kv = self.model.prepare_context_kv(cond) if num_steps > 1 else None
+        context_kwargs = {}
+        prepare = getattr(self.model, "prepare_context_kv", None)
+        if not self.training and num_steps > 1 and prepare is not None:
+            context_kwargs["context_kv"] = prepare(cond)
         timesteps = euler_time_grid(num_steps, x)
         target_times = (
             torch.full_like(timesteps, dt)
@@ -336,7 +361,7 @@ class ConsistencyFlow(nn.Module):
                 timestep=t,
                 target_t=target_t,
                 context=cond,
-                context_kv=context_kv,
+                **context_kwargs,
             )
             x = x + dt * velocity
 

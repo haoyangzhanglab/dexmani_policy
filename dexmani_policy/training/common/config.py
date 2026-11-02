@@ -76,13 +76,13 @@ def assemble_policy_config(cfg):
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         if method == "interact-dex":
-            cfg.agent.future_force_offsets = cfg.future_force_offsets
+            cfg.agent.interaction_horizon = cfg.interaction_horizon
             if float(cfg.agent.get("future_force_loss_weight", 0.0)) == 0:
                 cfg.dataset._target_ = "dexmani_policy.datasets.demonstration.DemonstrationDataset"
-                cfg.dataset.pop("future_force_offsets", None)
+                cfg.dataset.pop("interaction_horizon", None)
             else:
                 cfg.dataset._target_ = "dexmani_policy.datasets.variants.tactile.InterActDexDataset"
-                cfg.dataset.future_force_offsets = cfg.future_force_offsets
+                cfg.dataset.interaction_horizon = cfg.interaction_horizon
         if "tactile_source" in cfg:
             cfg.agent.tactile_source = cfg.tactile_source
             cfg.dataset.tactile_source = cfg.tactile_source
@@ -97,7 +97,7 @@ def prepare_training(cfg):
     validate_config(cfg)
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         name = cfg.agent.get("rgb_backbone_name", "dino")
-        if name != "resnet":
+        if name in ("dino", "siglip"):
             rgb = dict(cfg.agent.get("rgb_backbone_config") or {})
             if rgb.get("architecture") is None:
                 source = cfg.get("initialization", {}).get("rgb")

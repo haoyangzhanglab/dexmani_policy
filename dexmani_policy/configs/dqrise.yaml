@@ -10,10 +10,8 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 
-tcp_dim: 7
-
 initialization:
-  rgb: facebook/dinov2-small
+  rgb: data/pretrained/dinov2-small
   codebook: null  # 新训练须提供与实际 train split 匹配的码本。
 
 dataloader:
@@ -30,8 +28,7 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  _target_: dexmani_policy.agents.policies.dqrise.DQRISEPolicy
-  tcp_dim: ${tcp_dim}
+  _target_: dexmani_policy.agents.policies.dqrise.DQRISE
   codebook_num_groups: 2
   codebook_size: 4
 
@@ -56,6 +53,7 @@ agent:
     rope_scale: 0.05
     rope_base: 100.0
 
+  rgb_backbone_name: dino
   rgb_backbone_config:
     tune_mode: freeze
     image_size: [224, 224]
@@ -82,7 +80,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: true
   use_ema: true
   lr_warmup_steps: 500

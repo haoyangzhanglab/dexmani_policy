@@ -4,6 +4,7 @@ from typing import Any
 
 from dexmani_policy.common.io_util import atomic_path
 
+
 @dataclass
 class Checkpoint:
     global_step: int
@@ -66,4 +67,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
     del state
     agent.to(device=device, dtype=torch.float32)
     agent.eval()
+    rgb_encoder = getattr(agent.obs_encoder, "rgb_encoder", None)
+    if rgb_encoder is not None and rgb_encoder.tune_mode == "lora":
+        rgb_encoder.backbone = rgb_encoder.backbone.merge_and_unload()
     return agent

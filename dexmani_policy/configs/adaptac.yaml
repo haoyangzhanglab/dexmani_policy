@@ -30,12 +30,11 @@ dataset:
 
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.policies.adaptac.AdapTacPolicy
+  _target_: dexmani_policy.agents.policies.adaptac.AdapTac
 
   pc_dim: 6
   feature_dim: 512
   state_out_dim: 64
-  state_dim: 19
   num_points: 1024
 
   fps_random_config:
@@ -81,7 +80,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: true
+  use_bfloat16: false
   use_compile: false
   use_ema: true
   lr_warmup_steps: 500

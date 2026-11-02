@@ -1,5 +1,3 @@
-"""R3D diffusion policy with Uni3D observation tokens."""
-
 from __future__ import annotations
 
 import torch
@@ -9,10 +7,10 @@ from dexmani_policy.agents.action_decoders.backbones.one_way_transformer import 
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import Policy
 
 
-class R3DObservationEncoder(nn.Module):
+class R3DEncoder(nn.Module):
     """Concatenate Uni3D features, broadcast state and XYZ encoding as [B, T*K, 2*D+D_s]."""
 
     consumed_observation_fields = ("joint_state", "point_cloud")
@@ -29,11 +27,11 @@ class R3DObservationEncoder(nn.Module):
         self.pc_encoder = Uni3DEncoder(
             fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
-        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.state_encoder = StateEncoder(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
 
         self.pc_pe_dim = self.pc_encoder.out_dim
-        self.obs_token_dim = 2 * self.pc_pe_dim + self.state_mlp.out_dim
+        self.out_dim = 2 * self.pc_pe_dim + self.state_encoder.out_dim
 
     def forward(self, obs: dict) -> torch.Tensor:
         state = obs["joint_state"]
@@ -43,15 +41,17 @@ class R3DObservationEncoder(nn.Module):
 
         patch_tokens, pc_pe = self.pc_encoder(pc)
 
-        state_emb = self.state_mlp(state)
+        state_emb = self.state_encoder(state)
         state_emb = state_emb.unsqueeze(1).expand(-1, patch_tokens.shape[1], -1)
 
         tokens = torch.cat((patch_tokens, state_emb, pc_pe), dim=-1)
         return tokens.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
-class R3DPolicy(BasePolicy):
+class R3D(Policy):
     supported_execution_modes = ("sync", "async", "rtc")
+    joint_dim = 19
+    ee_dim = 9
 
     def __init__(
         self,
@@ -74,19 +74,14 @@ class R3DPolicy(BasePolicy):
         prediction_type: str = "sample",
         modality_dropout_probs: dict | None = None,
         use_aux_ee: bool = False,
-        joint_dim: int = 19,
-        ee_dim: int = 9,
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
     ) -> None:
-        if use_aux_ee and (joint_dim != 19 or ee_dim != 9 or action_dim != joint_dim + ee_dim):
+        if use_aux_ee and action_dim != self.joint_dim + self.ee_dim:
             raise ValueError("R3D auxiliary prediction requires joint19 + ee9")
         self.use_aux_ee = use_aux_ee
-        self.joint_dim = joint_dim
-        self.ee_dim = ee_dim
-        self.aux_loss_weight = aux_loss_weight
 
-        obs_encoder = R3DObservationEncoder(
+        obs_encoder = R3DEncoder(
             state_dim=state_dim,
             n_obs_steps=n_obs_steps,
             pc_encoder_config=pc_encoder_config,
@@ -98,7 +93,7 @@ class R3DPolicy(BasePolicy):
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,
-            obs_token_dim=obs_encoder.obs_token_dim,
+            obs_token_dim=obs_encoder.out_dim,
             pc_pe_dim=obs_encoder.pc_pe_dim,
             timestep_embed_dim=timestep_embed_dim,
             embedding_dim=embedding_dim,
@@ -107,8 +102,8 @@ class R3DPolicy(BasePolicy):
             mlp_dim=mlp_dim,
             attention_downsample_rate=attention_downsample_rate,
             use_aux_ee=use_aux_ee,
-            joint_dim=joint_dim,
-            ee_dim=ee_dim if use_aux_ee else None,
+            joint_dim=self.joint_dim,
+            ee_dim=self.ee_dim if use_aux_ee else None,
         )
 
         action_decoder = Diffusion(
@@ -128,14 +123,10 @@ class R3DPolicy(BasePolicy):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
-    def loss_groups(self) -> dict[str, tuple[int, int, float]] | None:
-        if not self.use_aux_ee:
-            return None
-        return {
+        self.loss_groups = {
             "joint": (0, self.joint_dim, 1.0),
-            "ee": (self.joint_dim, self.joint_dim + self.ee_dim, self.aux_loss_weight),
-        }
+            "ee": (self.joint_dim, self.joint_dim + self.ee_dim, aux_loss_weight),
+        } if use_aux_ee else None
 
     @property
     def control_action_dim(self) -> int:
