@@ -176,7 +176,8 @@ def check_affine_math():
 def check_method_targets(root):
     path = root / "targets.zarr"
     source = make_source(path, [2, 7, 13])
-    source["data/finger_tactile_force"][:] = np.broadcast_to(np.arange(13, dtype=np.float32)[:, None, None], (13, 5, 3))
+    force_data = np.broadcast_to(np.arange(13, dtype=np.float32)[:, None, None], (13, 5, 3))
+    source["data/finger_tactile_force"][:] = force_data
     kwargs = dict(sensor_modalities=["joint_state", "finger_tactile_force"],
                   horizon=5, obs_horizon=2, pad_before=1, pad_after=3)
     for cls, extra in ((AdapTacDataset, {}), (InterActDexDataset, {"interaction_horizon": 3})):
@@ -186,8 +187,8 @@ def check_method_targets(root):
             rows = dataset.sampler.sample_source_rows(index)
             query = rows[dataset.action_start_index]
             end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
-            offsets = np.arange(1, 5) if cls is AdapTacDataset else np.array([3])
-            target = query + offsets
+            sample_offsets = np.arange(1, 5) if cls is AdapTacDataset else np.array([3])
+            target = query + sample_offsets
             sample = dataset[index]
             np.testing.assert_array_equal(sample["future_force_valid"], target < end)
             np.testing.assert_array_equal(sample["future_force"][:, 0, 0], np.minimum(target, end - 1))
@@ -201,17 +202,29 @@ def check_method_targets(root):
         (5, range(1, 5)), (6, range(1, 5)),
         (2, [1, 3]), (2, [1, 1, 3]), (2, [1, 2, 2, 4]),
         (2, [1, 3, 2, 4]), (2, range(1, 5, 2)),
+        (2, [4, 1]), (2, [1, 4, 2]), (2, [3, 1, 3]),
+        (3, [3, 1, 5, 2]), (6, [3, 1]),
     ):
         target = query + np.asarray(offsets, dtype=np.int64)
         end = force_store.episode_ends[np.searchsorted(force_store.episode_ends, query, side="right")]
-        force, valid = read_future_force(force_store, query, offsets)
-        expected = force_store.read("finger_tactile_force", np.minimum(target, end - 1))
+        expected_valid = target < end
+        expected_rows = target.copy()
+        expected_rows[~expected_valid] = end - 1
+        expected = force_data[expected_rows]
+        with patch.object(force_store, "read", wraps=force_store.read) as read:
+            force, valid = read_future_force(force_store, query, offsets)
+        read.assert_called_once_with(
+            "finger_tactile_force", slice(int(expected_rows.min()), int(expected_rows.max()) + 1),
+        )
         np.testing.assert_array_equal(force, expected)
-        np.testing.assert_array_equal(valid, target < end)
+        np.testing.assert_array_equal(valid, expected_valid)
+        assert force.shape == (len(offsets), 5, 3) and valid.shape == (len(offsets),)
         assert force.dtype == np.float32 and valid.dtype == bool
     source["data/finger_tactile_force"][:] = 0
-    zero_force = AdapTacDataset(str(path), **kwargs)[0]
-    assert zero_force["future_force_valid"].any() and not zero_force["future_force"].any()
+    for dataset in (AdapTacDataset(str(path), **kwargs),
+                    InterActDexDataset(str(path), **kwargs, interaction_horizon=1)):
+        zero_force = dataset[0]
+        assert zero_force["future_force_valid"].any() and not zero_force["future_force"].any()
     r3d_dataset = R3DDataset(str(path), sensor_modalities=["joint_state"], obs_horizon=2,
                              horizon=5, pad_before=1, pad_after=3)
     for index in range(len(r3d_dataset)):

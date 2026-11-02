@@ -11,15 +11,15 @@ def read_future_force(store, query, offsets):
     target_rows = query + np.asarray(offsets, dtype=np.int64)
     # Targets past the episode end use the final real row as invalid fill.
     rows = np.minimum(target_rows, end - 1)
-    force = store.read(
-        "finger_tactile_force",
-        slice(rows[0], rows[-1] + 1),
-    )
+    valid = target_rows < end
+    start = int(rows.min())
+    stop = int(rows.max()) + 1
+    force = store.read("finger_tactile_force", slice(start, stop))
     if len(rows) == 1 or (
         isinstance(offsets, range) and offsets.step == 1 and target_rows[-1] < end
     ):
-        return force, target_rows < end
-    return force[rows - rows[0]], target_rows < end
+        return force, valid
+    return force[rows - start], valid
 
 
 class AdapTacDataset(DemonstrationDataset):
