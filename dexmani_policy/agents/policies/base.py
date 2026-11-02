@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -57,10 +57,7 @@ class Policy(nn.Module):
         modality_dropout_probs: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
-        validate_action_window(
-            horizon, n_obs_steps, n_action_steps,
-            action_start_index=n_obs_steps - 1,
-        )
+        validate_action_window(horizon, n_obs_steps, n_action_steps)
         positive_int(action_dim, "action_dim")
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
@@ -209,7 +206,7 @@ class Policy(nn.Module):
         }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
-        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
+        self.action_decoder.model = cast(nn.Module, torch.compile(self.action_decoder.model, **compile_kwargs))
 
     def optimizer_groups(
         self, lr: float, obs_lr: float, weight_decay: float, obs_weight_decay: float

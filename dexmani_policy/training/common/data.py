@@ -76,7 +76,6 @@ def build_dataset(cfg):
         "action_key": dataset.action_key,
         "hand_coordinates": {key: buffer.attrs[key] for key in ("hand_joint_order", "hand_units")
                              if key in buffer.attrs},
-        "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }
     deployment = {}

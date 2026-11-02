@@ -26,17 +26,18 @@ def positive_int(value: int, name: str) -> int:
     return value
 
 
-def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start_index) -> None:
+def validate_action_window(horizon: int, n_obs_steps: int, n_action_steps: int) -> None:
     for name, value in (
         ("horizon", horizon),
         ("n_obs_steps", n_obs_steps),
         ("n_action_steps", n_action_steps),
     ):
         positive_int(value, name)
-    if action_start_index + n_action_steps > horizon:
+    future_steps = horizon - n_obs_steps + 1
+    if n_action_steps > future_steps:
         raise ValueError(
-            f"action_start_index + n_action_steps ({action_start_index + n_action_steps}) "
-            f"exceeds horizon ({horizon})"
+            f"n_action_steps ({n_action_steps}) exceeds future_steps ({future_steps}) "
+            "for the configured horizon and n_obs_steps"
         )
 
 

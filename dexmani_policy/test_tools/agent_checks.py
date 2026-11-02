@@ -34,6 +34,7 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
 )
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder, XHandPatchEncoder
+from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.agents.policies.dp import DP
 from dexmani_policy.agents.policies.dp3 import DP3
 from dexmani_policy.agents.policies.dqrise import DQRISE
@@ -680,6 +681,10 @@ def check_sim_observations(device):
     fields = sorted(POINT_CLOUD_FIELDS)
     runner = SimRunner("unused", 2, fields, {})
     dims = dict.fromkeys(fields, 3)
+    agent = Policy(torch.nn.Linear(1, 1), torch.nn.Identity(), 2, 2, 1, 19).to(device)
+    agent.normalization_dims = dims
+    info = SimpleNamespace(observation_fields=fields, n_obs_steps=2, pc_dim=3)
+    runtime = PolicyRuntime(agent, info, seed=0)
     observations = []
     tensor = torch.as_tensor
     for index in range(3):
@@ -697,6 +702,29 @@ def check_sim_observations(device):
             history = np.stack([observations[max(0, index - 1)][key], observations[index][key]])
             old_device_slice = tensor(history, device=device)[..., :3].unsqueeze(0)
             torch.testing.assert_close(actual[key], old_device_slice, rtol=0, atol=0)
+        external = runtime.prepare_observations(runner.get_stacked_obs())
+        torch.testing.assert_close(external, actual, rtol=0, atol=0)
+    dims["object_pointcloud"] = 6
+    history = {key: np.stack([obs[key] for obs in observations]).astype(np.float64) for key in fields}
+    external = runtime.prepare_observations(history)
+    torch.testing.assert_close(external, runner.get_obs_batch(device, normalization_dims=dims), rtol=0, atol=0)
+    for key, channels in dims.items():
+        assert external[key].shape == (1, 2, 8, channels)
+        assert external[key].dtype == torch.float32 and external[key].is_contiguous()
+        try:
+            runtime.prepare_observations({**history, key: history[key][..., :channels - 1]})
+        except ValueError as error:
+            assert key in str(error) and "fewer channels" in str(error)
+        else:
+            raise AssertionError(f"Runtime accepted too few {key} channels")
+    invalid = history["object_pointcloud"].copy()
+    invalid[-1, 0, -1] = np.finfo(np.float64).max
+    try:
+        runtime.prepare_observations({**history, "object_pointcloud": invalid})
+    except ValueError as error:
+        assert "Nonfinite" in str(error)
+    else:
+        raise AssertionError("Nonfinite point cloud escaped FP32 conversion")
     runner.reset()
     assert runner.get_obs_batch(device, normalization_dims={}) == {}
     kwargs = rgb_preprocessing_kwargs({"rgb_preprocess_size": (10, 12), "rgb_color_aug": {"present": True}})
@@ -724,7 +752,7 @@ def check_image_geometry(device):
     pixels = torch.tensor([[[2.2, 1.7], [4.1, 3.2]]], device=device)
     points = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
     projection = project_points(points, torch.eye(3, device=device)[None],
-                                torch.eye(4, device=device)[None, :3], transform, resized.shape[-2:])
+                                torch.eye(4, device=device)[None, :3], transform, (resized.shape[-2], resized.shape[-1]))
     sampled = F.grid_sample(resized, projection.grid_xy[:, :, None], align_corners=False)[:, :, :, 0].transpose(1, 2)
     expected = torch.stack((pixels[..., 0] / (width - 1), pixels[..., 1] / (height - 1),
                             pixels.sum(-1) / (height + width - 2)), -1)
@@ -736,7 +764,7 @@ def check_image_geometry(device):
 
 
 def check_ddim_clipping(device):
-    from diffusers import DDIMScheduler
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
     from dexmani_policy.common.normalizer import FieldNormalizer
 
     limits = FieldNormalizer(torch.tensor([0.5], device=device), torch.tensor([-2.], device=device))
@@ -1292,6 +1320,16 @@ def check_codebook_pipeline(device):
 
 
 def check_policies(device):
+    boundary = Policy(torch.nn.Identity(), torch.nn.Identity(), 4, 2, 3, 19)
+    assert boundary.action_start_index == 1 and boundary.future_steps == 3
+    assert Policy(torch.nn.Identity(), torch.nn.Identity(), 1, 1, 1, 19).future_steps == 1
+    for horizon, obs_steps, action_steps in ((4, 2, 4), (4, 5, 1), (0, 1, 1), (4, 0, 1), (4, 2, 0)):
+        try:
+            Policy(torch.nn.Identity(), torch.nn.Identity(), horizon, obs_steps, action_steps, 19)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Policy accepted an invalid action window")
     kwargs: dict[str, Any] = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, encoder_type="dp3",
                   pc_dim=3, pc_out_dim=16, state_dim=19, num_points=64, state_out_dim=8,
                   down_dims=(32, 64), diffusion_step_embed_dim=32, n_groups=8,
@@ -1399,7 +1437,7 @@ def check_normalizer_restore(root, device):
     for part in ("scale", "offset"):
         averaged[f"normalizer.fields.hand_latent.{part}"] = torch.ones(5)
     config: dict[str, Any] = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims,
-                  eval=dict(use_ema=True, inference_steps=2), dataset={},
+                  eval=dict(use_ema=True, inference_steps=2), dataset={"rgb_keep_uint8": True},
                   policy_metadata=dict(action_start_index=model.action_start_index),
                   env_runner=dict(task_name="synthetic", eval_seeds=list(range(10))))
     checkpoint = Checkpoint(7, raw, averaged, {"momentum": torch.ones(1)},
@@ -1501,6 +1539,7 @@ def check_deployment_facts(root):
         "dataset.sensor_modalities=[joint_state,point_cloud,hand_pointcloud,fingertip_xyz,depth]"])
     cfg.workspace.output_dir = str(root / "deployment-run")
     _, description = build_dataset(cfg)
+    assert "action_start_index" not in description
     assert description["deployment_metadata"] == {"depth_config": {"shape": [4, 5], "depth_scale_m": None}}
     source.attrs.update(dt=0.02, pointcloud_config={"num_points": 8},
                         hand_pointcloud_config={"num_points": 8},
@@ -1602,8 +1641,6 @@ def check_inherited_policy(root, method, device=torch.device("cpu")):
 
 
 def check_codebook_training(root, device=torch.device("cpu")):
-    from dexmani_policy.agents.hand_prior.codebook import load_codebook
-
     path = root / "dqrise.zarr"
     source = make_source(path, [6, 12, 18])
     rng = np.random.default_rng(9)
@@ -1651,22 +1688,42 @@ def check_codebook_training(root, device=torch.device("cpu")):
     info = inspect_policy(root / "dqrise", checkpoint="latest", weights="raw")
     runtime = load_policy(info, device=device)
     observation = {key: source[f"data/{key}"][:2] for key in info.observation_fields}
-    assert runtime.predict(observation).shape == (3, 19)
-    resumed_cfg, checkpoint = prepare_resume(root / "dqrise", device=str(device))
+    prediction = runtime.predict(observation)
+    assert prediction.shape == (3, 19)
+    checkpoint.effective_config["dataset"]["rgb_keep_uint8"] = True
+    legacy_path = save_checkpoint(root / "legacy-rgb/checkpoints/latest.pt", checkpoint)
+    original = legacy_path.read_bytes()
+    assert "rgb_keep_uint8" not in load_checkpoint(legacy_path).effective_config["dataset"]
+    legacy_info = inspect_policy(root / "legacy-rgb", checkpoint="latest", weights="raw")
+    assert legacy_info.rgb_preprocessing == info.rgb_preprocessing
+    legacy_runtime = load_policy(legacy_info, device=device)
+    np.testing.assert_array_equal(legacy_runtime.predict(observation), prediction)
+    runtime.close()
+    legacy_runtime.close()
+    resumed_cfg, checkpoint = prepare_resume(root / "legacy-rgb", device=str(device))
     assert resumed_cfg.dataset.max_train_episodes == 100
     assert "rgb_keep_uint8" not in resumed_cfg.dataset
+    resumed_cfg.workspace.output_dir = str(root / "dqrise")
     with patch("dexmani_policy.agents.hand_prior.codebook.load_codebook", side_effect=AssertionError("Reload on resume")), \
          patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
         assert run_training(resumed_cfg, checkpoint=checkpoint, max_updates=1) == 3
-    for value in (True, False):
-        checkpoint.effective_config["dataset"]["rgb_keep_uint8"] = value
-        unsupported = save_checkpoint(root / "unsupported-rgb-option.pt", checkpoint)
+    assert legacy_path.read_bytes() == original
+    assert "rgb_keep_uint8" not in load_checkpoint(root / "dqrise/checkpoints/latest.pt").effective_config["dataset"]
+    checkpoint.effective_config["dataset"]["rgb_keep_uint8"] = False
+    unsupported = save_checkpoint(root / "unsupported-rgb/checkpoints/latest.pt", checkpoint)
+    original = unsupported.read_bytes()
+    for read in (lambda: load_checkpoint(unsupported),
+                 lambda: inspect_policy(root / "unsupported-rgb", checkpoint="latest"),
+                 lambda: restore_policy(unsupported, use_ema=False, device=device),
+                 lambda: prepare_resume(root / "unsupported-rgb", device=str(device))):
         try:
-            load_checkpoint(unsupported)
+            read()
         except ValueError as error:
-            assert "Unsupported dataset option" in str(error)
+            assert "rgb_keep_uint8=False" in str(error)
+            assert "fixed uint8" in str(error) and "floating-point" in str(error) and "older commit" in str(error)
         else:
-            raise AssertionError("Unsupported RGB option accepted")
+            raise AssertionError("Legacy float RGB recipe accepted")
+    assert unsupported.read_bytes() == original
 
 
 def check_configs(_device):

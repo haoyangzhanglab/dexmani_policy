@@ -1,8 +1,11 @@
 # 数据集模块收敛任务书：轻、薄、正确、好用
 
-> 状态：P0—P5 已实施；本轮实际验证及未覆盖项见第 17 节。第 14 节为验收要求，不表示所有研究或实机验证均已执行。
+> 状态：P0—P5 已实施；第 17 节保留上一轮历史记录，本次三项小型收敛及实际验证见第 18 节。第 14 节为验收要求，不表示所有研究或实机验证均已执行。
 > 仓库：`haoyangzhanglab/dexmani_policy`  
-> 审查基线：`f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb`  
+> 首轮审查基线：`f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb`
+>
+> 本次小型收敛基线：`5698be1d5010230001210e2c887bb3c557ae123e`
+>
 > 定位：个人机器人策略研究项目。优先正确、直观、易改和实验可解释，不建设数据平台。  
 > 本文汇总数据链路审查及 KineDex、LingBot-VLA、CordViP、AdapTac、FingerViP、DP3 的源码核查，并修正早期审查中的过强判断。
 
@@ -140,6 +143,7 @@ DataLoader 只增加 batch 维。无需再定义 Batch dataclass、通用 schema
 - 普通样本的源行是 `clip(s + arange(H), 0, L-1)`，再加 episode 的全局起点。
 - 观测取这些源行的前 `O` 项；query 是源行序列的第 `O-1` 项。
 - 预测后可执行动作从位置 `O-1` 开始；可用未来长度为 `F=H-O+1`；要求 `1 <= A <= F`。
+- `validate_action_window(H, O, A)` 直接推导 F 并检查可执行性，不再接收重复派生的动作起点；H/O/A 的正整数检查保留。
 - `s` 从 `-pad_before` 到 `L-H+pad_after`，窗口数为 `max(0,L-H+pad_before+pad_after+1)`。
 - 主策略当前派生 `pad_before=O-1`、`pad_after=A-1`，继续保留。这不保证每个 episode 的每个 query 都被覆盖，也不应自动解释成 bug。
 
@@ -271,9 +275,9 @@ val = order[T:T + V]
 
 ### 9.2 checkpoint 输入边界
 
-当前 checkpoint 使用固定 uint8 配方，不包含 `rgb_keep_uint8`。按后续清理要求，不维护已淘汰参数的适配、自动删键或双轨数值路径。
+当前 checkpoint 使用固定 uint8 配方，不包含 `rgb_keep_uint8`。统一读取边界直接接受无该键的配置；旧值为 true 时仅从加载到内存的 Dataset 配置中移除冗余键，继续使用等价的 uint8 路径，支持元信息查看、续训和推理。
 
-读取边界对带废弃键的配置明确失败，避免 Runtime 忽略该参数后静默改变图像数值。该检查只拒绝不支持的输入，不改写保存配置，不增加迁移框架。验证当前产物的 fresh/save/resume/inference，并确认废弃参数被拒绝。
+旧值为 false 时明确拒绝，并说明固定 uint8 路径不能保证原浮点预处理等价，需用对应旧提交恢复。读取不修改原 checkpoint，不静默改变 false 配方，不增加版本、迁移工具或兼容开关。此规则替换原先“包含 RGB 键一律拒绝”的行为；历史验证记录保留在第 17 节，本次验证另列第 18 节。
 
 ### 9.3 不误删几何处理
 
@@ -288,9 +292,9 @@ val = order[T:T + V]
 
 ### 10.1 按消费者缩小信息传递
 
-`build_dataset()` 当前把完整 `buffer.attrs` 放入 description；DQ-RISE 实际只需要其中的手部坐标声明。将跨层描述收窄为现有实际消费者需要的少量值：
+`build_dataset()` 的 description 只包含实际消费者需要的少量值；DQ-RISE 从中读取必要的手部坐标声明：
 
-- 字段维度、`action_key`、`action_start_index`、`control_action_dim`。
+- 字段维度、`action_key`、`control_action_dim`；Dataset/Policy 的动作起点均由同一 `n_obs_steps` 派生为 `O−1`，description 不再传递，Trainer 不再比较这两个同源值。各自用于采样、标签及动作输出的属性保留。
 - 必要手部坐标声明的小字典，例如已有 `hand_joint_order`、`hand_units`；同步 `initialize_training()` 调用。
 - 已经白名单提取的部署事实。只保存模型真实消费模态对应的项目。
 
@@ -326,12 +330,12 @@ Store 内部读取少量 Zarr attrs 本身不是主要开销，不必为其增�
 
 ## 11. 小而确定的运行效率优化
 
-### 11.1 SimRunner 提前裁剪点云通道
+### 11.1 SimRunner / Runtime 提前裁剪点云通道
 
-PolicyRuntime 已能按实际消费宽度在 CPU 侧裁剪；SimRunner 当前先把所有通道传到设备，Policy 再截取。将 SimRunner 也改为依据已恢复 Policy 的实际输入维度，在 H2D 前裁剪点云字段。
+SimRunner 与 PolicyRuntime 在 H2D 前均直接依据已加载 `agent.normalization_dims[name]` 裁剪各点云字段。Runtime 的通道数检查也使用同一宽度；`PolicyInfo.pc_dim` 仅保留为展示字段，不再充当所有点云字段的统一裁剪依据。
 
 - 复用已有 `normalization_dims` 或等价的实际消费信息，不再从任意环境默认值猜 `pc_dim`。
-- 当前只有一个消费宽度时用简单参数或直接读取；不要创建完整 observation adapter。
+- 直接读取各字段消费宽度，不创建新的持久化维度映射或 observation adapter。
 - 三类点云字段的处理遵循现有字段常量，支持无点云的策略。
 - 结果应与“传全部通道后取前 C 维”一致，历史顺序与初始重复首帧不变。
 - `O=2,N=1024` 时，从 6 维 FP32 缩为 3 维，单次点云载荷由 48 KiB 变为 24 KiB；这只是载荷量，不是端到端加速测量。
@@ -403,7 +407,7 @@ PolicyRuntime 已能按实际消费宽度在 CPU 侧裁剪；SimRunner 当前先
 
 - [x] `datasets/demonstration.py`、`common/image_util.py`、RGB 配方统一新训练 uint8 输出。
 - [x] 同步 `deployment/runtime.py`、`deployment/metadata.py`、`env_runner/sim_runner.py`、`evaluation/rollout.py` 的实际调用点。
-- [x] checkpoint 不自动迁移废弃参数；读取边界明确拒绝，不静默改变图像数值。
+- [x] checkpoint 读取接受无 RGB 旧键及值为 true 的等价配方（仅在内存删键）；false 明确拒绝，不静默改变图像数值或改写原文件。
 - [x] SimRunner H2D 前裁剪点云消费通道；不改变历史、动作切片和控制长度。
 - [x] 保留几何仿射、训练/推理量化顺序和各路径的职责。
 
@@ -438,9 +442,9 @@ PolicyRuntime 已能按实际消费宽度在 CPU 侧裁剪；SimRunner 当前先
 | 未来力 | mask 由未裁剪索引产生，零值合法；AdapTac 无后继过滤、InterAct 全无效 mask 与权重 0 路径保留 |
 | RGB | 新训练/推理为连续 CHW uint8；相同确定性设置下预处理数值一致；颜色增强量化顺序不变 |
 | 几何 | 使用真实 torch resize/投影路径核对像素中心与标定；仅检查矩阵形状或纸面公式不算完整图像验证 |
-| SimRunner | H2D 前只保留 C 通道；与原来设备侧切片数值一致；初始历史和滚动顺序不变 |
+| SimRunner / Runtime | H2D 前按各字段实际消费宽度裁剪；统一宽度配方数值不变，不同字段宽度独立生效；历史、FP32、连续布局及有限性保持 |
 | DDIM | 小型 scheduler 数值例子验证 clipping 与动作 affine 的关系；默认 limits 路径保持；非默认例子显式关闭 clipping |
-| 当前 checkpoint | 当前产物 fresh→save→resume/inference；包含废弃 RGB 参数的输入明确失败 |
+| 当前 checkpoint | 当前产物 fresh→save→resume/inference；旧 RGB true 配方经过实际加载/恢复，false 明确失败，读取不改写原文件 |
 | 轻量入口 | Dataset 检查不要求下载权重、加载实机环境或构造大视觉模型；测试失败保留明确异常 |
 
 优先使用仓库已有入口，修改后同步其实际能力：
@@ -483,9 +487,9 @@ python -m dexmani_policy.test_tools.agent_checks --device cpu
 | 本项目 | [数据目录](https://github.com/haoyangzhanglab/dexmani_policy/tree/f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb/dexmani_policy/datasets)、[训练装配](https://github.com/haoyangzhanglab/dexmani_policy/blob/f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb/dexmani_policy/training/common/data.py)、[Normalizer](https://github.com/haoyangzhanglab/dexmani_policy/blob/f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb/dexmani_policy/common/normalizer.py) | 在已经精简的主线上收敛剩余问题，保持物理含义与现有研究能力 |
 
 
-## 17. 本轮实施与验证记录（2026-11-03）
+## 17. 上一轮实施与验证记录（2026-11-03，历史）
 
-实施起点为 `88f2856`，工作区干净；相对审查基线仅有三份任务文档变化。本节只记录本轮实际工作，不沿用历史任务书的测试结论。
+实施起点为 `88f2856`，工作区干净；相对首轮审查基线仅有三份任务文档变化。以下保留截至 `5698be1` 的原实施及验证记录，其中“包含 RGB 键一律拒绝”的行为已由第 18 节替换，不能作为新行为已通过验证的依据。
 
 ### 实际变更与无需修改项
 
@@ -535,3 +539,54 @@ git diff --check
 - DexLatent 手部 affine 的公共装配已作五模式数学回归；本轮未修改先验与 latent 算法，因此未扩展到依赖官方初始化权重的完整 DexLatent 训练集成。
 - agent_checks 完整入口已在 CUDA 通过；未重复运行 CUDA 预训练全集，预训练完整入口使用 CPU。
 - 本轮不实施第 12 节研究事项，也不猜测非默认控制频率的仿真 API。最终检查未发现本轮冗余参数、无消费者 helper 或无关文件变更。
+
+## 18. 三项小型收敛及验证（2026-11-03）
+
+起点为 `5698be1d5010230001210e2c887bb3c557ae123e`，HEAD 与指定 review 基线一致，工作区干净。此前已完成的数量语义、统计优化及数据主线保留。
+
+- `load_checkpoint()` 替换“包含 RGB 键一律拒绝”：无键直接读取，true 仅在内存删键，false 明确说明浮点预处理等价性无法保证并提示旧提交。没有增加迁移工具或第二条数值路径。
+- `build_dataset()` description 删除 `action_start_index`，Trainer 删除同源等值比较。Dataset/Policy 自身属性、checkpoint/部署动作信息、真实目标/控制宽度和动作窗口检查保留。
+- Runtime 直接按 `agent.normalization_dims[name]` 检查和裁剪各点云字段，与 SimRunner 同源；`PolicyInfo.pc_dim` 仍供展示，没有新增持久化映射。外部格式、历史顺序、FP32、连续布局和有限性保持。
+- README 与项目架构的相关使用说明已同步；第 17 节保留历史结论，本节仅记录本次执行结果。
+
+使用 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`（Torch 2.4.1+cu124）运行，以下均在 CPU 通过：
+
+```bash
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python -m dexmani_policy.test_tools.dataset_checks
+/home/zhanghaoyang/miniconda3/envs/policy/bin/python - <<'PY'
+import tempfile
+from pathlib import Path
+import torch
+from dexmani_policy.test_tools.agent_checks import (
+    check_codebook_training, check_deployment_facts, check_sim_observations,
+)
+torch.manual_seed(7)
+torch.set_num_threads(2)
+device = torch.device('cpu')
+check_sim_observations(device)
+with tempfile.TemporaryDirectory(prefix='dexmani-targeted-checks-') as directory:
+    root = Path(directory)
+    check_deployment_facts(root)
+    check_codebook_training(root, device)
+PY
+```
+
+Dataset 入口覆盖既有 split、sampler、源帧统计、hand 五模式、未来标签、R3D 及 RGB 检查。定向检查覆盖 description 不再传递动作起点；三类点云统一 3 通道时与原设备侧切片及 Runtime 一致；混合 3/6 通道时按各字段消费宽度处理，保留最后 O 帧、连续 FP32，拒绝通道不足及 FP32 转换溢出。
+
+复用 DQ-RISE 小模型与 Zarr/codebook fixture，实际执行 2 次 fresh updates 和 1 次 resume update。无旧键与 true 配方分别经过元信息查看、加载与预测，固定 seed 的输出逐值一致；true 配方还经过 `prepare_resume()` 与 `run_training()` 恢复，保持保存的 100 条预算，删除原 codebook 后不重新读取或拟合。false 在加载、查看、恢复模型和准备续训四个入口均明确失败。true/false 原 checkpoint 文件均核对字节不变；续训写入另一输出目录。
+
+另对四个修改的实现文件运行 `mypy --follow-imports=silent --ignore-missing-imports --check-untyped-defs` 通过；五个修改的 Python 文件 `py_compile` 通过，`git diff --check` 通过。未重跑完整 agent/pretrain 全集、CUDA、长训、仿真闭环、实机、性能或算法实验；上述合成检查不代表任务成功率结论。
+
+### 调用链复查与清理
+
+在上述改动上继续检查 Dataset → 装配 → Policy → checkpoint → resume/inspect/Runtime/评测，以及直接配置、脚本和检查工具：
+
+- `validate_action_window()` 的唯一调用方原来额外传入 `O−1`，现只接收 H/O/A；保留正整数和完整执行窗口约束。已有 `check_policies()` 补上恰好可执行、单步、超长执行窗口、O>H 和非正值边界。
+- 点云 Runtime 检查改用实际 `Policy` 小实例提供已声明的 `normalization_dims`，删除给普通 Linear 临时添加字段的类型不一致。删除 DQ-RISE 检查内重复的 `load_codebook` import。
+- 扩展类型检查发现并修正了编译返回类型、投影图像尺寸 tuple，以及 DDIM 检查的 lazy import 类型不一致；DDIM 使用与实际 decoder 相同的具体模块导入，算法和数值路径保持。
+- 原有 raw/EMA 恢复 fixture 加入 true 配方，复用 `check_normalizer_restore()` 验证部署和评测读取边界均可用，仍只加载一次、释放未选权重、strict 恢复 affine。没有增加模型、适配器、回退或迁移流程。
+- 相关链路未发现 SHA/hash、来源凭证或通用版本迁移机制；旧 RGB true 的单点内存删键继续满足本任务的明确读取要求，false 仍拒绝。
+
+本次复查实际重新运行 CPU `dataset_checks`，并定向运行 `check_policies`、`check_sim_observations`、`check_output_boundaries`、`check_evaluation`、`check_image_geometry`、`check_ddim_clipping`、`check_deployment_facts`、`check_normalizer_restore`、`check_codebook_training`，全部通过。真实模型加载和预测使用 CPU；评测检查中的 rollout 为模拟实现，没有运行真实仿真环境。DQ-RISE 再次完成 2 次 fresh updates 和 1 次 resume update。
+
+13 个相关 Python 文件（含完整 `agent_checks.py`）的 mypy 检查通过，未添加 type ignore；`compileall -q dexmani_policy`、相关四个 shell 入口的 `bash -n`、resume/evaluate/eval_pipeline/smoke_test 的 `--help` 及 `git diff --check` 通过。在临时目录使用 `pip wheel --no-deps --no-build-isolation --no-index` 构建通过，wheel 的 18 份 YAML 资源齐全，未安装依赖或修改仓库构建产物。CUDA、完整 agent/pretrain 全集、长训、闭环、实机及性能验证仍未运行。

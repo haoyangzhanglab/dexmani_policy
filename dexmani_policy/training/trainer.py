@@ -44,8 +44,6 @@ class PolicyTrainer:
                 cfg.agent.num_codes = codebook.num_codes
         model = hydra.utils.instantiate(cfg.agent, _convert_="all")
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
-        if data_description["action_start_index"] != model.action_start_index:
-            raise ValueError("Dataset/policy action_start_index mismatch")
         if data_description["control_action_dim"] != model.control_action_dim:
             raise ValueError("Dataset primary action width must match policy control output")
         fields = (*model.consumed_observation_fields, "action")

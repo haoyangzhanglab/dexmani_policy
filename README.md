@@ -62,7 +62,7 @@ FPS 使用 PyTorch3D 原生随机起点，训练采样消耗训练 RNG；评测�
 
 主策略默认 `dataset.seed=42`、`max_train_episodes=null`、`val_episodes=0`，使用全部 episodes，不建立离线验证流程。相较原先最多 100 条，这是训练配方变化；论文预算需显式设置 `dataset.max_train_episodes=100`。留出 V 条后，训练数为 `N−V` 或 `min(M,N−V)`，同一随机排列依次选择 train、val、unused；150/100/20 得到 100/20/30，80/100/10 得到 70/10/0。主策略 val 仅留出，未运行离线验证；resume 保留 checkpoint 保存的预算。训练在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。
 
-RGB 在 CPU 预处理后统一为连续 CHW uint8，模型内转浮点；颜色增强和标定几何处理次序保留。checkpoint 使用当前配方，不自动修改废弃参数。非默认无界动作实验应显式配对，例如 `normalization.action=gaussian agent.clip_sample=false`；默认 limits 和 DDIM clipping 保持。
+RGB 在 CPU 预处理后统一为连续 CHW uint8，模型内转浮点；颜色增强和标定几何处理次序保留。旧 checkpoint 的 `dataset.rgb_keep_uint8=true` 与当前路径等价，读取时仅在内存中移除该键，支持查看、续训和推理；`false` 因无法保证原浮点预处理等价而明确拒绝，需用对应旧提交恢复。读取不修改原文件。非默认无界动作实验应显式配对，例如 `normalization.action=gaussian agent.clip_sample=false`；默认 limits 和 DDIM clipping 保持。
 
 独立预训练默认 `dataset.seed=42`、`max_train_episodes=null`、`val_episodes=0`，数据与预算独立于主策略。DQ-RISE 默认从 VQ last 导出三键码表，显式 val 时按 `lookup_mse` 选 best；运行时仅依赖有序姿态表与 hand affine，fresh 自动保存实际 `num_codes`。详见 [手部动作表示](docs/手部动作表示.md)。AFRO/CordViP 使用包含输入归一化的轻量 `encoder.pt`，独立导出命令及继承规则见 [观测预训练](docs/观测预训练.md)。
 

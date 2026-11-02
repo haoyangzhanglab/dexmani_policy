@@ -66,9 +66,10 @@ class PolicyRuntime:
             if name in POINT_CLOUD_FIELDS:
                 if value.ndim != 3 or value.shape[1] == 0:
                     raise ValueError(f"{name} requires shape (T, N>0, C)")
-                if self.info.pc_dim is not None and value.shape[-1] < self.info.pc_dim:
+                channels = self.agent.normalization_dims[name]
+                if value.shape[-1] < channels:
                     raise ValueError(f"{name} has fewer channels than the saved input recipe")
-                value = value[..., : self.info.pc_dim]
+                value = value[..., :channels]
             if name == "rgb":
                 if value.ndim != 4 or value.shape[-1] != 3 or min(value.shape[1:3]) == 0 or value.dtype != np.uint8:
                     raise ValueError("RGB input requires shape (T, H, W, 3) and dtype uint8")
