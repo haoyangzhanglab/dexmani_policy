@@ -22,7 +22,7 @@ CordViP 接触标签使用独立工具生成：
 python -m dexmani_policy.datasets.preprocess.contact_map --zarr-path INPUT --output OUTPUT
 ```
 
-接触标签生成需要 Open3D，常规数据读取不加载它。Episode 划分由训练入口按 seed 和数量参数直接完成。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)，本轮收敛状态见[当前任务书](docs/dataset_simplification_task.md)。
+接触标签生成需要 Open3D，常规数据读取不加载它。Episode 划分由训练入口按 seed 和数量参数直接完成。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
 
 ## 快速开始
 
