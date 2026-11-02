@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -97,14 +98,21 @@ def check_evaluation(_device):
     from dexmani_policy.deployment import inspect_policy
     from dexmani_policy.env_runner.sim_runner import SimRunner
     from dexmani_policy.evaluation import rollout, selection
+    from dexmani_policy.evaluation.seeds import split_evaluation_seeds
+
+    pool = list(range(10))
+    test, selected = split_evaluation_seeds(pool, 1024, 3, 2)
+    assert (test, selected) == split_evaluation_seeds(list(reversed(pool)), 1024, 3, 2)
+    assert test == split_evaluation_seeds(pool, 1024, 3)[0]
+    assert set(test).isdisjoint(selected)
 
     config = dict(
         policy_name="dp3", task_name="test", action_key="action",
         eval=dict(use_ema=True, inference_steps=2),
         agent=dict(n_action_steps=2, horizon=4, n_obs_steps=1, action_dim=19),
-        normalization_dims=dict(joint_state=19, action=19), dataset={}, deployment_metadata={},
+        normalization_dims=dict(joint_state=19, point_cloud=3, action=19), dataset={}, deployment_metadata={},
         policy_metadata=dict(action_start_index=0, control_action_dim=19, supported_execution_modes=["sync"]),
-        env_runner=dict(task_name="test", eval_seeds=list(range(10))),
+        env_runner=dict(task_name="test", env_kwargs=dict(frame_skip=6), env_rebuild_interval=1),
     )
     with tempfile.TemporaryDirectory(prefix="dexmani-evaluation-check-") as temporary:
         root = Path(temporary)
@@ -153,10 +161,12 @@ def check_evaluation(_device):
                 write_json(path, record, **options)
 
             with patch.object(selection, "evaluate_policy", side_effect=evaluate), \
+                 patch.object(selection, "load_seed_pool", return_value=pool) as seed_pool, \
                  patch.object(selection, "write_json", side_effect=publish):
                 try:
                     path = selection.run_pipeline(checkpoints, run_dir=run, output_dir=directory,
                                                   selection_episodes=2, test_episodes=3, device="cpu")
+                    seed_pool.assert_called_once_with("test")
                 except (RuntimeError, OSError) as error:
                     assert "injected" in str(error)
                     assert mode != "success"
@@ -177,31 +187,121 @@ def check_evaluation(_device):
             assert set(json.loads(best.read_text())) == {"ckpt_relpath", "inference"}
             assert inspect_policy(run).checkpoint_path == checkpoints[1]
 
-        agent = SimpleNamespace(checkpoint_step=2, parameters=torch.nn.Linear(1, 1).parameters)
+        @dataclass
+        class Randomization:
+            randomize_model_id: bool = True
+            table_height_range: tuple[float, float] = (-0.01, 0.02)
+
+        @dataclass
+        class Stability:
+            stable_check_steps: int = 240
+
+        class Environment:
+            def __init__(self, frame_skip=15, action_cnt_limit=3, success_hold_steps=2):
+                self.frame_skip = frame_skip
+                self.action_cnt_limit = action_cnt_limit
+                self.success_hold_steps = success_hold_steps
+                self.randomization, self.stability = Randomization(), Stability()
+                self.closed, self.dt_reads = False, 0
+
+            @property
+            def dt(self):
+                self.dt_reads += 1
+                return self.frame_skip / 240
+
+            def observation(self):
+                return dict(joint_state=np.full(19, self.action_cnt, dtype=np.float32), point_cloud=object())
+
+            def reset(self, *, seed):
+                self.action_cnt = 0
+                return self.observation(), {}
+
+            def step(self, action):
+                assert self.action_cnt < self.action_cnt_limit and not self.closed
+                self.action_cnt += 1
+                if fail and self.action_cnt == 2:
+                    raise RuntimeError("injected rollout failure")
+                done = self.action_cnt == self.action_cnt_limit
+                return self.observation(), 0, done, False, dict(
+                    success=done, success_condition=self.action_cnt >= 2)
+
+            def close(self):
+                self.closed = True
+
+        agent = SimpleNamespace(parameters=torch.nn.Linear(1, 1).parameters,
+                                n_obs_steps=3, n_action_steps=1, future_steps=2,
+                                consumed_observation_fields=("joint_state",),
+                                normalization_dims=config["normalization_dims"])
+
         for fail in (False, True):
             directory = root / f"rollout-{fail}"
-            closed = []
+            environments, runners = [], []
 
-            def episodes(*args, **kwargs):
-                try:
+            def make_env(runner, *, record_video):
+                assert not record_video
+                assert runner.n_obs_steps == agent.n_obs_steps
+                assert runner.sensor_modalities == list(agent.consumed_observation_fields)
+                if environments:
+                    assert environments[-1].closed
+                else:
                     assert not (directory / "result_details.json").exists()
-                    yield dict(success=True, steps=2, total_steps=3, seed=1)
-                    if fail:
-                        raise RuntimeError("injected rollout failure")
-                finally:
-                    closed.append(True)
+                    assert runner.environment == {}
+                env = Environment(**runner.env_kwargs)
+                environments.append(env)
+                runners.append(runner)
+                return env
 
+            def predict(obs_dict, *, inference_steps, generator):
+                assert inference_steps == 2 and set(obs_dict) == {"joint_state"}
+                assert obs_dict["joint_state"].shape == (1, 3, 19)
+                expected = torch.tensor(((0, 0, 0), (0, 0, 1), (0, 1, 2))[environments[-1].action_cnt])
+                torch.testing.assert_close(obs_dict["joint_state"][0, :, 0], expected.float())
+                assert set(runners[-1].obs_buffer) == {"joint_state"}
+                return {"future_actions": torch.zeros(1, agent.future_steps, 19)}
+
+            agent.predict_action = predict
             with patch.object(rollout, "_restore_policy", return_value=agent), \
-                 patch.object(SimRunner, "run", side_effect=episodes):
+                 patch.object(rollout, "load_seed_pool", side_effect=AssertionError("Explicit seeds read pool")), \
+                 patch.object(SimRunner, "make_env", autospec=True, side_effect=make_env), \
+                 patch.object(rollout, "write_json", wraps=write_json) as save:
                 try:
-                    record, path = rollout.evaluate_policy(checkpoints[0], seeds=[1], device="cpu",
+                    record, path = rollout.evaluate_policy(checkpoints[0], seeds=[8, 3], episodes=9, device="cpu",
                                                            output_dir=directory, video=False)
                 except RuntimeError as error:
                     assert "injected" in str(error)
                     assert fail and not (directory / "result_details.json").exists()
+                    assert save.call_count == 0
                 else:
                     assert not fail and path.is_file()
-            assert closed == [True]
+                    assert save.call_count == 1
+                    assert json.loads(json.dumps(record)) == json.loads(path.read_text())
+                    assert record["global_step"] == 1 and record["action_steps"] == agent.n_action_steps
+                    assert record["runner_options"]["n_obs_steps"] == agent.n_obs_steps
+                    assert record["runner_options"]["sensor_modalities"] == list(agent.consumed_observation_fields)
+                    assert record["runner_options"]["env_kwargs"] == {"frame_skip": 6}
+                    assert record["seeds"] == [row["seed"] for row in record["episodes"]] == [8, 3]
+                    assert record["statistics"]["n_episodes"] == len(record["episodes"]) == 2
+                    assert all(row["steps"] == 2 and row["total_steps"] == 3 for row in record["episodes"])
+                    assert record["environment"] == dict(
+                        control_dt_s=6 / 240, frame_skip=6, action_cnt_limit=3, success_hold_steps=2,
+                        randomization=dict(randomize_model_id=True, table_height_range=(-0.01, 0.02)),
+                        stability=dict(stable_check_steps=240))
+                    assert [env.dt_reads for env in environments] == [1, 0]
+                    runner = runners[0]
+                    runner.env_kwargs = {"frame_skip": 12}
+                    list(runner.run(agent, seeds=[8], inference_steps=2, action_steps=agent.n_action_steps))
+                    assert runner.environment["control_dt_s"] == 12 / 240
+                    assert record["environment"]["control_dt_s"] == 6 / 240
+            assert all(env.closed for env in environments)
+
+        with patch.object(rollout, "_restore_policy", return_value=agent):
+            try:
+                rollout.evaluate_policy(checkpoints[0], seeds=[1], action_steps=3, device="cpu",
+                                        output_dir=root / "too-many-actions", video=False)
+            except ValueError as error:
+                assert "future_steps (2)" in str(error)
+            else:
+                raise AssertionError("Evaluation ignored the agent's future window")
 
 
 def check_time(device):
@@ -1422,6 +1522,7 @@ def check_resume_logging(root):
 
 def check_normalizer_restore(root, device):
     from dexmani_policy.env_runner.sim_runner import SimRunner
+    from dexmani_policy.evaluation import rollout
     from dexmani_policy.evaluation.rollout import evaluate_policy
     from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
@@ -1437,9 +1538,10 @@ def check_normalizer_restore(root, device):
     for part in ("scale", "offset"):
         averaged[f"normalizer.fields.hand_latent.{part}"] = torch.ones(5)
     config: dict[str, Any] = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims,
-                  eval=dict(use_ema=True, inference_steps=2), dataset={"rgb_keep_uint8": True},
+                  eval=dict(use_ema=True, inference_steps=2), dataset={},
                   policy_metadata=dict(action_start_index=model.action_start_index),
-                  env_runner=dict(task_name="synthetic", eval_seeds=list(range(10))))
+                  env_runner=dict(task_name="synthetic"))
+    seed_pool = list(range(10))
     checkpoint = Checkpoint(7, raw, averaged, {"momentum": torch.ones(1)},
                             {"step": torch.ones(1)}, {"torch": torch.ones(1)}, config)
     path = root / "normalizer.pt"
@@ -1465,9 +1567,9 @@ def check_normalizer_restore(root, device):
 
         def episodes(runner, agent, *, seeds, inference_steps, action_steps, video_save_dir):
             assert runner.task_name == "synthetic" and video_save_dir is None
-            assert seeds == split_evaluation_seeds(config["env_runner"]["eval_seeds"], 1024, 2)[0]
+            assert seeds == split_evaluation_seeds(seed_pool, 1024, 2)[0]
             assert inference_steps == 2 and action_steps == model.n_action_steps
-            assert agent.checkpoint_step == 7 and not agent.training
+            assert not agent.training
             assert all(p.dtype == torch.float32 and p.device == obs["joint_state"].device for p in agent.parameters())
             assert torch.equal(torch.get_rng_state(), torch.Generator().manual_seed(1024).get_state())
             assert agent.normalizer["hand_latent"].scale.shape == restored.normalizer["hand_latent"].scale.shape
@@ -1483,6 +1585,7 @@ def check_normalizer_restore(root, device):
 
         with patch("torch.load", side_effect=read_checkpoint) as load, \
              patch("hydra.utils.instantiate", side_effect=construct), \
+             patch.object(rollout, "load_seed_pool", return_value=seed_pool) as load_seeds, \
              patch.object(SimRunner, "run", autospec=True, side_effect=episodes):
             restored = restore_policy(path, use_ema=use_ema, device=device)
             assert load.call_count == 1
@@ -1490,6 +1593,7 @@ def check_normalizer_restore(root, device):
             record, result_path = evaluate_policy(path, weights=None if use_ema else "raw",
                 episodes=2, device=device, video=False, output_dir=root / f"evaluation-{use_ema}")
             assert load.call_count == 1
+            load_seeds.assert_called_once_with("synthetic")
             assert record["weights"] == ("ema" if use_ema else "raw") and record["global_step"] == 7
             assert json.loads(result_path.read_text())["seeds"] == record["seeds"]
             assert record["runtime"]["parameter_dtypes"] == ["torch.float32"]
@@ -1681,49 +1785,19 @@ def check_codebook_training(root, device=torch.device("cpu")):
     checkpoint_path = root / "dqrise/checkpoints/latest.pt"
     checkpoint = load_checkpoint(checkpoint_path)
     assert checkpoint.effective_config["agent"]["num_codes"] == 3
-    assert "rgb_keep_uint8" not in checkpoint.effective_config["dataset"]
     torch.testing.assert_close(checkpoint.model_state["normalizer.fields.action.scale"][-12:], torch.from_numpy(scale))
     torch.testing.assert_close(checkpoint.model_state["normalizer.fields.action.offset"][-12:], torch.from_numpy(offset))
     artifact.unlink()
     info = inspect_policy(root / "dqrise", checkpoint="latest", weights="raw")
     runtime = load_policy(info, device=device)
     observation = {key: source[f"data/{key}"][:2] for key in info.observation_fields}
-    prediction = runtime.predict(observation)
-    assert prediction.shape == (3, 19)
-    checkpoint.effective_config["dataset"]["rgb_keep_uint8"] = True
-    legacy_path = save_checkpoint(root / "legacy-rgb/checkpoints/latest.pt", checkpoint)
-    original = legacy_path.read_bytes()
-    assert "rgb_keep_uint8" not in load_checkpoint(legacy_path).effective_config["dataset"]
-    legacy_info = inspect_policy(root / "legacy-rgb", checkpoint="latest", weights="raw")
-    assert legacy_info.rgb_preprocessing == info.rgb_preprocessing
-    legacy_runtime = load_policy(legacy_info, device=device)
-    np.testing.assert_array_equal(legacy_runtime.predict(observation), prediction)
+    assert runtime.predict(observation).shape == (3, 19)
     runtime.close()
-    legacy_runtime.close()
-    resumed_cfg, checkpoint = prepare_resume(root / "legacy-rgb", device=str(device))
+    resumed_cfg, checkpoint = prepare_resume(root / "dqrise", device=str(device))
     assert resumed_cfg.dataset.max_train_episodes == 100
-    assert "rgb_keep_uint8" not in resumed_cfg.dataset
-    resumed_cfg.workspace.output_dir = str(root / "dqrise")
     with patch("dexmani_policy.agents.hand_prior.codebook.load_codebook", side_effect=AssertionError("Reload on resume")), \
          patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
         assert run_training(resumed_cfg, checkpoint=checkpoint, max_updates=1) == 3
-    assert legacy_path.read_bytes() == original
-    assert "rgb_keep_uint8" not in load_checkpoint(root / "dqrise/checkpoints/latest.pt").effective_config["dataset"]
-    checkpoint.effective_config["dataset"]["rgb_keep_uint8"] = False
-    unsupported = save_checkpoint(root / "unsupported-rgb/checkpoints/latest.pt", checkpoint)
-    original = unsupported.read_bytes()
-    for read in (lambda: load_checkpoint(unsupported),
-                 lambda: inspect_policy(root / "unsupported-rgb", checkpoint="latest"),
-                 lambda: restore_policy(unsupported, use_ema=False, device=device),
-                 lambda: prepare_resume(root / "unsupported-rgb", device=str(device))):
-        try:
-            read()
-        except ValueError as error:
-            assert "rgb_keep_uint8=False" in str(error)
-            assert "fixed uint8" in str(error) and "floating-point" in str(error) and "older commit" in str(error)
-        else:
-            raise AssertionError("Legacy float RGB recipe accepted")
-    assert unsupported.read_bytes() == original
 
 
 def check_configs(_device):
@@ -1731,7 +1805,6 @@ def check_configs(_device):
         cfg = load_policy_config(method)
         validate_config(cfg)
         assert cfg.dataset.max_train_episodes is None
-        assert "rgb_keep_uint8" not in cfg.dataset
     validate_config(load_policy_config("dp3", ["normalization.action=gaussian", "agent.clip_sample=false",
                                                "normalization.point_cloud=identity"]))
 

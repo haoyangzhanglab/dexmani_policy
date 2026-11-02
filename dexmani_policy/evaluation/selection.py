@@ -33,7 +33,7 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     action_steps = cfg["agent"]["n_action_steps"] if action_steps is None else action_steps
     positive_int(inference_steps, "inference_steps")
     positive_int(action_steps, "action_steps")
-    test, selection = split_evaluation_seeds(load_seed_pool(cfg), seed, test_episodes,
+    test, selection = split_evaluation_seeds(load_seed_pool(cfg["env_runner"]["task_name"]), seed, test_episodes,
                                              positive_int(selection_episodes, "selection_episodes"))
     directory = create_run_directory(root / "eval_ckpt_selector", output_dir)
     path = directory / "selection_result.json"

@@ -10,7 +10,7 @@ def summarize_episodes(episodes):
         "avg_steps": sum(steps) / len(steps) if steps else None,
         "avg_steps_all": sum(row["total_steps"] for row in episodes) / count,
         "n_success": successes,
-        "n_valid_episodes": count,
+        "n_episodes": count,
         "wilson_95": wilson_interval(successes, count),
     }
 

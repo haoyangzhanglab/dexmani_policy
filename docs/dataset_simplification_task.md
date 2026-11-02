@@ -1,6 +1,6 @@
 # 数据集模块收敛任务书：轻、薄、正确、好用
 
-> 状态：P0—P5 已实施；第 17 节保留上一轮历史记录，本次三项小型收敛及实际验证见第 18 节。第 14 节为验收要求，不表示所有研究或实机验证均已执行。
+> 状态：P0—P5 已实施；当前行为以正文为准，第 17、18 节保留既往实施与验证记录，不作为当前兼容行为的依据。第 14 节为验收要求，不表示所有研究或实机验证均已执行。
 > 仓库：`haoyangzhanglab/dexmani_policy`  
 > 首轮审查基线：`f9a8e5134ad3a23788a2dc6f7107cff9fb8174bb`
 >
@@ -266,7 +266,7 @@ val = order[T:T + V]
 
 新训练统一路径：存盘 HWC uint8 → CPU resize/crop/颜色增强 → 连续 CHW uint8 → 模型内部浮点转换与 mean/std。
 
-- 从新训练配方和普通用户说明中移除 `rgb_keep_uint8` 选项，避免维护两种常规 Dataset 输出。
+- 新训练和推理均使用固定 uint8 输出，不提供输出 dtype 开关。
 - 更新 Dataset、`rgb_preprocessing_kwargs()`、SimRunner、PolicyRuntime 及相关测试的直接调用点。原来默认 RGB 配方已经为 true，应保持这些配方的数值处理次序。
 - 颜色增强可能需要浮点中间值，最终再量化；不能为强制 uint8 而在每个中间步骤重复量化。
 - 保留训练随机 crop、推理 center crop 和同一观察窗口共享裁剪参数。
@@ -275,9 +275,7 @@ val = order[T:T + V]
 
 ### 9.2 checkpoint 输入边界
 
-当前 checkpoint 使用固定 uint8 配方，不包含 `rgb_keep_uint8`。统一读取边界直接接受无该键的配置；旧值为 true 时仅从加载到内存的 Dataset 配置中移除冗余键，继续使用等价的 uint8 路径，支持元信息查看、续训和推理。
-
-旧值为 false 时明确拒绝，并说明固定 uint8 路径不能保证原浮点预处理等价，需用对应旧提交恢复。读取不修改原 checkpoint，不静默改变 false 配方，不增加版本、迁移工具或兼容开关。此规则替换原先“包含 RGB 键一律拒绝”的行为；历史验证记录保留在第 17 节，本次验证另列第 18 节。
+checkpoint 保存当前固定 uint8 配方，查看、续训和推理共用直接读取路径，不改写预处理配置或磁盘文件，不维护历史配方迁移、版本判断或兼容开关。
 
 ### 9.3 不误删几何处理
 
@@ -407,7 +405,7 @@ SimRunner 与 PolicyRuntime 在 H2D 前均直接依据已加载 `agent.normaliza
 
 - [x] `datasets/demonstration.py`、`common/image_util.py`、RGB 配方统一新训练 uint8 输出。
 - [x] 同步 `deployment/runtime.py`、`deployment/metadata.py`、`env_runner/sim_runner.py`、`evaluation/rollout.py` 的实际调用点。
-- [x] checkpoint 读取接受无 RGB 旧键及值为 true 的等价配方（仅在内存删键）；false 明确拒绝，不静默改变图像数值或改写原文件。
+- [x] checkpoint 直接读取当前固定 uint8 配方，不迁移配置或改写原文件。
 - [x] SimRunner H2D 前裁剪点云消费通道；不改变历史、动作切片和控制长度。
 - [x] 保留几何仿射、训练/推理量化顺序和各路径的职责。
 
@@ -423,7 +421,7 @@ SimRunner 与 PolicyRuntime 在 H2D 前均直接依据已加载 `agent.normaliza
 
 - [x] 执行第 14 节中受改动影响的检查；说明已运行、失败、未运行及原因。
 - [x] 检查配置、CLI 示例、调用引用与文档是否同步；删除本轮引入而未使用的参数和 helper。
-- [x] 对新默认使用全部数据、上限新语义、历史 RGB 配方处理作简短变更说明。
+- [x] 对新默认使用全部数据、上限新语义、固定 RGB 输出作简短说明。
 - [x] 未执行长训、真实闭环、硬件测试或性能 profiling 时明确写出；不把合成数据结果扩写成任务成功率结论。
 
 ## 14. 验收：验证真实风险，复用已有检查
@@ -444,7 +442,7 @@ SimRunner 与 PolicyRuntime 在 H2D 前均直接依据已加载 `agent.normaliza
 | 几何 | 使用真实 torch resize/投影路径核对像素中心与标定；仅检查矩阵形状或纸面公式不算完整图像验证 |
 | SimRunner / Runtime | H2D 前按各字段实际消费宽度裁剪；统一宽度配方数值不变，不同字段宽度独立生效；历史、FP32、连续布局及有限性保持 |
 | DDIM | 小型 scheduler 数值例子验证 clipping 与动作 affine 的关系；默认 limits 路径保持；非默认例子显式关闭 clipping |
-| 当前 checkpoint | 当前产物 fresh→save→resume/inference；旧 RGB true 配方经过实际加载/恢复，false 明确失败，读取不改写原文件 |
+| 当前 checkpoint | 当前产物 fresh→save→resume/inference；读取不迁移配置或改写原文件 |
 | 轻量入口 | Dataset 检查不要求下载权重、加载实机环境或构造大视觉模型；测试失败保留明确异常 |
 
 优先使用仓库已有入口，修改后同步其实际能力：
@@ -540,7 +538,7 @@ git diff --check
 - agent_checks 完整入口已在 CUDA 通过；未重复运行 CUDA 预训练全集，预训练完整入口使用 CPU。
 - 本轮不实施第 12 节研究事项，也不猜测非默认控制频率的仿真 API。最终检查未发现本轮冗余参数、无消费者 helper 或无关文件变更。
 
-## 18. 三项小型收敛及验证（2026-11-03）
+## 18. 三项小型收敛及验证（2026-11-03，历史）
 
 起点为 `5698be1d5010230001210e2c887bb3c557ae123e`，HEAD 与指定 review 基线一致，工作区干净。此前已完成的数量语义、统计优化及数据主线保留。
 

@@ -35,17 +35,7 @@ def load_checkpoint(path: str | Path) -> Checkpoint:
     import torch
 
     # Project checkpoints contain trusted training state, not just tensors.
-    payload = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
-    dataset = payload["effective_config"].get("dataset", {})
-    if "rgb_keep_uint8" in dataset:
-        if dataset["rgb_keep_uint8"] is not True:
-            raise ValueError(
-                f"Unsupported dataset.rgb_keep_uint8={dataset['rgb_keep_uint8']!r}: "
-                "the fixed uint8 path cannot guarantee equivalence to the original "
-                "floating-point preprocessing. Restore with the corresponding older commit."
-            )
-        del dataset["rgb_keep_uint8"]
-    return Checkpoint(**payload)
+    return Checkpoint(**torch.load(path, map_location="cpu", weights_only=False, mmap=True))
 
 
 def policy_state_dict(model) -> dict:
@@ -57,15 +47,14 @@ def restore_policy(checkpoint_path: str | Path, *, use_ema: bool, device: "str |
     checkpoint = load_checkpoint(checkpoint_path)
     cfg = checkpoint.effective_config
     state_dict = checkpoint.ema_model_state if use_ema else checkpoint.model_state
-    global_step = checkpoint.global_step
     # Drop training state and unselected weights before constructing the model.
     del checkpoint
-    return _restore_policy(cfg, state_dict, global_step, device)
+    return _restore_policy(cfg, state_dict, device)
 
 
 def _restore_policy(
     effective_config: dict[str, Any], state_dict: dict[str, Any] | None,
-    global_step: int, device: "str | torch.device",
+    device: "str | torch.device",
 ) -> "Policy":
     import hydra
     import torch
@@ -83,7 +72,6 @@ def _restore_policy(
     finally:
         set_rng_state(rng_state)
 
-    agent.checkpoint_step = global_step
     agent.configure_normalizer(effective_config["normalization_dims"], normalizer_shapes_from_state(state_dict))
     agent.load_state_dict(state_dict, strict=True, assign=True)
     agent.to(device=device, dtype=torch.float32)

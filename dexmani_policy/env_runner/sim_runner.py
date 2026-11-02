@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ class SimRunner:
 
         self.obs_buffer: dict[str, np.ndarray] = {}
         self.obs_cursor = 0
+        self.environment: dict[str, Any] = {}
 
     def update_obs(self, observation: dict[str, np.ndarray]):
         position = self.obs_cursor % self.n_obs_steps
@@ -118,6 +120,7 @@ class SimRunner:
                     return bool(info["success"]), task_done_step
 
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
+        self.environment = {}
         source = require_tactile_source(
             agent.consumed_observation_fields, getattr(agent, "tactile_source", None),
         )
@@ -133,6 +136,15 @@ class SimRunner:
                         previous, env = env, None
                         previous.close()
                     env = self.make_env(record_video=video_save_dir is not None)
+                    if index == 0:
+                        self.environment = {
+                            "control_dt_s": env.dt,
+                            "frame_skip": env.frame_skip,
+                            "action_cnt_limit": env.action_cnt_limit,
+                            "success_hold_steps": env.success_hold_steps,
+                            "randomization": asdict(env.randomization),
+                            "stability": asdict(env.stability),
+                        }
 
                 success, steps = self._run_episode(
                     agent, env, seed, inference_steps, action_steps=action_steps

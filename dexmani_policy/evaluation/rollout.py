@@ -43,45 +43,41 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     del loaded
     inference_steps = positive_int(cfg["eval"]["inference_steps"] if inference_steps is None
                                    else inference_steps, "inference_steps")
-    action_steps = positive_int(cfg["agent"]["n_action_steps"] if action_steps is None
-                                else action_steps, "action_steps")
-    future_steps = cfg["agent"]["horizon"] - cfg["policy_metadata"]["action_start_index"]
-    if action_steps > future_steps:
-        raise ValueError(f"action_steps must not exceed future_steps ({future_steps})")
     if seeds is None:
-        seeds, _ = split_evaluation_seeds(load_seed_pool(cfg), seed, episodes)
+        seeds, _ = split_evaluation_seeds(load_seed_pool(cfg["env_runner"]["task_name"]), seed, episodes)
     else:
         seeds = validate_seed_pool(list(seeds))
         if not seeds:
             raise ValueError("Evaluation seeds must be nonempty")
         validate_evaluation_seed(seed)
     options = dict(cfg["env_runner"])
-    options.pop("eval_seeds", None)
-    options.update(n_obs_steps=cfg["agent"]["n_obs_steps"],
-                   sensor_modalities=[key for key in cfg["normalization_dims"] if key != "action"],
-                   rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     directory = create_run_directory(checkpoint.parent.parent / "eval_dexsim", output_dir)
     path = directory / "result_details.json"
-    record = dict(checkpoint=str(checkpoint), weights=weights,
-                  inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
-                  seed=seed, device=str(device), video=video, runner_options=options,
-                  episodes=[], statistics=None)
     render_mode = (options.get("env_kwargs") or {}).get("render_mode")
     if render_mode == "human" and not os.environ.get("DISPLAY"):
         raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
     set_seed(seed)
-    record["runtime"] = {"torch": str(torch.__version__), "cuda": torch.version.cuda}
-    agent = _restore_policy(cfg, state_dict, global_step, device)
+    agent = _restore_policy(cfg, state_dict, device)
     del state_dict
-    record["global_step"] = agent.checkpoint_step
-    record["runtime"]["parameter_dtypes"] = sorted({str(p.dtype) for p in agent.parameters()})
+    action_steps = positive_int(agent.n_action_steps if action_steps is None else action_steps, "action_steps")
+    if action_steps > agent.future_steps:
+        raise ValueError(f"action_steps must not exceed future_steps ({agent.future_steps})")
+    options.update(n_obs_steps=agent.n_obs_steps,
+                   sensor_modalities=list(agent.consumed_observation_fields),
+                   rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     from dexmani_policy.env_runner.sim_runner import SimRunner
     runner = SimRunner(**options)
     with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
                             action_steps=action_steps,
-                            video_save_dir=directory / "videos" / runner.task_name if video else None)) as episodes:
-        record["episodes"].extend(episodes)
-    record["statistics"] = summarize_episodes(record["episodes"])
+                            video_save_dir=directory / "videos" / runner.task_name if video else None)) as results:
+        episode_results = list(results)
+    record = dict(checkpoint=str(checkpoint), global_step=global_step, weights=weights,
+                  inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
+                  seed=seed, device=str(device), video=video, runner_options=options,
+                  environment=runner.environment,
+                  runtime={"torch": str(torch.__version__), "cuda": torch.version.cuda,
+                           "parameter_dtypes": sorted({str(p.dtype) for p in agent.parameters()})},
+                  episodes=episode_results, statistics=summarize_episodes(episode_results))
     write_json(path, record, overwrite=False)
     print(f"{record['statistics']}; {path}")
     return record, path
