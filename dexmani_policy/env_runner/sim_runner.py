@@ -173,4 +173,11 @@ class SimRunner:
 
         env_class = resolve_env_class(self.task_name)
         kwargs = {"render_mode": "rgb_array", **self.env_kwargs}
-        return env_class(record_video=record_video, **kwargs)
+        # Keep the partially constructed instance reachable for cleanup.
+        env = env_class.__new__(env_class)
+        try:
+            env_class.__init__(env, record_video=record_video, **kwargs)
+        except BaseException:
+            close_resources(env.close)
+            raise
+        return env

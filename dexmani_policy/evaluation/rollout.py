@@ -78,6 +78,8 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                   runtime={"torch": str(torch.__version__), "cuda": torch.version.cuda,
                            "parameter_dtypes": sorted({str(p.dtype) for p in agent.parameters()})},
                   episodes=episode_results, statistics=summarize_episodes(episode_results))
+    if hasattr(agent, "force_predictor"):
+        record["force_inference_steps"] = agent.force_predictor.num_inference_steps
     write_json(path, record, overwrite=False)
     print(f"{record['statistics']}; {path}")
     return record, path

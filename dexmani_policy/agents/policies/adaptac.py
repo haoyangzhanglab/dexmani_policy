@@ -172,8 +172,16 @@ class AdapTac(Policy):
     def consumed_observation_fields(self):
         return tuple(dict.fromkeys((*self.obs_encoder.consumed_observation_fields, "finger_tactile_force")))
 
-    def _current_force(self, preprocessed: dict) -> torch.Tensor:
-        return preprocessed["finger_tactile_force"].float().reshape(-1, self.n_obs_steps, self.force_dim)
+    def _encode_force_inputs(
+        self, obs_dict: dict,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+        obs = self._preprocess_obs(obs_dict)
+        current_force = obs["finger_tactile_force"].float().reshape(
+            -1, self.n_obs_steps, self.force_dim,
+        )
+        features = self.obs_encoder(obs)
+        force_condition = torch.cat(features[:2], dim=-1).unsqueeze(1)
+        return features, current_force, force_condition
 
     def _action_condition(self, features, current_force, predicted_force) -> torch.Tensor:
         visual, tactile, state = features
@@ -184,11 +192,9 @@ class AdapTac(Policy):
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs: Any,
     ) -> tuple[torch.Tensor, dict]:
-        obs = self._preprocess_obs(batch["obs"])
-        current_force = self._current_force(obs)
-        features = self.obs_encoder(obs)
+        features, current_force, force_condition = self._encode_force_inputs(batch["obs"])
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
-            torch.cat(features[:2], dim=-1).unsqueeze(1),
+            force_condition,
             self.normalizer["finger_tactile_force"].normalize(batch["future_force"]).flatten(-2),
             batch["future_force_valid"],
         )
@@ -221,11 +227,9 @@ class AdapTac(Policy):
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        obs = self._preprocess_obs(obs_dict)
-        current_force = self._current_force(obs)
-        features = self.obs_encoder(obs)
+        features, current_force, force_condition = self._encode_force_inputs(obs_dict)
         predicted_force = self.force_predictor.predict_action(
-            torch.cat(features[:2], dim=-1).unsqueeze(1),
+            force_condition,
             (current_force.shape[0], self.future_steps, self.force_dim),
             generator=generator, dtype=torch.float32,
         )

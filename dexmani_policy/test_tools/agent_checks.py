@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import weakref
+from contextlib import redirect_stderr
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,7 +113,8 @@ def check_evaluation(_device):
         agent=dict(n_action_steps=2, horizon=4, n_obs_steps=1, action_dim=19),
         normalization_dims=dict(joint_state=19, point_cloud=3, action=19), dataset={}, deployment_metadata={},
         policy_metadata=dict(action_start_index=0, control_action_dim=19, supported_execution_modes=["sync"]),
-        env_runner=dict(task_name="test", env_kwargs=dict(frame_skip=6), env_rebuild_interval=1),
+        env_runner=dict(task_name="test", env_kwargs=dict(frame_skip=6, max_stability_retries=0),
+                        env_rebuild_interval=1),
     )
     with tempfile.TemporaryDirectory(prefix="dexmani-evaluation-check-") as temporary:
         root = Path(temporary)
@@ -195,13 +197,17 @@ def check_evaluation(_device):
         @dataclass
         class Stability:
             stable_check_steps: int = 240
+            # A distinct fake default makes a dropped checkpoint zero observable.
+            max_stability_retries: int = 3
 
         class Environment:
-            def __init__(self, frame_skip=15, action_cnt_limit=3, success_hold_steps=2):
+            def __init__(self, frame_skip=15, action_cnt_limit=3, success_hold_steps=2,
+                         max_stability_retries=3):
                 self.frame_skip = frame_skip
                 self.action_cnt_limit = action_cnt_limit
                 self.success_hold_steps = success_hold_steps
-                self.randomization, self.stability = Randomization(), Stability()
+                self.randomization = Randomization()
+                self.stability = Stability(max_stability_retries=max_stability_retries)
                 self.closed, self.dt_reads = False, 0
 
             @property
@@ -214,12 +220,14 @@ def check_evaluation(_device):
 
             def reset(self, *, seed):
                 self.action_cnt = 0
+                if fail == "reset":
+                    raise RuntimeError("injected reset failure")
                 return self.observation(), {}
 
             def step(self, action):
                 assert self.action_cnt < self.action_cnt_limit and not self.closed
                 self.action_cnt += 1
-                if fail and self.action_cnt == 2:
+                if fail == "step" and self.action_cnt == 2:
                     raise RuntimeError("injected rollout failure")
                 done = self.action_cnt == self.action_cnt_limit
                 return self.observation(), 0, done, False, dict(
@@ -233,7 +241,7 @@ def check_evaluation(_device):
                                 consumed_observation_fields=("joint_state",),
                                 normalization_dims=config["normalization_dims"])
 
-        for fail in (False, True):
+        for fail in (None, "reset", "step"):
             directory = root / f"rollout-{fail}"
             environments, runners = [], []
 
@@ -269,23 +277,26 @@ def check_evaluation(_device):
                                                            output_dir=directory, video=False)
                 except RuntimeError as error:
                     assert "injected" in str(error)
-                    assert fail and not (directory / "result_details.json").exists()
+                    assert fail is not None and not (directory / "result_details.json").exists()
                     assert save.call_count == 0
+                    assert len(environments) == 1
                 else:
-                    assert not fail and path.is_file()
+                    assert fail is None and path.is_file()
                     assert save.call_count == 1
                     assert json.loads(json.dumps(record)) == json.loads(path.read_text())
+                    assert "force_inference_steps" not in record
                     assert record["global_step"] == 1 and record["action_steps"] == agent.n_action_steps
                     assert record["runner_options"]["n_obs_steps"] == agent.n_obs_steps
                     assert record["runner_options"]["sensor_modalities"] == list(agent.consumed_observation_fields)
-                    assert record["runner_options"]["env_kwargs"] == {"frame_skip": 6}
+                    assert record["runner_options"]["env_kwargs"] == {
+                        "frame_skip": 6, "max_stability_retries": 0}
                     assert record["seeds"] == [row["seed"] for row in record["episodes"]] == [8, 3]
                     assert record["statistics"]["n_episodes"] == len(record["episodes"]) == 2
                     assert all(row["steps"] == 2 and row["total_steps"] == 3 for row in record["episodes"])
                     assert record["environment"] == dict(
                         control_dt_s=6 / 240, frame_skip=6, action_cnt_limit=3, success_hold_steps=2,
                         randomization=dict(randomize_model_id=True, table_height_range=(-0.01, 0.02)),
-                        stability=dict(stable_check_steps=240))
+                        stability=dict(stable_check_steps=240, max_stability_retries=0))
                     assert [env.dt_reads for env in environments] == [1, 0]
                     runner = runners[0]
                     runner.env_kwargs = {"frame_skip": 12}
@@ -302,6 +313,62 @@ def check_evaluation(_device):
                 assert "future_steps (2)" in str(error)
             else:
                 raise AssertionError("Evaluation ignored the agent's future window")
+
+
+def check_sim_construction(_device):
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+
+    for construction_error, cleanup_error in (
+        (None, None),
+        (RuntimeError("injected construction failure"), None),
+        (RuntimeError("injected construction failure"), OSError("injected cleanup failure")),
+        (KeyboardInterrupt(), None),
+        (KeyboardInterrupt(), OSError("injected cleanup failure")),
+    ):
+        environments = []
+
+        class Environment:
+            def __init__(self, *, record_video, **kwargs):
+                assert record_video is False
+                assert kwargs == {"render_mode": "rgb_array", "max_stability_retries": 0}
+                self.resource = object()
+                self.close_calls = 0
+                environments.append(self)
+                if construction_error is not None:
+                    raise construction_error
+
+            def close(self):
+                self.close_calls += 1
+                self.resource = None
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+        def resolve_env_class(task_name):
+            assert task_name == "test"
+            return Environment
+
+        runner = SimRunner("test", 1, [], {}, env_kwargs={"max_stability_retries": 0})
+        errors = io.StringIO()
+        with patch.dict("sys.modules", {"dexmani_sim": SimpleNamespace(resolve_env_class=resolve_env_class)}), \
+             redirect_stderr(errors):
+            if construction_error is None:
+                env = runner.make_env(record_video=False)
+                assert env.resource is not None and env.close_calls == 0
+                env.close()
+            else:
+                try:
+                    list(runner.run(SimpleNamespace(consumed_observation_fields=()),
+                                    seeds=[8, 3], inference_steps=2, action_steps=1))
+                except BaseException as error:
+                    assert error is construction_error
+                else:
+                    raise AssertionError("Construction failure did not propagate")
+        assert len(environments) == 1
+        assert environments[0].resource is None and environments[0].close_calls == 1
+        if cleanup_error is not None:
+            assert "OSError: injected cleanup failure" in errors.getvalue()
+        else:
+            assert not errors.getvalue()
 
 
 def check_time(device):
@@ -613,6 +680,108 @@ def check_token_decoders(device):
         assert (dynamic[1][:, 8:] - features[:, 8:]).abs().sum() > 0
         torch.testing.assert_close(prediction[..., :19], perturbed_ee[..., :19], rtol=0, atol=0)
         assert (prediction[..., 19:] - perturbed_ee[..., 19:]).abs().sum() > 0
+
+
+def check_adaptac(device):
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    from dexmani_policy.evaluation import rollout
+
+    cfg = load_policy_config("adaptac", [
+        "horizon=8", "n_action_steps=8", "agent.num_points=32",
+        "agent.pc_encoder_config.channels=24", "agent.pc_encoder_config.num_patches=12",
+        "agent.pc_encoder_config.group_size=8", "agent.pc_encoder_config.depth=1",
+        "agent.pc_encoder_config.num_heads=4", "agent.feature_dim=32", "agent.state_out_dim=8",
+        "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=32",
+        "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=32",
+    ])
+    policy = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    dims = dict(joint_state=19, point_cloud=6, finger_tactile_force=3, action=19)
+    policy.configure_normalizer(dims, normalization_feature_shapes(dims))
+    policy.to(device)
+    policy.modality_dropout_probs = {"finger_tactile_force": 0.3}
+    batch = dict(
+        obs=dict(joint_state=torch.randn(2, 1, 19, device=device),
+                 point_cloud=torch.randn(2, 1, 48, 6, device=device),
+                 finger_tactile_force=torch.randn(2, 1, 5, 3, device=device)),
+        action=torch.randn(2, 8, 19, device=device),
+        future_force=torch.randn(2, 8, 5, 3, device=device),
+        future_force_valid=torch.ones(2, 8, dtype=torch.bool, device=device),
+    )
+    batch["future_force_valid"][1, -2:] = False
+
+    for training, steps in ((True, None), (False, None), (False, 10)):
+        policy.train(training)
+        policy.zero_grad(set_to_none=True)
+        torch.manual_seed(123)
+        generator = torch.Generator(device=device).manual_seed(456)
+        force_method = "compute_loss_and_prediction" if training else "predict_action"
+        with patch.object(policy, "_preprocess_obs", wraps=policy._preprocess_obs) as preprocess, \
+             patch.object(policy.obs_encoder, "forward", wraps=policy.obs_encoder.forward) as encoder, \
+             patch.object(policy, "_action_condition", wraps=policy._action_condition) as condition, \
+             patch.object(policy.force_predictor, force_method,
+                          wraps=getattr(policy.force_predictor, force_method)) as force, \
+             patch.object(policy.force_predictor.model, "forward",
+                          wraps=policy.force_predictor.model.forward) as force_model, \
+             patch.object(policy.action_decoder.model, "forward",
+                          wraps=policy.action_decoder.model.forward) as action_model, \
+             torch.set_grad_enabled(training):
+            if training:
+                # Isolate the action objective's gradient through the predicted force.
+                policy.force_loss_weight = 0
+                loss, metrics = policy.compute_loss(batch)
+                assert torch.isfinite(loss) and metrics["loss_force_weighted"] == 0
+                loss.backward()
+                policy.force_loss_weight = cfg.agent.force_loss_weight
+            else:
+                output = policy.predict_action(batch["obs"], inference_steps=steps, generator=generator)
+                assert output["future_actions"].shape == (2, 8, 19)
+                assert torch.isfinite(output["future_actions"]).all()
+            assert preprocess.call_count == encoder.call_count == 1
+            features, current_force, predicted_force = condition.call_args.args
+            torch.testing.assert_close(current_force,
+                                       encoder.call_args.args[0]["finger_tactile_force"].reshape(2, 1, 15))
+            torch.testing.assert_close(force.call_args.args[0], torch.cat(features[:2], -1).unsqueeze(1))
+            assert predicted_force.shape == (2, 8, 15)
+            assert force_model.call_count == (1 if training else 20)
+            assert action_model.call_count == (1 if training else steps or 20)
+        if training:
+            assert any(p.grad is not None and p.grad.abs().sum() > 0
+                       for p in policy.force_predictor.parameters())
+
+    policy.eval()
+    config = {key: OmegaConf.to_container(cfg[key], resolve=True)
+              for key in ("agent", "eval", "env_runner", "dataset")}
+    config["agent"].update(policy.effective_config)
+    config["normalization_dims"] = dims
+    with tempfile.TemporaryDirectory(prefix="dexmani-adaptac-check-") as temporary:
+        root = Path(temporary)
+        checkpoint = save_checkpoint(root / "model.pt", Checkpoint(
+            1, policy.state_dict(), None, {}, {}, {}, config))
+        restored = restore_policy(checkpoint, use_ema=False, device=device)
+        for steps, force_steps in ((None, 20), (10, 20), (10, 7)):
+            restored.force_predictor.num_inference_steps = force_steps
+            def run(runner, agent, **options):
+                assert agent is restored
+                assert options["inference_steps"] == (steps or 20)
+                assert options["action_steps"] == 8
+                with patch.object(agent.force_predictor.model, "forward",
+                                  wraps=agent.force_predictor.model.forward) as force_model, \
+                     patch.object(agent.action_decoder.model, "forward",
+                                  wraps=agent.action_decoder.model.forward) as action_model:
+                    agent.predict_action(batch["obs"], inference_steps=options["inference_steps"],
+                                         generator=torch.Generator(device=device).manual_seed(456))
+                assert force_model.call_count == force_steps
+                assert action_model.call_count == (steps or 20)
+                yield dict(seed=1, success=True, steps=8, total_steps=8)
+            with patch.object(rollout, "_restore_policy", return_value=restored), \
+                 patch.object(SimRunner, "run", autospec=True, side_effect=run):
+                record, path = rollout.evaluate_policy(
+                    checkpoint, weights="raw", inference_steps=steps, seeds=[1], device=str(device),
+                    video=False, output_dir=root / f"eval-{steps}-{force_steps}")
+            assert record["inference_steps"] == (steps or 20)
+            assert record["force_inference_steps"] == force_steps
+            assert record["action_steps"] == 8
+            assert json.loads(path.read_text()) == json.loads(json.dumps(record))
 
 
 def check_policy_roundtrips(device):
@@ -1829,8 +1998,8 @@ def main():
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_configs, check_training_input_filter, check_evaluation, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
-                  check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb,
+    for check in (check_configs, check_training_input_filter, check_evaluation, check_sim_construction, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
+                  check_force_interaction, check_adaptac, check_token_decoders, check_policy_roundtrips, check_rgb,
                   check_rgb_deployment, check_dinov3, check_vq,
                   check_codebook, check_vq_training, check_codebook_pipeline, check_policies, check_output_boundaries,
                   check_sim_observations, check_image_geometry, check_ddim_clipping, check_training_lifecycle):
