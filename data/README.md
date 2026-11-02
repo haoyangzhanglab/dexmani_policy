@@ -44,6 +44,8 @@ AFRO/CordViP 的 `encoder.pt` 保存在线 encoder、输入 affine 和归一化�
 
 DQ-RISE 的 `codebook.npz` 只需 `sorted_hand_poses [K,12]`、`hand_normalizer_scale [12]`、`hand_normalizer_offset [12]`，姿态为 normalized FP32 坐标。运行时不依赖预训练分组或数据划分。默认 VQ 从 last 导出，显式 val 时从 lookup_mse best 导出；任意完整 VQ checkpoint 均可重导出，命令见 [手部动作表示](../docs/手部动作表示.md)。fresh 策略保存实际 `num_codes`，完整策略恢复无需原 NPZ。
 
+CordViP 的 `.cordvip.zarr` 自包含 hand/object XYZ、joint_state、contact_map 和存在时的源 action，数值数组固定 FP32，episode 边界为 int64；根 attrs 只保留已有的 dt 与 hand_pointcloud_config。无 action 可用于预训练，主策略仍需 action。完整 Policy 的 normalizer 形状从实际权重恢复，不另存 shape 配置；部署事实不依赖来源标签。
+
 ### Uni3D（R3D 策略的 3D 点云编码器）
 
 - **来源**: [eddie-cui/r3d-weights](https://huggingface.co/eddie-cui/r3d-weights) @ HuggingFace Hub

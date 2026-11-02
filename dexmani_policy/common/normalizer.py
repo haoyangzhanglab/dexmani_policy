@@ -13,6 +13,15 @@ def normalization_feature_shapes(dims):
     }
 
 
+def normalizer_shapes_from_state(state):
+    prefix, suffix = "normalizer.fields.", ".scale"
+    return {
+        key[len(prefix):-len(suffix)]: value.shape
+        for key, value in state.items()
+        if key.startswith(prefix) and key.endswith(suffix)
+    }
+
+
 class FieldNormalizer(nn.Module):
     def __init__(self, scale, offset):
         super().__init__()

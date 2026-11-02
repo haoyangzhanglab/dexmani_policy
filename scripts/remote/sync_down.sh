@@ -57,8 +57,6 @@ PASS1_OPTS=(
     --exclude='vqvae_hand_best.pt'
     --exclude='codebook.npz'
     --exclude='best_ckpt.json'
-    --exclude='eval_ckpt_selector/**/selection_result.json'
-    --exclude='**/result_details.json'
     "${DRY_RUN[@]}"
 )
 
@@ -66,7 +64,7 @@ rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
 
 # rsync's temporary transfer preserves the previous complete file on failure.
 echo ""
-echo "--- Pass 2/3: training state and selection results ---"
+echo "--- Pass 2/3: training state ---"
 
 PASS2_OPTS=(
     -avs
@@ -84,13 +82,7 @@ PASS2_OPTS=(
 
 rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
 
-# Run records may change at completion even if their size and mtime match.
-rsync -avs --ignore-times "${WANDB_EXCLUDE[@]}" \
-    --include='*/' --include='**/result_details.json' \
-    --include='eval_ckpt_selector/**/selection_result.json' \
-    --exclude='*' "${DRY_RUN[@]}" "$REMOTE_PATH" "$LOCAL_PATH"
-
-# Copy the small best pointer only after all referenced records succeeded.
+# Publish the best pointer after checkpoint and completed-result transfers succeed.
 echo "--- Pass 3/3: best pointer (--ignore-times) ---"
 PASS3_OPTS=(
     -avs --ignore-times

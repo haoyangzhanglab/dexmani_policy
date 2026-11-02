@@ -3,8 +3,10 @@
 import argparse
 import copy
 import io
+import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -45,6 +47,152 @@ from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
 from dexmani_policy.training.pretrain.hand_prior import vqvae as vq_training
+
+
+def check_training_input_filter(device):
+    from dexmani_policy.agents.policies.adaptac import AdapTac
+    from dexmani_policy.training.trainer import PolicyTrainer
+
+    class UnusedObservation:
+        def to(self, *args, **kwargs):
+            raise AssertionError("Unused observation reached device transfer")
+
+    class RecordingPolicy(torch.nn.Module):
+        consumed_observation_fields = AdapTac.consumed_observation_fields
+
+        def __init__(self):
+            super().__init__()
+            self.gain = torch.nn.Parameter(torch.ones(()))
+            self.obs_encoder = SimpleNamespace(consumed_observation_fields=("taxel_tactile_force",))
+
+        def get_training_loss_kwargs(self, ema):
+            return {}
+
+        def forward(self, batch, **kwargs):
+            assert set(batch["obs"]) == {"taxel_tactile_force", "finger_tactile_force"}
+            assert set(batch) == {"obs", "action", "future_force", "future_force_valid"}
+            for value in (*batch["obs"].values(), batch["action"], batch["future_force"], batch["future_force_valid"]):
+                assert value.device == self.gain.device
+            return self.gain * batch["action"].sum(), {}
+
+    trainer = object.__new__(PolicyTrainer)
+    trainer.model = RecordingPolicy().to(device)
+    trainer.device, trainer.ema_model, trainer.use_bfloat16 = device, None, False
+    batch: dict[str, Any] = dict(obs={"taxel_tactile_force": torch.ones(1), "finger_tactile_force": torch.ones(1),
+                      "unused": UnusedObservation()}, action=torch.ones(1),
+                 future_force=torch.ones(1), future_force_valid=torch.ones(1, dtype=torch.bool))
+    trainer.train_microbatch(batch)
+    assert "unused" in batch["obs"] and trainer.model.gain.grad is not None
+
+
+def check_evaluation(_device):
+    from dexmani_policy.common.io_util import write_json
+    from dexmani_policy.deployment import inspect_policy
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    from dexmani_policy.evaluation import rollout, selection
+
+    config = dict(
+        policy_name="dp3", task_name="test", action_key="action",
+        eval=dict(use_ema=True, inference_steps=2),
+        agent=dict(n_action_steps=2, horizon=4, n_obs_steps=1, action_dim=19),
+        normalization_dims=dict(joint_state=19, action=19), dataset={}, deployment_metadata={},
+        policy_metadata=dict(action_start_index=0, control_action_dim=19, supported_execution_modes=["sync"]),
+        env_runner=dict(task_name="test", eval_seeds=list(range(10))),
+    )
+    with tempfile.TemporaryDirectory(prefix="dexmani-evaluation-check-") as temporary:
+        root = Path(temporary)
+        checkpoints = [save_checkpoint(root / folder / "model.pt", Checkpoint(
+            step, {}, None, {}, {}, {}, config)) for step, folder in ((1, "external-a"), (2, "external-b"))]
+        run = root / "publication"
+        (run / "checkpoints").mkdir(parents=True)
+        link = run / "checkpoints/link.pt"
+        link.symlink_to(checkpoints[1])
+        for explicit in (checkpoints[1], link, "link.pt"):
+            assert inspect_policy(run, checkpoint=explicit).checkpoint_path == checkpoints[1]
+        old_best = b'{"old": true}\n'
+        best = run / "best_ckpt.json"
+        for mode in ("success", "test_failure", "save_failure", "candidate_failure"):
+            best.write_bytes(old_best)
+            directory = root / f"results-{mode}"
+            events, calls = [], []
+
+            def evaluate(checkpoint, **options):
+                is_test = options["output_dir"].name == "test"
+                events.append("test" if is_test else "candidate")
+                assert best.read_bytes() == old_best
+                assert not (directory / "selection_result.json").exists()
+                assert options["weights"] == "ema" and options["inference_steps"] == options["action_steps"] == 2
+                if mode == "candidate_failure" or (mode == "test_failure" and is_test):
+                    raise RuntimeError("injected evaluation failure")
+                calls.append(options)
+                if is_test:
+                    assert Path(checkpoint).resolve() == checkpoints[1]
+                result = dict(global_step=2 if Path(checkpoint).resolve() == checkpoints[1] else 1,
+                              statistics=dict(success_rate=0.0 if is_test else 0.8, avg_steps=10))
+                output = rollout.create_run_directory(None, options["output_dir"])
+                path = output / "result_details.json"
+                write_json(path, result)
+                return result, path
+
+            def publish(path, record, **options):
+                events.append(path.name)
+                if path.name == "selection_result.json" and mode == "save_failure":
+                    raise OSError("injected save failure")
+                if path == best:
+                    assert (directory / "selection_result.json").is_file()
+                write_json(path, record, **options)
+
+            with patch.object(selection, "evaluate_policy", side_effect=evaluate), \
+                 patch.object(selection, "write_json", side_effect=publish):
+                try:
+                    path = selection.run_pipeline(checkpoints, run_dir=run, output_dir=directory,
+                                                  selection_episodes=2, test_episodes=3, device="cpu")
+                except (RuntimeError, OSError) as error:
+                    assert "injected" in str(error)
+                    assert mode != "success"
+                    assert best.read_bytes() == old_best
+                    assert not (directory / "selection_result.json").exists()
+                    continue
+            assert mode == "success"
+            assert events == ["candidate", "candidate", "test", "selection_result.json", "best_ckpt.json"]
+            assert calls[0]["seeds"] == calls[1]["seeds"]
+            assert set(calls[0]["seeds"]).isdisjoint(calls[2]["seeds"])
+            record = json.loads(path.read_text())
+            assert "status" not in record
+            assert (path.parent / record["ckpt_relpath"]).resolve() == checkpoints[1]
+            assert (path.parent / record["test_result"]).is_file()
+            for candidate, checkpoint in zip(record["candidates"], checkpoints):
+                assert (path.parent / candidate["checkpoint"]).resolve() == checkpoint
+                assert (path.parent / candidate["result"]).is_file()
+            assert set(json.loads(best.read_text())) == {"ckpt_relpath", "inference"}
+            assert inspect_policy(run).checkpoint_path == checkpoints[1]
+        assert not (run / ".pipeline.lock").exists()
+
+        agent = SimpleNamespace(checkpoint_step=2, parameters=torch.nn.Linear(1, 1).parameters)
+        for fail in (False, True):
+            directory = root / f"rollout-{fail}"
+            closed = []
+
+            def episodes(*args, **kwargs):
+                try:
+                    assert not (directory / "result_details.json").exists()
+                    yield dict(success=True, steps=2, total_steps=3, seed=1)
+                    if fail:
+                        raise RuntimeError("injected rollout failure")
+                finally:
+                    closed.append(True)
+
+            with patch.object(rollout, "restore_policy", return_value=agent), \
+                 patch.object(SimRunner, "run", side_effect=episodes):
+                try:
+                    record, path = rollout.evaluate_policy(checkpoints[0], seeds=[1], device="cpu",
+                                                           output_dir=directory, video=False)
+                except RuntimeError as error:
+                    assert "injected" in str(error)
+                    assert fail and not (directory / "result_details.json").exists()
+                else:
+                    assert not fail and "status" not in record and path.is_file()
+            assert closed == [True]
 
 
 def check_sampler(_device):
@@ -173,12 +321,12 @@ def check_decoder_precision(device):
             target = actions if kind == "sample" else noise if kind == "epsilon" else (a.sqrt() * noise).to(dtype)
             torch.testing.assert_close(loss, F.mse_loss((expected * model.gain.to(dtype)).float(), target.float()))
             loss.backward()
-            assert torch.isfinite(model.gain.grad)
+            assert model.gain.grad is not None and torch.isfinite(model.gain.grad)
 
-    for decoder in (Diffusion(Head()), RectifiedFlow(Head()), ConsistencyFlow(Head())):
-        decoder.eval()
+    for sampling_decoder in (Diffusion(Head()), RectifiedFlow(Head()), ConsistencyFlow(Head())):
+        sampling_decoder.eval()
         def sample(**kwargs):
-            return decoder.predict_action(cond, shape, 4,
+            return sampling_decoder.predict_action(cond, shape, 4,
                 generator=torch.Generator(device=device).manual_seed(10), **kwargs)
         with torch.inference_mode():
             ordinary = sample()
@@ -232,6 +380,29 @@ def check_tactile(device):
     restored = policy.obs_encoder.tactile_encoder.to(device)
     assert isinstance(restored, XHandPatchEncoder)
     restored.load_state_dict(encoder.state_dict(), strict=True)
+
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    from dexmani_policy.agents.policies.interact_dex import InterActDex
+
+    runner = SimRunner("unused", 1, list(policy.consumed_observation_fields), {})
+    with patch.object(runner, "make_env", side_effect=AssertionError("Created environment for real tactile")):
+        try:
+            next(runner.run(policy, seeds=[1], inference_steps=2, action_steps=2))
+        except ValueError as error:
+            assert "sim-source" in str(error)
+        else:
+            raise AssertionError("SimRunner accepted real tactile")
+    force = torch.tensor([1., 2., 3.], device=device).expand(1, 1, 5, 3)
+    rotation = torch.tensor([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]], device=device)
+    pose = torch.tensor([0., 0., 0., 0., 1., 0., -1., 0., 0.], device=device).reshape(1, 1, 9)
+    batch = dict(obs=dict(finger_tactile_force=torch.zeros_like(force), eef_pose=pose),
+                 future_force=force, future_force_valid=torch.ones(1, 1, dtype=torch.bool, device=device))
+    for source in ("real", "sim"):
+        owner = SimpleNamespace(tactile_source=source,
+                                normalizer={"finger_tactile_force": SimpleNamespace(scale=2.)})
+        target = (force @ rotation if source == "sim" else force) * 2
+        loss, _ = InterActDex._compute_future_force_loss(cast(Any, owner), target, batch)
+        torch.testing.assert_close(loss, torch.zeros((), device=device))
 
 
 def check_interaction(device):
@@ -422,7 +593,7 @@ def check_policy_roundtrips(device):
         cfg = load_policy_config(method, overrides)
         if method == "dp":
             cfg.agent.rgb_backbone_config = {}
-        agent_cfg = OmegaConf.to_container(cfg.agent, resolve=True)
+        agent_cfg = cast(dict[str, Any], OmegaConf.to_container(cfg.agent, resolve=True))
         policy = hydra.utils.instantiate(agent_cfg, _convert_="all")
         validate_observation_fields(policy, cfg.dataset.sensor_modalities)
         shapes = dict(joint_state=(19,), point_cloud=(32, 3), hand_pointcloud=(32, 3),
@@ -475,7 +646,7 @@ def check_policy_roundtrips(device):
             path = Path(directory) / "model.pt"
             save_checkpoint(path, Checkpoint(
                 2, policy.state_dict(), None, optimizer.state_dict(), {}, get_rng_state(device),
-                dict(agent=saved_agent, normalization_dims=dims, normalizer_shapes=normalizer_shapes),
+                dict(agent=saved_agent, normalization_dims=dims),
             ))
             # Deployment restores all parameters in FP32, including the frozen RGB encoder.
             policy.float()
@@ -647,7 +818,7 @@ def check_rgb_deployment(device):
             architecture["model_type"] = "dinov2"
         elif kind == "dinov3":
             architecture = dict(embed_dim=32, depth=1, num_heads=4)
-        kwargs = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, state_dim=19,
+        kwargs: dict[str, Any] = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, state_dim=19,
                       rgb_backbone_name=kind, state_out_dim=8, down_dims=[16, 32],
                       diffusion_step_embed_dim=32, num_training_steps=10, num_inference_steps=2,
                       rgb_backbone_config=dict(tune_mode="lora", architecture=architecture,
@@ -659,7 +830,7 @@ def check_rgb_deployment(device):
         policy.to(device)
         obs = dict(joint_state=torch.randn(2, 2, 19, device=device),
                    rgb=torch.rand(2, 2, 3, 32, 32, device=device))
-        batch = dict(obs=obs, action=torch.randn(2, 8, 19, device=device))
+        batch: dict[str, Any] = dict(obs=obs, action=torch.randn(2, 8, 19, device=device))
         optimizer = build_optimizer(policy, lr=1e-3, weight_decay=0)
         for amp in (False, True):
             optimizer.zero_grad(set_to_none=True)
@@ -676,7 +847,7 @@ def check_rgb_deployment(device):
                 if ".lora_B." in name:
                     param.mul_(0.8)
         config = dict(agent={"_target_": "dexmani_policy.agents.policies.dp.DP", **kwargs},
-                      normalization_dims=dims, normalizer_shapes=shapes)
+                      normalization_dims=dims)
         with tempfile.TemporaryDirectory(prefix="dexmani-lora-restore-") as directory:
             raw, averaged = copy.deepcopy(policy), copy.deepcopy(ema)
             for model in (raw, averaged):
@@ -694,7 +865,7 @@ def check_rgb_deployment(device):
                     torch.testing.assert_close(restored._encode_obs(obs), reference._encode_obs(obs),
                                                atol=2e-6, rtol=2e-6)
                 for rtc in (False, True):
-                    options = dict(rtc_prefix=batch["action"][:, :3], delay_steps=1,
+                    options: dict[str, Any] = dict(rtc_prefix=batch["action"][:, :3], delay_steps=1,
                                    rtc_guidance_cap=2) if rtc else {}
                     # Isolate FP32 merge error from TF32 convolution rounding.
                     with torch.inference_mode(), torch.backends.cudnn.flags(allow_tf32=False):
@@ -777,7 +948,7 @@ def check_dinov3(device):
         )
         if kind == "dino":
             arch = {"model_type": "dinov2", **arch}
-        encoder = SpatialObservationEncoder(
+        spatial_encoder = SpatialObservationEncoder(
             num_points=32, n_obs_steps=2, rgb_backbone_name=kind,
             rgb_backbone_config=dict(architecture=arch, image_size=[32, 32]),
             pc_encoder_config=dict(channels=24, num_patches=12, group_size=8, depth=1, num_heads=4),
@@ -790,14 +961,15 @@ def check_dinov3(device):
                    rgb=torch.randint(256, (2, 3, 32, 32), dtype=torch.uint8, device=device),
                    camera_intrinsic=intrinsic.expand(2, -1, -1),
                    camera_extrinsic=torch.eye(4, device=device)[:3].expand(2, -1, -1))
-        output = encoder(obs)
+        output = spatial_encoder(obs)
         assert output.shape == (1, 26, 256) and torch.isfinite(output).all()
         output.square().mean().backward()
-        assert encoder.alignment.proj.weight.grad.abs().sum() > 0
-        restored = SpatialObservationEncoder(num_points=32, n_obs_steps=2, **encoder.effective_config).to(device).eval()
-        restored.load_state_dict(encoder.state_dict(), strict=True)
+        gradient = spatial_encoder.alignment.proj.weight.grad
+        assert gradient is not None and gradient.abs().sum() > 0
+        restored_spatial = SpatialObservationEncoder(num_points=32, n_obs_steps=2, **spatial_encoder.effective_config).to(device).eval()
+        restored_spatial.load_state_dict(spatial_encoder.state_dict(), strict=True)
         with torch.no_grad():
-            torch.testing.assert_close(restored(obs), output, rtol=0, atol=0)
+            torch.testing.assert_close(restored_spatial(obs), output, rtol=0, atol=0)
 
 
 def check_vq(device):
@@ -925,6 +1097,7 @@ def check_vq_training(device):
                 selected = "best" if val_episodes else "last"
                 assert export.call_args.args[0] == output / f"vqvae_hand_{selected}.pt"
             assert (output / "vqvae_hand_last.pt").exists()
+            assert not (output / "vqvae_hand_epoch=0002.pt").exists()
             assert (output / "vqvae_hand_best.pt").exists() == bool(val_episodes)
             periodic = torch.load(output / "vqvae_hand_epoch=0001.pt", weights_only=True)
             assert "split_metadata" not in periodic
@@ -1031,7 +1204,6 @@ def check_codebook_pipeline(device):
             agent={"_target_": "dexmani_policy.agents.policies.dqrise.DQRISE",
                    **policy_config, **policy.effective_config},
             normalization_dims=dims,
-            normalizer_shapes={key: tuple(field.scale.shape) for key, field in policy.normalizer.fields.items()},
         )
         checkpoint = Checkpoint(
             global_step=1, model_state=policy.state_dict(), ema_model_state=ema.state_dict(),
@@ -1143,7 +1315,7 @@ def main():
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_sampler, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
+    for check in (check_training_input_filter, check_evaluation, check_sampler, check_time, check_precision, check_decoder_precision, check_tactile, check_interaction,
                   check_force_interaction, check_token_decoders, check_policy_roundtrips, check_rgb,
                   check_rgb_deployment, check_dinov3, check_vq,
                   check_codebook, check_vq_training, check_codebook_pipeline, check_policies, check_output_boundaries):

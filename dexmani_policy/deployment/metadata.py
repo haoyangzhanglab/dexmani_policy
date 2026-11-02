@@ -13,10 +13,10 @@ def _resolve_checkpoint(experiment, selector):
         directory = PROJECT_ROOT / "experiments" / experiment
     directory = directory.resolve(strict=True)
     selector = str(selector)
-    selection = None
+    best = None
     if selector == "best":
-        selection = json.loads((directory / "best_ckpt.json").read_text())
-        path = directory / selection["ckpt_relpath"]
+        best = json.loads((directory / "best_ckpt.json").read_text())
+        path = directory / best["ckpt_relpath"]
     elif selector == "latest":
         path = directory / "checkpoints/latest.pt"
     elif selector.endswith("pct") and selector[:-3].isdigit():
@@ -30,10 +30,9 @@ def _resolve_checkpoint(experiment, selector):
         if not path.is_absolute():
             path = directory / "checkpoints" / path
     path = path.resolve(strict=True)
-    checkpoint_dir = (directory / "checkpoints").resolve()
-    if not path.is_relative_to(checkpoint_dir) or not path.is_file():
-        raise ValueError(f"Checkpoint must be a file inside {checkpoint_dir}")
-    return directory, path, selection
+    if not path.is_file():
+        raise ValueError(f"Checkpoint must be a file: {path}")
+    return directory, path, best
 
 
 @dataclass(frozen=True)
@@ -76,9 +75,9 @@ class PolicyInfo:
 
 def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=None) -> PolicyInfo:
     # Read the checkpoint recipe without constructing a model.
-    directory, path, selection = _resolve_checkpoint(experiment, checkpoint)
+    directory, path, best = _resolve_checkpoint(experiment, checkpoint)
     cfg = load_checkpoint(path).effective_config
-    defaults = cfg["eval"] if selection is None else selection["inference"]
+    defaults = cfg["eval"] if best is None else best["inference"]
     if weights is None:
         if type(defaults["use_ema"]) is not bool:
             raise ValueError("Saved use_ema must be boolean")
@@ -100,7 +99,7 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         task_name=cfg["task_name"],
         observation_fields=tuple(key for key in cfg["normalization_dims"] if key != "action"),
         n_obs_steps=agent["n_obs_steps"],
-        n_action_steps=agent["n_action_steps"] if selection is None else defaults["action_steps"],
+        n_action_steps=agent["n_action_steps"] if best is None else defaults["action_steps"],
         horizon=agent["horizon"],
         action_start_index=metadata["action_start_index"],
         action_dim=agent["action_dim"],

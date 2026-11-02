@@ -44,6 +44,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
     import torch
 
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
+    from dexmani_policy.common.normalizer import normalizer_shapes_from_state
 
     torch.set_float32_matmul_precision("highest")
     checkpoint = load_checkpoint(checkpoint_path)
@@ -62,7 +63,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
         set_rng_state(rng_state)
 
     agent.checkpoint_step = global_step
-    agent.configure_normalizer(cfg["normalization_dims"], cfg["normalizer_shapes"])
+    agent.configure_normalizer(cfg["normalization_dims"], normalizer_shapes_from_state(state))
     agent.load_state_dict(state, strict=True, assign=True)
     del state
     agent.to(device=device, dtype=torch.float32)

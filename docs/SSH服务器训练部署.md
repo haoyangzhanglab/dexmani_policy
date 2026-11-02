@@ -76,9 +76,11 @@ bash scripts/remote/sync_down.sh --host "$HOST" \
   --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01
 ```
 
-默认同步停止或已完成的单个 run，单向 rsync，不删除本地结果。已有 `config.yaml` 不同则在传输前失败。保留现有 best 发布链所需顺序：先传新权重与不可变记录，再更新训练状态、观测预训练的 `resume.pt/encoder.pt` 和选点结果，最后更新 `best_ckpt.json`；任一阶段失败即停止后续发布。临时 `.dexmani-publish-*` 文件不传输。同名大权重不做完整内容身份验证，整个目录不是事务快照；运行中查看日志用 tail。
+默认同步停止或已完成的单个 run，单向 rsync，不删除本地结果。已有 `config.yaml` 不同则在传输前失败，避免把两个实验混入同一目录。先传新权重和只在完成后生成的评测结果，再更新训练状态及观测预训练的 `resume.pt/encoder.pt`，最后更新 `best_ckpt.json`；任一阶段失败即停止后续发布。评测结果按不可变文件同步，不再单独强制重传。临时 `.dexmani-publish-*` 文件不传输。同名大权重不做完整内容身份验证，整个目录不是事务快照；运行中查看日志用 tail。
 
-部署公开字段和 best/lock 消费者仍待实际 Real 源码迁移，因此这里继续保留分阶段同步。下载后直接评测或显式选模：
+同步仍按产物依赖分阶段进行，最后更新 best 指针；评测在独立测试及完整结果保存后发布 best，不再使用发布锁。外部候选布局可显式指定 `--run-dir`。下载后直接评测或显式选模：
+
+`sync_down.sh` 只同步指定 run，外部 checkpoint 和结果目录不会自动下载；需自行同步并维护相对路径，文件搬迁后更新相应指针。
 
 ```bash
 python -m dexmani_policy.evaluate --checkpoint <run>/checkpoints/latest.pt \

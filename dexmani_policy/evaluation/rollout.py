@@ -1,6 +1,5 @@
 import os
 import tempfile
-import traceback
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +9,7 @@ import torch
 from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
-from dexmani_policy.common.io_util import write_failure, write_json
+from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.evaluation.metrics import summarize_episodes
 from dexmani_policy.evaluation.seeds import (
@@ -59,32 +58,25 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     directory = create_run_directory(checkpoint.parent.parent / "eval_dexsim", output_dir)
     path = directory / "result_details.json"
-    record = dict(status="running", checkpoint=str(checkpoint), weights=weights,
+    record = dict(checkpoint=str(checkpoint), weights=weights,
                   inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
                   seed=seed, device=str(device), video=video, runner_options=options,
                   episodes=[], statistics=None)
+    render_mode = (options.get("env_kwargs") or {}).get("render_mode")
+    if render_mode == "human" and not os.environ.get("DISPLAY"):
+        raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
+    set_seed(seed)
+    record["runtime"] = {"torch": str(torch.__version__), "cuda": torch.version.cuda}
+    agent = restore_policy(checkpoint, use_ema=weights == "ema", device=device)
+    record["global_step"] = agent.checkpoint_step
+    record["runtime"]["parameter_dtypes"] = sorted({str(p.dtype) for p in agent.parameters()})
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    runner = SimRunner(**options)
+    with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
+                            action_steps=action_steps,
+                            video_save_dir=directory / "videos" / runner.task_name if video else None)) as episodes:
+        record["episodes"].extend(episodes)
+    record["statistics"] = summarize_episodes(record["episodes"])
     write_json(path, record, overwrite=False)
-    try:
-        render_mode = (options.get("env_kwargs") or {}).get("render_mode")
-        if render_mode == "human" and not os.environ.get("DISPLAY"):
-            raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
-        set_seed(seed)
-        record["runtime"] = {"torch": str(torch.__version__), "cuda": torch.version.cuda}
-        agent = restore_policy(checkpoint, use_ema=weights == "ema", device=device)
-        record["global_step"] = agent.checkpoint_step
-        record["runtime"]["parameter_dtypes"] = sorted({str(p.dtype) for p in agent.parameters()})
-        from dexmani_policy.env_runner.sim_runner import SimRunner
-        runner = SimRunner(**options)
-        with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
-                                action_steps=action_steps,
-                                video_save_dir=directory / "videos" / runner.task_name if video else None)) as episodes:
-            record["episodes"].extend(episodes)
-        record["statistics"] = summarize_episodes(record["episodes"])
-        record["status"] = "completed"
-        write_json(path, record)
-    except BaseException:
-        record.update(status="failed", error=traceback.format_exc(), statistics=None)
-        write_failure(path, record)
-        raise
     print(f"{record['statistics']}; {path}")
     return record, path

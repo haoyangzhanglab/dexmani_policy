@@ -18,6 +18,7 @@ from dexmani_policy.common.config import (
     positive_int, validate_observation_fields,
 )
 from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.normalizer import normalizer_shapes_from_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.config import assemble_effective_config
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position, fit_normalizer
@@ -30,8 +31,6 @@ from dexmani_policy.training.common import training_signal_handlers
 
 class PolicyTrainer:
     def __init__(self, cfg, dataset, data_description, *, checkpoint=None):
-        if cfg.get("resume_from") is not None and checkpoint is None:
-            raise ValueError("Resume requires the checkpoint loaded by the training entry point")
         device = torch.device(cfg.training.device)
         codebook = hand_affine = None
         if checkpoint is None and cfg.policy_name == "dqrise":
@@ -52,7 +51,7 @@ class PolicyTrainer:
         fields = (*model.consumed_observation_fields, "action")
         model.configure_normalizer(
             {key: data_description["field_dims"][key] for key in fields},
-            {} if checkpoint is None else checkpoint.effective_config["normalizer_shapes"],
+            {} if checkpoint is None else normalizer_shapes_from_state(checkpoint.model_state),
         )
         if checkpoint is None:
             sources = cfg.get("initialization", {})
@@ -187,7 +186,7 @@ class PolicyTrainer:
 
         print_param_count(model)
         print_training_recipe(self.cfg, batches_per_epoch=self.batches_per_epoch)
-        self.logger = ExperimentLogger(**cfg.workspace, resume_step=None if checkpoint is None else checkpoint.global_step)
+        self.logger = ExperimentLogger(**cfg.workspace, resume=checkpoint is not None)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
             self.logger.save_config(self.cfg)
@@ -240,6 +239,11 @@ class PolicyTrainer:
         loss_divisor: int = 1,
         log_metrics: bool = True,
     ):
+        fields = self.model.consumed_observation_fields
+        batch = {**batch, "obs": {
+            key: value for key, value in batch["obs"].items()
+            if key in fields
+        }}
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = self.model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(

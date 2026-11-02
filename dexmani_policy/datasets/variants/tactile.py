@@ -19,10 +19,10 @@ def read_future_force(store, query, offsets):
 
 
 class AdapTacDataset(DemonstrationDataset):
-    def __init__(self, *args, tactile_source, sensor_modalities, **kwargs):
+    def __init__(self, *args, sensor_modalities, **kwargs):
         if "finger_tactile_force" not in sensor_modalities:
             raise ValueError("AdapTac requires finger_tactile_force for its 15D future target and guide")
-        super().__init__(*args, tactile_source=tactile_source, sensor_modalities=sensor_modalities, **kwargs)
+        super().__init__(*args, sensor_modalities=sensor_modalities, **kwargs)
 
     def build_sampler(self, episode_mask):
         sampler = super().build_sampler(episode_mask)

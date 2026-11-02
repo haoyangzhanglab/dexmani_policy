@@ -1,6 +1,7 @@
 # 数据集模块精简重构任务书
 
 > 状态：已实施。已完成 CPU 与 CUDA 合成数据验收；未执行真实数据长训。实际验证与产物说明见第 12.5 节。
+> 后续：恢复日志、normalizer 形状、部署事实及评测发布行为以[第二阶段任务书](research_simplification_task.md)为准；本文验证记录仅对应上一阶段。
 >
 > 仓库：haoyangzhanglab/dexmani_policy  
 > 编写日期：2026-11-02  

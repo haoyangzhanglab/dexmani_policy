@@ -1,9 +1,7 @@
 import json
 import os
-import shutil
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,24 +13,18 @@ from dexmani_policy.common.io_util import atomic_path, close_resources
 
 class ExperimentLogger:
     def __init__(self, output_dir: str, wandb_cfg: Mapping | None = None, *,
-                 resume_step=None, wandb_enabled=True):
+                 resume: bool = False, wandb_enabled=True):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.resuming = resume_step is not None
+        self.resuming = resume
         if self.resuming:
             path = self.output_dir / "metrics.jsonl"
             if path.exists():
-                lines = path.read_text().splitlines(keepends=True)
-                kept = []
-                for line in lines:
-                    step = json.loads(line)["step"]
-                    if step <= resume_step:
-                        kept.append(line)
-                if len(kept) != len(lines):
-                    backup = path.with_name(f"metrics.{datetime.now():%Y%m%d_%H%M%S_%f}.jsonl.bak")
-                    shutil.copy2(path, backup)
-                    with atomic_path(path) as temporary:
-                        temporary.write_text("".join(kept))
+                with path.open("rb+") as stream:
+                    if stream.seek(0, os.SEEK_END):
+                        stream.seek(-1, os.SEEK_END)
+                        if stream.read(1) != b"\n":
+                            stream.write(b"\n")
         else:
             for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
                 if (self.output_dir / name).exists():

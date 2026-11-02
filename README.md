@@ -45,14 +45,14 @@ python -m dexmani_policy.evaluate \
   --checkpoint <run>/checkpoints/latest.pt --weights ema --inference-steps 10 \
   --episodes 100 --seed 1024
 
-# 显式候选选点与独立测试，输出为该 run 中新的选点目录
+# 显式候选选点与独立测试，测试完成后发布 best
 python -m dexmani_policy.eval_pipeline \
   --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
   --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
   --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
-续训复用 Checkpoint 中的训练配方和 normalizer，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
+续训复用 Checkpoint 中的训练配方和 normalizer，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。日志直接追加，允许重复或较小 step，历史损坏行保留，不解析、截断或备份旧日志；训练进度只取 checkpoint。
 
 新训练默认使用 FP32，包括 RGB 主干及 LoRA 参数；通过 `training.use_bfloat16=true` 可选启用 BF16 autocast。续训沿用保存的训练配置及训练状态恢复方式。正式部署、仿真评测及 warmup 在严格加载完整策略后统一转为 FP32，并合并 RGB LoRA 权重；预测入口显式关闭 autocast。合并仅作用于推理实例，训练 checkpoint 保留适配器。
 
@@ -131,7 +131,7 @@ interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.
 
 ## AdapTac 触觉实验
 
-通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 默认使用 sim，真实 aggregate 数据追加 `tactile_source=real`；`taxel`、`patch` 默认使用 real，目前仅支持真实 dense 数据。preset 声明默认 `tactile_source`，命令行可覆盖；agent/dataset 引用同一顶层值。触觉输入不允许来源缺失、null 或非法值；`fingertip_xyz` 单独存在不要求来源。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
+通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 默认使用 sim，真实 aggregate 数据追加 `tactile_source=real`；`taxel`、`patch` 默认使用 real，目前仅支持真实 dense 数据。preset 声明默认 `tactile_source`，命令行可覆盖；顶层值只传给解释触觉语义的 agent，Dataset 不接收该参数。模型触觉输入不允许来源缺失、null 或非法值；`fingertip_xyz` 单独存在不要求来源。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
 
 | preset | 来源 | 必需触觉输入 | encoder | 默认尺度 |
 | --- | --- | --- | --- | --- |
@@ -168,7 +168,7 @@ python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>
 
 离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用同一 checkpoint 的实际配置、保存的 affine 与严格张量赋值，部署参数统一转为 FP32，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径以实验 checkpoints 目录解析；默认 best 恢复选优时的执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。Runtime 返回完整未来动作窗口，由调用方按 `info.n_action_steps` 消费。
 
-训练将 Canonical 实际使用的数值配方保存到配置和 checkpoint，由公开 `PolicyInfo` 提供给 Real。非 Canonical 的训练、inspect 和纯策略推理不要求真机配方；设备入口负责拒绝缺失事实。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
+训练按已有数据事实和实际消费模态保存控制周期、点云配方、depth 尺度及指尖名称，由公开 `PolicyInfo` 提供给 Real，不要求 Canonical/source 标签。inspect 和纯策略推理允许缺少硬件事实；设备入口按需检查。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 
 数据边界必须区分来源：sim 是世界系 N，来自接触 impulse/physics_dt，再按控制周期子步进行有符号向量平均，目前没有 dense producer。real aggregate/dense 分别来自 SDK `calc_force`/`raw_force`，不是代码中的求和关系；单位为 `sdk_native_unknown_physical_scale`，轴为 `sdk_sensor_axes_not_world_frame`，canonical 尚未完整复制这些 raw 元信息。`fingertip_xyz` 只有位置，不能用于完成轴变换。五指顺序为 thumb/index/middle/ring/pinky，dense 保留 SDK 索引顺序。
 
@@ -176,26 +176,19 @@ future 标签从 query+1 的下一观测行开始，真实后继有效，重复�
 
 `taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 在 normalized dense 上计算 `w=||z||/(||z||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 只允许 RMS/MaxAbs。零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建 mask。
 
-仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型和数据配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
+仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
 
 ## 实验产物
 
-配置、Checkpoint、日志与评测结果保存在：
+配置、Checkpoint、日志与评测结果默认保存在：
 
 ```text
 experiments/<policy_name>/<task_name>/<run>/
 ```
 
-设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验需保留配置、Checkpoint 和对应源码，并在实验目录的人工记录中关联数据身份与各阶段的版本，例如：
+设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验保留配置、Checkpoint 和对应源码；数据加工版本、模板等笔记按实验需要记录，不要求 source_id/commit/template 手工清单作为使用条件。
 
-```text
-source_id: <实际 Canonical source_id>
-导出 Real commit SHA: <导出时的完整 SHA>
-训练 Policy commit SHA: <训练时的完整 SHA>
-手模板路径: assets/pointcloud_template/hand/hand_<num_points>.npz
-```
-
-Git 已跟踪的模板可用对应提交和路径恢复；不同处理阶段使用不同版本时分别记录仓库、SHA 和模板路径。未提交的代码或自定义模板应随实验手动归档，或先提交再记录。缺少历史记录时如实注明未知，不猜测补写。修改加工算法或模板后须重新导出数据。
+选模仅在独立测试和完整结果保存成功后原子更新 `best_ckpt.json`，其中只含 `ckpt_relpath` 与 `inference`。外部候选可用 `--run-dir` 指定发布目录，`--output-dir` 可指定任意空目录。best 路径相对 run，selection 内路径相对结果目录；详见[仿真评测机制](docs/仿真评测机制.md)。
 
 训练划分只依赖 episode 顺序、数量、dataset seed 和数量参数，不读取或比较 `source_id`、episode/trial 身份，也不自动按 trial 分组。续训由研究者保证使用同一份未改写、未重排的数据；原样搬迁可更新路径。重新导出或改变数据顺序应开启新实验，避免复用失配的模型状态和 normalizer。若要避免同一长轨迹的片段跨集合，应在该实验的数据准备阶段处理。
 

@@ -55,7 +55,7 @@ class ViTEncoder(nn.Module):
             self.num_prefix_tokens = (
                 1 + int(getattr(config, "num_register_tokens", 0)) if kind == "dino" else 0
             )
-        self.effective_config = dict(
+        self.effective_config: dict = dict(
             tune_mode=tune_mode, global_token_type=global_token_type,
             out_dim=out_dim, architecture=architecture,
         )

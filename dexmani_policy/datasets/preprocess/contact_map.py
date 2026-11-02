@@ -67,27 +67,23 @@ def generate(zarr_path, output, num_workers=1):
         raise ValueError("CordViP requires 1024 object points")
     if buffer["joint_state"].shape[1:] != (19,):
         raise ValueError("CordViP requires joint_state[T,19]")
+    if "action" in keys and buffer["action"].shape[1:] != (19,):
+        raise ValueError("CordViP policy requires action[T,19]")
     rows = int(buffer.episode_ends[-1])
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".contact-", dir=output.parent))
     try:
         group = zarr.open_group(str(temporary), mode="w")
-        retained_attrs = (
-            "source_id", "episode_ids", "trial_ids", "format", "task_name",
-            "dt", "physics_dt", "frame_skip", "obs_alignment", "action_space",
-            "action_dim", "action_coordinates", "joint_order", "units",
-            "hand_joint_order", "hand_units", "hand_pointcloud_config",
-        )
+        retained_attrs = ("dt", "hand_pointcloud_config")
         group.attrs.update({key: buffer.attrs[key] for key in retained_attrs if key in buffer.attrs})
         group.create_group("meta").create_dataset("episode_ends", data=buffer.episode_ends)
         data = group.create_group("data")
         for key in keys:
             array = buffer[key]
-            copied = data.create_dataset(
-                key, shape=array.shape, chunks=(CHUNK_ROWS, *array.shape[1:]),
-                dtype=array.dtype, compressor=array.compressor,
+            shape = (*array.shape[:-1], 3) if key in keys[:2] else array.shape
+            data.create_dataset(
+                key, shape=shape, chunks=(CHUNK_ROWS, *shape[1:]), dtype="float32",
             )
-            copied.attrs.update(dict(array.attrs))
         labels = data.create_dataset(
             "contact_map", shape=(rows, buffer["object_pointcloud"].shape[1]),
             chunks=(CHUNK_ROWS, buffer["object_pointcloud"].shape[1]), dtype="float32",
@@ -103,14 +99,12 @@ def generate(zarr_path, output, num_workers=1):
                 stop = min(start + CHUNK_ROWS, rows)
                 points = {}
                 for key in keys:
-                    values = buffer[key][start:stop]
+                    columns = slice(0, 3) if key in keys[:2] else None
+                    values = np.asarray(buffer.read(key, slice(start, stop), columns=columns), dtype=np.float32)
                     data[key][start:stop] = values
                     if key in keys[:2]:
-                        # Geometry uses FP32 floating XYZ; copied arrays keep their stored dtype.
-                        dtype = np.float32 if np.issubdtype(values.dtype, np.floating) else values.dtype
-                        xyz = np.asarray(values[..., :3], dtype=dtype)
-                        check_finite(buffer, key, start, xyz, slice(0, 3))
-                        points[key] = xyz
+                        check_finite(buffer, key, start, values, columns)
+                        points[key] = values
                 labels[start:stop] = np.stack(list(map_frames(
                     frame_contact_map, points["object_pointcloud"], points["hand_pointcloud"],
                 )))

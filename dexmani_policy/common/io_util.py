@@ -39,14 +39,6 @@ def write_json(path, record, *, overwrite=True):
         )
 
 
-def write_failure(path, record):
-    # Preserve the original failure if saving its details also fails.
-    try:
-        write_json(path, record)
-    except BaseException:
-        traceback.print_exc()
-
-
 def close_resources(*callbacks: Callable[[], object]) -> None:
     """Run all callbacks; preserve an active exception or raise the first failure."""
     active_error = sys.exc_info()[1]

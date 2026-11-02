@@ -11,16 +11,10 @@ from dexmani_policy.common.config import (
 from dexmani_policy.common.normalizer import (
     FieldNormalizer, LinearNormalizer, normalization_feature_shapes, validate_normalizer_state,
 )
-from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 
 
 def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
     """Assemble the train affine once, inheriting complete fields before fitting the rest."""
-    if isinstance(dataset, ObservationPretrainDataset):
-        if not dataset.training:
-            raise ValueError("Normalizer fitting requires the training dataset")
-        if set(spec) != dataset.normalization_fields.keys():
-            raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
     expected_shapes = normalization_feature_shapes(feature_dims)
     initial_state = {} if initial_state is None else initial_state
     normalizer = LinearNormalizer({
@@ -74,20 +68,20 @@ def build_dataset(cfg):
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }
     deployment = {}
-    if buffer.attrs.get("format") == "dexmani.real.canonical":
-        deployment["control_dt_s"] = buffer.attrs.get("dt")
-        for modality, attr in (
-            ("point_cloud", "pointcloud_config"),
-            ("hand_pointcloud", "hand_pointcloud_config"),
-            ("fingertip_xyz", "fingertip_link_names"),
-        ):
-            if modality in dataset.sensor_modalities:
-                deployment[attr] = buffer.attrs.get(attr)
-        if "depth" in dataset.sensor_modalities:
-            deployment["depth_config"] = {
-                "shape": list(buffer["depth"].shape[1:]),
-                "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
-            }
+    if "dt" in buffer.attrs:
+        deployment["control_dt_s"] = buffer.attrs["dt"]
+    for modality, attr in (
+        ("point_cloud", "pointcloud_config"),
+        ("hand_pointcloud", "hand_pointcloud_config"),
+        ("fingertip_xyz", "fingertip_link_names"),
+    ):
+        if modality in dataset.sensor_modalities and attr in buffer.attrs:
+            deployment[attr] = buffer.attrs[attr]
+    if "depth" in dataset.sensor_modalities:
+        deployment["depth_config"] = {
+            "shape": list(buffer["depth"].shape[1:]),
+            "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
+        }
     description["deployment_metadata"] = deployment
     print(f"[Dataset] {dataset.training_summary()}")
     return dataset, description

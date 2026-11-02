@@ -14,7 +14,7 @@ from dexmani_policy.common.image_util import (
 )
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int, require_tactile_source,
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int,
 )
 from dexmani_policy.datasets.transforms import (
     AUGMENTATION_SPECS,
@@ -46,7 +46,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         rgb_color_aug: Callable | None = None,
         rgb_keep_uint8: bool = False,
         pc_dim: int | None = None,
-        tactile_source: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -71,7 +70,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.sensor_modalities = sensor_modalities
         self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys)
         self.zarr_path = self.episode_store.path
-        require_tactile_source(sensor_modalities, tactile_source)
 
         if "rgb" in sensor_modalities:
             rgb = self.episode_store["rgb"]

@@ -49,8 +49,6 @@ def load_hand_array(buffer, episode_mask):
 
 
 def prepare_hand_data(cfg):
-    if cfg.get("resume_from") is not None:
-        raise ValueError("VQ pretraining does not support resume_from")
     buffer = EpisodeStore(cfg.dataset.zarr_path, keys=["action"])
     if buffer["action"].shape[1:] != (19,):
         raise ValueError("VQ pretraining requires action shape [T,19]")
@@ -220,7 +218,7 @@ def train(cfg):
             file.write(json.dumps({"epoch": epoch, **metrics}, allow_nan=False) + "\n")
 
         checkpoint_paths = []
-        if epoch % recipe.save_epochs == 0 or epoch == recipe.num_epochs:
+        if epoch % recipe.save_epochs == 0 and epoch != recipe.num_epochs:
             checkpoint_paths.append(output_dir / f"vqvae_hand_epoch={epoch:04d}.pt")
         if val_loader is not None and metrics["val_lookup_mse"] < best_lookup_mse:
             best_lookup_mse = metrics["val_lookup_mse"]

@@ -1,8 +1,10 @@
 """Synthetic dataset, normalization and policy checks on CPU or --device cuda:0."""
 
 import argparse
+import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -10,19 +12,20 @@ import hydra
 import numpy as np
 import torch
 import zarr
-from omegaconf import open_dict
+from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.checkpoint import load_checkpoint
+from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.config import validate_observation_fields
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, normalizer_shapes_from_state
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.datasets.variants.r3d import R3DDataset
 from dexmani_policy.datasets.variants.tactile import AdapTacDataset, InterActDexDataset
 from dexmani_policy.deployment import inspect_policy, load_policy
 from dexmani_policy.train import run_training
-from dexmani_policy.training.common.config import load_policy_config, prepare_training, validate_config
-from dexmani_policy.training.common.data import fit_normalizer
+from dexmani_policy.training.common.config import assemble_effective_config, load_policy_config, prepare_training, validate_config
+from dexmani_policy.training.common.data import build_dataset, fit_normalizer
+from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.common.resume import prepare_resume
 
 
@@ -175,7 +178,7 @@ def check_method_targets(root):
     path = root / "targets.zarr"
     source = make_source(path, [2, 7, 13])
     source["data/finger_tactile_force"][:] = np.broadcast_to(np.arange(13, dtype=np.float32)[:, None, None], (13, 5, 3))
-    kwargs = dict(sensor_modalities=["joint_state", "finger_tactile_force"], tactile_source="sim",
+    kwargs = dict(sensor_modalities=["joint_state", "finger_tactile_force"],
                   horizon=5, obs_horizon=2, pad_before=1, pad_after=3)
     for cls, extra in ((AdapTacDataset, {}), (InterActDexDataset, {"interaction_horizon": 3})):
         dataset = cls(str(path), **kwargs, **extra)
@@ -190,14 +193,120 @@ def check_method_targets(root):
             np.testing.assert_array_equal(sample["future_force"][:, 0, 0], np.minimum(target, end - 1))
             if cls is AdapTacDataset:
                 assert query + 1 < end
-    dataset = R3DDataset(str(path), sensor_modalities=["joint_state"], obs_horizon=2,
-                         horizon=5, pad_before=1, pad_after=3)
-    for index in range(len(dataset)):
-        rows = dataset.sampler.sample_source_rows(index)
+    r3d_dataset = R3DDataset(str(path), sensor_modalities=["joint_state"], obs_horizon=2,
+                             horizon=5, pad_before=1, pad_after=3)
+    for index in range(len(r3d_dataset)):
+        rows = r3d_dataset.sampler.sample_source_rows(index)
         expected = np.concatenate((source["data/action"][:][rows], source["data/action_ee"][:][rows, :9]), -1)
-        np.testing.assert_array_equal(dataset[index]["action"], expected)
-    actual = np.concatenate(list(dataset.iter_normalization_data("action")))
+        np.testing.assert_array_equal(r3d_dataset[index]["action"], expected)
+    actual = np.concatenate(list(r3d_dataset.iter_normalization_data("action")))
     np.testing.assert_array_equal(actual, np.concatenate((source["data/action"][:], source["data/action_ee"][:, :9]), -1))
+
+
+def check_resume_logging(root):
+    for index, history in enumerate((b'{"step": 99}\n', b'broken\n{"step": 99}\n', b'broken', b'')):
+        directory = root / f"logging-{index}"
+        directory.mkdir()
+        path = directory / "metrics.jsonl"
+        path.write_bytes(history)
+        logger = ExperimentLogger(directory, resume=True, wandb_enabled=False)
+        try:
+            logger.log({"loss": 1.}, step=2)
+            logger.log({"loss": 0.5}, step=2)
+        finally:
+            logger.close()
+        boundary = b"\n" if history and not history.endswith(b"\n") else b""
+        prefix = history + boundary
+        assert path.read_bytes().startswith(prefix)
+        records = [json.loads(line) for line in path.read_bytes()[len(prefix):].splitlines()]
+        assert [record["step"] for record in records] == [2, 2]
+        assert list(directory.iterdir()) == [path]
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
+        directory = root / f"fresh-{name}"
+        directory.mkdir()
+        (directory / name).touch()
+        try:
+            ExperimentLogger(directory, wandb_enabled=False)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("Fresh training overwrote an existing experiment")
+
+
+def check_normalizer_restore(root, device):
+    cfg = load_policy_config("dp3", ["agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16"])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    dims = dict(joint_state=19, point_cloud=3, action=19)
+    model.configure_normalizer(dims, dict(joint_state=(19,), action=(19,), hand_latent=(4,)))
+    raw = model.state_dict()
+    raw["normalizer.fields.action.scale"].fill_(2)
+    averaged = {key: value.clone() for key, value in raw.items()}
+    averaged["normalizer.fields.action.scale"].fill_(3)
+    for part in ("scale", "offset"):
+        averaged[f"normalizer.fields.hand_latent.{part}"] = torch.ones(5)
+    config = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims)
+    checkpoint = Checkpoint(7, raw, averaged, {}, {}, {}, config)
+    path = root / "normalizer.pt"
+    save_checkpoint(path, checkpoint)
+    for use_ema, state in ((False, raw), (True, averaged)):
+        restored = restore_policy(path, use_ema=use_ema, device=device)
+        assert "point_cloud" not in restored.normalizer.fields
+        assert restored.normalization_dims["point_cloud"] == 3
+        assert tuple(restored.normalizer["hand_latent"].scale.shape) == ((5,) if use_ema else (4,))
+        for key, value in state.items():
+            torch.testing.assert_close(restored.state_dict()[key], value.to(device), rtol=0, atol=0)
+    for bad_key in ("scale", "offset", "shape"):
+        state = dict(raw)
+        if bad_key == "shape":
+            state["normalizer.fields.action.offset"] = torch.zeros(18)
+        else:
+            del state[f"normalizer.fields.action.{bad_key}"]
+        model.configure_normalizer(dims, normalizer_shapes_from_state(state))
+        try:
+            model.load_state_dict(state, strict=True, assign=True)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Strict loading accepted invalid affine {bad_key}")
+    checkpoint.ema_model_state = None
+    save_checkpoint(path, checkpoint)
+    try:
+        restore_policy(path, use_ema=True, device=device)
+    except ValueError as error:
+        assert "EMA" in str(error)
+    else:
+        raise AssertionError("Missing EMA silently selected raw weights")
+
+
+def check_deployment_facts(root):
+    path = root / "deployment.zarr"
+    source = make_source(path, [3])
+    source.create_dataset("data/depth", data=np.ones((3, 4, 5), dtype=np.uint16))
+    source.create_dataset("data/fingertip_xyz", data=np.zeros((3, 5, 3), dtype=np.float32))
+    cfg = load_policy_config("dp3", [f"zarr_path={path}", "horizon=2", "n_obs_steps=1", "n_action_steps=1",
+        "dataset.sensor_modalities=[joint_state,point_cloud,hand_pointcloud,fingertip_xyz,depth]"])
+    cfg.workspace.output_dir = str(root / "deployment-run")
+    _, description = build_dataset(cfg)
+    assert description["deployment_metadata"] == {"depth_config": {"shape": [4, 5], "depth_scale_m": None}}
+    source.attrs.update(dt=0.02, pointcloud_config={"num_points": 8},
+                        hand_pointcloud_config={"num_points": 8},
+                        fingertip_link_names=["a", "b", "c", "d", "e"], depth_scale_m_per_unit=0.001)
+    _, description = build_dataset(cfg)
+    assert "format" not in source.attrs
+    assert description["deployment_metadata"] == {
+        "control_dt_s": 0.02, "pointcloud_config": {"num_points": 8},
+        "hand_pointcloud_config": {"num_points": 8}, "fingertip_link_names": ["a", "b", "c", "d", "e"],
+        "depth_config": {"shape": [4, 5], "depth_scale_m": 0.001},
+    }
+    model = SimpleNamespace(normalization_dims={"joint_state": 19, "action": 19},
+                            consumed_observation_fields=("joint_state",),
+                            inference_metadata={"action_start_index": 0, "control_action_dim": 19},
+                            effective_config={})
+    effective = assemble_effective_config(cfg, description, model)
+    assert effective.deployment_metadata == {"control_dt_s": 0.02}
+    assert not OmegaConf.is_readonly(effective)
+    cfg.agent.action_dim = 3
+    assert effective.agent.action_dim == 19
 
 
 def check_inherited_policy(root, method, device=torch.device("cpu")):
@@ -254,6 +363,8 @@ def check_inherited_policy(root, method, device=torch.device("cpu")):
         assert run_training(cfg, max_updates=2) == 2
     checkpoint_path = root / method / "checkpoints/latest.pt"
     checkpoint = load_checkpoint(checkpoint_path)
+    assert "normalizer_shapes" not in checkpoint.effective_config
+    assert "resume_from" not in checkpoint.effective_config
     assert {key: checkpoint.effective_config["normalization"][key] for key in fields} == modes
     assert extra not in checkpoint.effective_config["normalization_dims"]
     for key, value in state.items():
@@ -334,6 +445,10 @@ def main():
     print("PASS split counts, RNG isolation, affine math and YAML overrides", flush=True)
     with tempfile.TemporaryDirectory(prefix="dexmani-dataset-checks-") as directory:
         root = Path(directory)
+        check_resume_logging(root)
+        check_normalizer_restore(root, args.device)
+        check_deployment_facts(root)
+        print("PASS append-only logs, state-derived normalizer and deployment facts", flush=True)
         check_source_statistics(root)
         check_method_targets(root)
         print("PASS train-only source statistics, independent seed and method target rows", flush=True)

@@ -1,6 +1,7 @@
 import copy
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import hydra
 from omegaconf import OmegaConf, open_dict
@@ -10,6 +11,9 @@ from dexmani_policy.common.config import (
     TACTILE_FEATURE_SHAPES,
     positive_int,
 )
+
+if TYPE_CHECKING:
+    from dexmani_policy.agents.policies.base import Policy
 
 CONFIG_ROOT = PROJECT_ROOT / "dexmani_policy" / "configs"
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -68,15 +72,12 @@ def assemble_policy_config(cfg):
                 cfg.dataset.interaction_horizon = cfg.interaction_horizon
         if "tactile_source" in cfg:
             cfg.agent.tactile_source = cfg.tactile_source
-            cfg.dataset.tactile_source = cfg.tactile_source
         cfg.env_runner.task_name = cfg.task_name
         cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
     return cfg
 
 
 def prepare_training(cfg):
-    if cfg.get("resume_from") is not None:
-        raise ValueError("Use python -m dexmani_policy.training.common.resume --run <run>")
     validate_config(cfg)
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         name = cfg.agent.get("rgb_backbone_name", "dino")
@@ -127,7 +128,7 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")
 
-    cls = hydra.utils.get_class(cfg.agent._target_)
+    cls = cast("type[Policy]", hydra.utils.get_class(cfg.agent._target_))
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
 
@@ -146,11 +147,18 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
         effective.normalization_dims = model.normalization_dims
-        effective.normalizer_shapes = {key: list(field.scale.shape) for key, field in model.normalizer.fields.items()}
         effective.policy_metadata = metadata
-        effective.deployment_metadata = data_description["deployment_metadata"]
+        deployment = dict(data_description["deployment_metadata"])
+        for field, key in (
+            ("point_cloud", "pointcloud_config"),
+            ("hand_pointcloud", "hand_pointcloud_config"),
+            ("fingertip_xyz", "fingertip_link_names"),
+            ("depth", "depth_config"),
+        ):
+            if field not in model.consumed_observation_fields:
+                deployment.pop(key, None)
+        effective.deployment_metadata = deployment
         if checkpoint is None:
             effective.agent.update(model.effective_config)
     OmegaConf.resolve(effective)
-    OmegaConf.set_readonly(effective, True)
     return effective

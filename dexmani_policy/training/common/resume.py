@@ -16,7 +16,6 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
     checkpoint = load_checkpoint(source)
     cfg = OmegaConf.create(checkpoint.effective_config)
     with open_dict(cfg):
-        cfg.resume_from = str(source)
         cfg.workspace.output_dir = str(directory)
         cfg.pop("max_updates", None)
         cfg.workspace.wandb_enabled = wandb

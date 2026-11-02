@@ -100,6 +100,8 @@ def save_run(model, optimizer, scheduler, cfg, step):
 def restore_run(model, optimizer, scheduler, checkpoint, *, device) -> int:
     # The optimizer already owns these Parameters, so restore their values in place.
     model.load_state_dict(checkpoint["model_state"], strict=True)
+    if optimizer.param_groups[0]["param_names"] != checkpoint["optimizer_state"]["param_groups"][0]["param_names"]:
+        raise ValueError("Optimizer parameter order changed")
     optimizer.load_state_dict(checkpoint["optimizer_state"])
     scheduler.load_state_dict(checkpoint["scheduler_state"])
     set_rng_state(checkpoint["rng_state"], device)
@@ -148,6 +150,8 @@ def train(method, cfg, checkpoint=None, max_updates=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
+    if checkpoint is None and set(cfg.normalization) != dataset.normalization_fields.keys():
+        raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
     print(f"[Dataset] {dataset.training_summary()}")
     validation = None
     if dataset.val_mask.any():
@@ -175,7 +179,8 @@ def train(method, cfg, checkpoint=None, max_updates=None):
         )
     device = torch.device(cfg.training.device)
     model.to(device)
-    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
+    names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
+    optimizer = torch.optim.AdamW([dict(params=parameters, param_names=list(names))], **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
     scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
@@ -185,7 +190,7 @@ def train(method, cfg, checkpoint=None, max_updates=None):
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace, resume_step=step if checkpoint is not None else None)
+    logger = ExperimentLogger(**cfg.workspace, resume=checkpoint is not None)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
     stop_requested = False
