@@ -10,7 +10,7 @@ from dexmani_policy.common.config import positive_int, set_project_root
 
 
 def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
-                   use_compile=None, compile_mode=None, wandb=False, zarr_path=None):
+                   use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None):
     directory = Path(run).expanduser().resolve(strict=True)
     source = directory / "checkpoints" / "latest.pt"
     checkpoint = load_checkpoint(source)
@@ -33,6 +33,8 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
             cfg.training.use_compile = use_compile
         if compile_mode is not None:
             cfg.training.compile_mode = compile_mode
+        if cudnn_benchmark is not None:
+            cfg.training.cudnn_benchmark = cudnn_benchmark
         if zarr_path is not None:
             cfg.zarr_path = str(Path(zarr_path).expanduser().resolve(strict=True))
             cfg.dataset.zarr_path = cfg.zarr_path
@@ -50,6 +52,7 @@ def main(argv=None):
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("--compile", dest="use_compile", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--compile-mode")
+    parser.add_argument("--cudnn-benchmark", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--zarr-path")
     args = parser.parse_args(argv)

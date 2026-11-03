@@ -4,6 +4,7 @@ import os
 from contextlib import closing
 
 import hydra
+import torch
 
 from dexmani_policy.common.config import set_project_root
 from dexmani_policy.common.pytorch_util import set_seed
@@ -24,6 +25,7 @@ def build_trainer(cfg, *, checkpoint=None):
     if checkpoint is None:
         cfg = prepare_training(cfg)
     set_seed(cfg.training.seed)
+    torch.backends.cudnn.benchmark = cfg.training.get("cudnn_benchmark", True)
     dataset, data_description = build_dataset(cfg)
     return PolicyTrainer(cfg, dataset, data_description, checkpoint=checkpoint)
 

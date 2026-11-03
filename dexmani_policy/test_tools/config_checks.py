@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dexmani_policy.common.checkpoint import Checkpoint
+from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint
 from dexmani_policy.evaluation import selection
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 from dexmani_policy.training.common.config import load_policy_config
@@ -261,3 +261,38 @@ def test_interact_mixed_fields_rejected():
     with pytest.raises(ValueError, match="only tactile field"):
         InterActDexDataset("missing.zarr", sensor_modalities=cfg.dataset.sensor_modalities,
                            interaction_horizon=1)
+
+
+@pytest.mark.parametrize("benchmark", [None, False, True])
+@pytest.mark.parametrize("resume_benchmark", [None, False, True])
+def test_cudnn_benchmark_fresh_and_resume(tmp_path, benchmark, resume_benchmark):
+    import torch
+    from omegaconf import open_dict
+    from dexmani_policy.test_tools.dataset_checks import make_source
+    from dexmani_policy.test_tools.training_checks import small_training_config
+    from dexmani_policy.train import build_trainer, run_trainer
+    from dexmani_policy.training.common.resume import prepare_resume
+
+    source, output = tmp_path / "data.zarr", tmp_path / "run"
+    make_source(source, [6, 12, 18])
+    cfg = small_training_config(source, output, "cpu")
+    assert cfg.training.cudnn_benchmark is True
+    with open_dict(cfg.training):
+        if benchmark is None:
+            del cfg.training.cudnn_benchmark
+        else:
+            cfg.training.cudnn_benchmark = benchmark
+    expected = True if benchmark is None else benchmark
+    with torch.backends.cudnn.flags():
+        torch.backends.cudnn.benchmark = not expected
+        trainer = build_trainer(cfg)
+        assert torch.backends.cudnn.benchmark == expected
+        assert run_trainer(trainer, max_updates=1) == 1
+        expected = expected if resume_benchmark is None else resume_benchmark
+        torch.backends.cudnn.benchmark = not expected
+        resumed = prepare_resume(output, device="cpu", cudnn_benchmark=resume_benchmark)
+        assert torch.backends.cudnn.benchmark == expected
+        assert resumed.cfg.training.get("cudnn_benchmark", True) == expected
+        assert run_trainer(resumed, max_updates=1) == 2
+        saved = load_checkpoint(output / "checkpoints/latest.pt")
+        assert saved.effective_config["training"].get("cudnn_benchmark", True) == expected

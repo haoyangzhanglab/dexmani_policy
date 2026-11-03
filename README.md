@@ -227,7 +227,39 @@ RTX 4090（24 GiB，PyTorch 2.4.1+cu124）合成资源短测使用正式 AdapTac
 | taxel | 20.38 | 6.15 | 111.3 | 47.4 |
 | patch | 6.46 | 6.12 | 113.0 | 48.1 |
 
-沿用训练入口的 cuDNN benchmark=true；taxel 首次更新的临时峰值明显高于后续更新，容量规划应保留这部分空间。这些是单卡三次采样的合成短测，不能视为真实数据吞吐、长训稳定性或方法性能比较，也不代表更小显存设备能够运行正式 batch。
+上表使用 cuDNN benchmark=true；taxel 首次更新峰值较高，下面的独立 A/B 测量检验关闭 benchmark 的影响。这些合成短测不能视为真实数据吞吐、长训稳定性或方法性能比较，也不代表更小显存设备能够运行正式 batch。
+
+2026-11-04 在 `fea0bb5` 配方上补做 taxel 完整更新 A/B：RTX 4090（23.51 GiB 可见显存）、driver 580.173.02、Python 3.10.20、PyTorch 2.4.1+cu124、CUDA 12.4、cuDNN 9.1.0，CPU threads=1。保持上述正式网络、batch 128、1024 点、N/H/C=2/16/8、FP32、EMA、compile=false、seed=42；合成输入、关闭增强、num_workers=0。各进程按相同 seed 和顺序初始化模型、生成输入。仅切换 benchmark；实际 deterministic=false、cuDNN TF32=true、matmul TF32=false、matmul precision=highest、benchmark_limit=10 均相同。GPU 同时承载约 1.7 GiB 桌面进程，未调整时钟。
+
+顺序为 True/False 交替三轮，每行一个独立进程。首次更新前无训练预热；随后至少预热 30 次，直到相邻两个 10 次窗口的耗时中位数相差不超过 3%（六次均在 30 次满足），再测 50 次。更新包含 pinned CPU 输入搬运、forward、backward、梯度裁剪、AdamW、scheduler 和 EMA；生成输入、拟合 normalization、输出检查不计时。每次更新前后 CUDA 同步，首次和稳态分别重置 peak 统计，保留模型、EMA 和优化器，不调用 empty_cache。显存列为 **peak allocated / peak reserved**，含常驻内存；IQR 为稳态逐步耗时的四分位距。
+
+| 轮次 | benchmark | 首次 ms | 首次 GiB | 稳态中位数 ms | 稳态 IQR ms | 稳态 GiB |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | True | 1053.50 | 20.378 / 20.629 | 111.870 | 1.996 | 6.155 / 7.262 |
+| 1 | False | 336.93 | 5.744 / 7.105 | 113.235 | 2.015 | 6.157 / 7.129 |
+| 2 | True | 1025.94 | 20.378 / 20.629 | 111.187 | 2.386 | 6.155 / 7.262 |
+| 2 | False | 337.36 | 5.744 / 7.105 | 112.223 | 1.734 | 6.157 / 7.129 |
+| 3 | True | 1021.93 | 20.378 / 20.629 | 111.037 | 2.038 | 6.155 / 7.262 |
+| 3 | False | 338.93 | 5.744 / 7.105 | 112.695 | 2.107 | 6.157 / 7.129 |
+
+已确认：关闭 benchmark 的首次 allocated 峰值三轮均降低 **71.81%**；按三个进程中位数再取中位数，稳态耗时增加 **1.36%**，逐轮增加 0.93–1.49%。全部 loss、梯度及测量结束后的 raw/EMA B=1 输出有限（动作/力推理仍各 20 步）。另以独立诊断进程在 Conv1d 前后及权重梯度处读取累计峰值：True 时 taxel 两层 Conv1d 前向把峰值从 4.848 提升至 9.932、15.045 GiB，第二层反向进一步到 20.378 GiB，发生在 optimizer.step 之前；False 时该高峰消失。结合唯一变量 A/B，证据指向 taxel CNN 首次 cuDNN 算法搜索的临时工作区；未逐一解析候选算法。诊断带 hooks 的计时不纳入上表。
+
+这满足“首次峰值至少降低 20%、稳态耗时增加不超过 5%”的工程判据，因此该环境下推荐 taxel 显式使用 `training.cudnn_benchmark=false`。共享默认仍为 True，未改变 force、patch 或其他策略默认行为；未验证其他 GPU/软件版本、真实数据吞吐或长训效果。`set_seed()` 会设置 benchmark=True，主训练在其后应用此字段。续训默认沿用 checkpoint 设置，字段缺省为 True；可用 `--no-cudnn-benchmark` / `--cudnn-benchmark` 显式覆盖同一设置，随后保存到新的 checkpoint。预训练和评测不使用这个主训练配置字段。
+
+复现（在 policy 环境、仓库根目录运行；JSON 保存逐步耗时、loss、梯度范数、峰值、环境和实际后端值）：
+
+```bash
+for run in 1 2 3; do
+  for benchmark in true false; do
+    OMP_NUM_THREADS=1 python -m dexmani_policy.test_tools.taxel_benchmark \
+      --benchmark "$benchmark" --output "/tmp/dexmani-taxel-ab/$benchmark-$run.json" || exit
+  done
+done
+
+python -m dexmani_policy.train --config-name adaptac tactile=taxel training.cudnn_benchmark=false
+# 已有 taxel run 也可在恢复时关闭 benchmark，无需改写源 checkpoint。
+python -m dexmani_policy.training.common.resume --run <run> --no-cudnn-benchmark
+```
 
 `taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 使用零参考输入 `u=N(x)-N(0)=x*scale`，全部活动度、区域加权力、峰值和强度描述均基于 u，活动度为 `w=||u||/(||u||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 默认 limits，也支持 RMS/MaxAbs；零参考是描述构造步骤，其结果不保证位于 `[-1,1]`。原始零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建区域索引与大小。
 
