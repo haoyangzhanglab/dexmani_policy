@@ -1,6 +1,7 @@
 """Lightweight CPU source-frame dataset and normalization checks; no policy construction."""
 
 import argparse
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import torch
 import zarr
 
 from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.io_util import atomic_path, write_json
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler, window_indices
@@ -362,6 +364,40 @@ def check_sampler():
             np.testing.assert_array_equal(sample["state"], values[expected_rows[:2]])
 
 
+def check_atomic_io(root):
+    directory = root / "atomic_io"
+    directory.mkdir()
+    target = directory / "state.pt"
+    target.write_bytes(b"complete")
+    try:
+        with atomic_path(target) as temporary:
+            temporary.write_bytes(b"partial")
+            raise RuntimeError("interrupted write")
+    except RuntimeError:
+        pass
+    assert target.read_bytes() == b"complete"
+    assert not list(directory.glob(".dexmani-publish-*"))
+    with atomic_path(target) as temporary:
+        temporary.write_bytes(b"next complete")
+    assert target.read_bytes() == b"next complete"
+
+    write_json(directory / "result.json", {"score": 0.5})
+    assert json.loads((directory / "result.json").read_text()) == {"score": 0.5}
+    values = np.arange(5, dtype=np.float32)
+    with atomic_path(directory / "codebook.npz") as temporary:
+        with temporary.open("wb") as stream:
+            np.savez(stream, values=values)
+    with np.load(directory / "codebook.npz") as payload:
+        np.testing.assert_array_equal(payload["values"], values)
+    latest = directory / "latest.pt"
+    with atomic_path(latest) as temporary:
+        temporary.unlink()
+        temporary.symlink_to(target.name)
+    assert latest.is_symlink() and latest.readlink() == Path(target.name)
+    assert latest.read_bytes() == b"next complete"
+    assert not list(directory.glob(".dexmani-publish-*"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
@@ -377,7 +413,8 @@ def main():
         check_method_targets(root)
         check_dataset_reads(root)
         check_rgb_preprocessing(root)
-        print("PASS train-only source statistics, method targets, selected reads and CHW uint8 RGB", flush=True)
+        check_atomic_io(root)
+        print("PASS train-only source statistics, method targets, selected reads, CHW uint8 RGB and atomic IO", flush=True)
 
 
 if __name__ == "__main__":
