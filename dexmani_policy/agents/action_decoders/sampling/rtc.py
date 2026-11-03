@@ -24,8 +24,8 @@ def rtc_enabled(prefix, action_shape, delay, offset, beta):
     return length > 0 and beta > 0
 
 
-def soft_mask(length, delay, *, device, dtype):
-    position = torch.arange(length, device=device, dtype=dtype)
+def soft_mask(length, delay, *, device):
+    position = torch.arange(length, device=device, dtype=torch.float32)
     decay = ((length - position) / (length - delay + 1)).clamp(max=1)
     return decay * torch.expm1(decay) / math.expm1(1)
 
@@ -50,7 +50,7 @@ def prefix_correction(denoised, sample, prefix, weights, offset):
 @torch.inference_mode(False)
 @torch.no_grad()
 def guided_ddim(
-    decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, dtype, generator=None
+    decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, generator=None
 ):
     scheduler = decoder.noise_scheduler
     scheduler.set_timesteps(steps)
@@ -69,9 +69,9 @@ def guided_ddim(
 
     # Deployment conditions may be inference tensors, which autograd cannot save.
     cond = cond.detach().clone()
-    prefix = prefix.to(device=cond.device, dtype=dtype).detach()
-    weights = soft_mask(prefix.shape[1], delay, device=cond.device, dtype=dtype)[None, :, None]
-    sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
+    prefix = prefix.to(device=cond.device, dtype=torch.float32).detach()
+    weights = soft_mask(prefix.shape[1], delay, device=cond.device)[None, :, None]
+    sample = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
 
     for i, timestep in enumerate(scheduler.timesteps.tolist()):
         with torch.enable_grad():
@@ -93,13 +93,13 @@ def guided_ddim(
 @torch.inference_mode(False)
 @torch.no_grad()
 def guided_flow(
-    decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, dtype,
+    decoder, cond, action_shape, prefix, *, delay, offset, beta, steps,
     generator=None, target_t_sample_mode=None,
 ):
     cond = cond.detach().clone()
-    prefix = prefix.to(device=cond.device, dtype=dtype).detach()
-    weights = soft_mask(prefix.shape[1], delay, device=cond.device, dtype=dtype)[None, :, None]
-    sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
+    prefix = prefix.to(device=cond.device, dtype=torch.float32).detach()
+    weights = soft_mask(prefix.shape[1], delay, device=cond.device)[None, :, None]
+    sample = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
     dt = 1.0 / steps
     timesteps = euler_time_grid(steps, sample)
     # Official RTC coefficient; clipping also resolves the t=0 singularity.
@@ -107,9 +107,7 @@ def guided_flow(
     guidance = guidance.clamp(max=beta)
 
     model_kwargs = {}
-    prepare = getattr(decoder.model, "prepare_context_kv", None)
-    if not decoder.training and steps > 1 and prepare is not None:
-        model_kwargs["context_kv"] = prepare(cond)
+    context_kv = decoder.model.prepare_context_kv(cond) if not decoder.training and steps > 1 else None
 
     for timestep, strength in zip(timesteps, guidance):
         t = timestep.expand(action_shape[0])
@@ -117,7 +115,7 @@ def guided_flow(
             model_kwargs["target_t"] = torch.full_like(t, dt) if target_t_sample_mode == "relative" else t + dt
         with torch.enable_grad():
             sample.requires_grad_(True)
-            velocity = decoder.model(x=sample, timestep=t, context=cond, **model_kwargs)
+            velocity = decoder.model(x=sample, timestep=t, context=cond, context_kv=context_kv, **model_kwargs)
             denoised = sample + (1 - timestep) * velocity
             correction = prefix_correction(denoised, sample, prefix, weights, offset)
         sample = sample + dt * (velocity + strength * correction)

@@ -1,7 +1,6 @@
 import argparse
 import os
 import signal
-import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -231,10 +230,6 @@ def train(method, argv=None):
                         or step + 1 == stop_step
                     )
                     totals: dict[str, torch.Tensor] = {}
-                    if record:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device)
-                        step_start = time.perf_counter()
                     optimizer.zero_grad(set_to_none=True)
                     finite_loss = torch.ones((), dtype=torch.bool, device=device)
                     for _ in range(group_size):
@@ -252,10 +247,6 @@ def train(method, argv=None):
                         model.update_teacher(current_epoch)
                     optimizer.step()
                     scheduler.step()
-                    if record:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device)
-                        elapsed = time.perf_counter() - step_start
                     step += 1
                     if group_start + group_size == batches_per_epoch:
                         epoch = current_epoch + 1
@@ -266,7 +257,6 @@ def train(method, argv=None):
                                 | {
                                     "train/lr": scheduler.get_last_lr()[0],
                                     "train/epoch": current_epoch,
-                                    "train/step_time": elapsed,
                                 }
                             ),
                             step,

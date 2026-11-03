@@ -15,9 +15,11 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
     source = directory / "checkpoints" / "latest.pt"
     checkpoint = load_checkpoint(source)
     cfg = OmegaConf.create(checkpoint.effective_config)
+    if checkpoint.global_step >= cfg.training.loop.total_train_steps:
+        print(f"Training already complete at step {checkpoint.global_step}/{cfg.training.loop.total_train_steps}")
+        return None
     with open_dict(cfg):
         cfg.workspace.output_dir = str(directory)
-        cfg.pop("max_updates", None)
         cfg.workspace.wandb_enabled = wandb
         if device is not None:
             cfg.training.device = device
@@ -56,9 +58,12 @@ def main(argv=None):
     max_updates = options.pop("max_updates")
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
+    trainer = prepare_resume(**options)
+    if trainer is None:
+        return
     from dexmani_policy.train import run_trainer
 
-    run_trainer(prepare_resume(**options), max_updates=max_updates)
+    run_trainer(trainer, max_updates=max_updates)
 
 
 if __name__ == "__main__":

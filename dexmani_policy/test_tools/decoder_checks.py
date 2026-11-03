@@ -108,9 +108,7 @@ def check_decoder_precision(device):
         with torch.inference_mode():
             ordinary = sample()
             assert ordinary.dtype == torch.float32
-            torch.testing.assert_close(ordinary, sample(dtype=torch.float32), rtol=0, atol=0)
             torch.testing.assert_close(ordinary, sample(rtc_prefix=ordinary[:, :2], rtc_guidance_cap=0), rtol=0, atol=0)
-            assert sample(dtype=torch.bfloat16).dtype == torch.bfloat16
             guided = sample(rtc_prefix=ordinary[:, :2], rtc_guidance_cap=2)
             assert guided.dtype == torch.float32 and torch.isfinite(guided).all()
 
@@ -210,6 +208,13 @@ def check_policies(device):
         assert torch.isfinite(loss)
         optimizer.step()
     policy.eval()
+    prefix = torch.full((2, 3, 19), 0.1234567, device=device)
+    with patch.object(policy, "_encode_obs", return_value=torch.zeros(2, 4, device=device, dtype=torch.bfloat16)), \
+         patch.object(policy.action_decoder, "predict_action", return_value=torch.zeros(2, 8, 19, device=device)) as sample:
+        policy.predict_action(obs, rtc_prefix=prefix, rtc_guidance_cap=2)
+    normalized_prefix = sample.call_args.kwargs["rtc_prefix"]
+    assert normalized_prefix.dtype == torch.float32
+    torch.testing.assert_close(normalized_prefix, policy.normalizer["action"].normalize(prefix), rtol=0, atol=0)
     with torch.inference_mode():
         ordinary = policy.predict_action(
             obs, generator=torch.Generator(device=device).manual_seed(17),

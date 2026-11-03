@@ -14,7 +14,7 @@ python -m pip install -e . --no-deps
 
 Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹配的 PyTorch3D 原生扩展。仿真评测依赖 `dexmani_sim`。
 
-`pyproject.toml` 声明直接依赖和必要 API 范围；`requirements.txt` 固定已验证环境版本。更新依赖时只在环境文件维护精确版本，不顺带升级。文本组件所需 transformers/tokenizers 等依赖继续保留。
+`pyproject.toml` 声明直接依赖和必要 API 范围；`requirements.txt` 固定已验证环境版本。更新依赖时只在环境文件维护精确版本，不顺带升级。RGB 组件使用的 transformers 及其相关依赖继续保留。
 
 CordViP 接触标签使用独立工具生成：
 

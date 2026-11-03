@@ -134,8 +134,6 @@ class Policy(nn.Module):
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         condition = self._encode_obs(obs_dict)
-        if rtc_prefix is None:
-            return self._predict_from_condition(condition, inference_steps=inference_steps, generator=generator)
         return self._predict_from_condition(
             condition,
             inference_steps=inference_steps,
@@ -169,7 +167,7 @@ class Policy(nn.Module):
             field = self.normalizer["action"]
             scale = field.scale[: self.control_action_dim]
             offset = field.offset[: self.control_action_dim]
-            normalized = rtc_prefix.to(condition) * scale + offset
+            normalized = rtc_prefix.to(device=condition.device, dtype=torch.float32) * scale + offset
             kwargs = dict(
                 rtc_prefix=normalized,
                 delay_steps=delay_steps,

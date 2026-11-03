@@ -1,7 +1,6 @@
 import copy
 import os
 import signal
-import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -271,7 +270,7 @@ class PolicyTrainer:
         )
         self.stop_requested = True
 
-    def log_step(self, group_metrics, elapsed, pbar):
+    def log_step(self, group_metrics, pbar):
         metrics = {
             "train/lr": self.scheduler.get_last_lr()[0],
             "train/epoch": self.current_epoch,
@@ -282,7 +281,6 @@ class PolicyTrainer:
             )
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
         metrics = to_log_scalars(metrics)
-        metrics["train/step_time"] = elapsed
         pbar.set_postfix(
             loss=f"{metrics['train/loss']:.5f}",
             step=f"{self.global_step:,}",
@@ -343,29 +341,18 @@ class PolicyTrainer:
                         )
                         finite_loss = torch.ones((), dtype=torch.bool, device=self.device)
                         group_metric_sums: dict[str, torch.Tensor | float] = {}
-                        if record_group:
-                            # Time the full update from its first batch wait, excluding iterator creation.
-                            if self.device.type == "cuda":
-                                torch.cuda.synchronize(self.device)
-                            group_start_time = time.perf_counter()
-                        for group_pos in range(group_size):
+                        for _ in range(group_size):
                             batch = next(iterator)
                             loss, log_dict = self.train_microbatch(
                                 batch, loss_divisor=group_size, log_metrics=record_group,
                             )
                             finite_loss.logical_and_(torch.isfinite(loss))
-                            if record_group and group_pos + 1 < group_size:
+                            if record_group:
                                 accumulate_metrics(group_metric_sums, log_dict)
 
                         if not finite_loss:
                             raise RuntimeError(f"Non-finite loss at step {self.global_step}")
                         self.optimizer_step()
-                        if record_group:
-                            if self.device.type == "cuda":
-                                torch.cuda.synchronize(self.device)
-                            group_elapsed = time.perf_counter() - group_start_time
-                            # Keep the final metric reduction outside the measured update.
-                            accumulate_metrics(group_metric_sums, log_dict)
                         self.global_step += 1
                         pbar.update(1)
                         if record_group:
@@ -373,7 +360,7 @@ class PolicyTrainer:
                                 key: value / group_size
                                 for key, value in group_metric_sums.items()
                             }
-                            self.log_step(group_metrics, group_elapsed, pbar)
+                            self.log_step(group_metrics, pbar)
 
                         pct = self.milestone_steps.get(self.global_step)
                         if pct is not None:

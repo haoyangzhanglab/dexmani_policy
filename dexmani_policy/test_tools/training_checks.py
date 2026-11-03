@@ -599,7 +599,9 @@ def check_inherited_policy(root, method, device=torch.device("cpu")):
     observation = {key: source[f"data/{key}"][:2] for key in info.observation_fields}
     assert runtime.predict(observation).shape == (3, 19)
     with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
-        assert run_trainer(prepare_resume(root / method, device=str(device)), max_updates=1) == 3
+        trainer = prepare_resume(root / method, device=str(device))
+        assert trainer is not None
+        assert run_trainer(trainer, max_updates=1) == 3
 
 
 def check_codebook_training(root, device=torch.device("cpu")):
@@ -653,6 +655,7 @@ def check_codebook_training(root, device=torch.device("cpu")):
     with patch("dexmani_policy.agents.hand_prior.codebook.load_codebook", side_effect=AssertionError("Reload on resume")), \
          patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
         trainer = prepare_resume(root / "dqrise", device=str(device))
+        assert trainer is not None
         assert trainer.cfg.dataset.max_train_episodes == 100
         assert run_trainer(trainer, max_updates=1) == 3
 
@@ -709,6 +712,7 @@ def check_training_resume(device):
             source.attrs.update(dt=0.1, pointcloud_config={"num_points": 123})
             with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
                 trainer = prepare_resume(split, device=str(device))
+                assert trainer is not None
             assert trainer.cfg.deployment_metadata == original.effective_config["deployment_metadata"]
             assert all(p.dtype == torch.float32 for p in trainer.model.parameters())
             assert all(p.dtype == torch.float32 for p in trainer.ema_model.parameters())
@@ -730,6 +734,28 @@ def check_training_resume(device):
             records = [json.loads(line) for line in (split / "metrics.jsonl").read_text().splitlines()]
             assert [row["step"] for row in records] == [1, 4, 5, 6]
             assert all(np.isfinite(row["train/loss"]) for row in records)
+
+        # Finish the actual saved budget, then resume without the original data.
+        trainer = prepare_resume(split, device=str(device))
+        assert trainer is not None
+        assert run_trainer(trainer) == 8
+        for weights in ("raw", "ema"):
+            info = inspect_policy(split, weights=weights)
+            runtime = load_policy(info, device=device)
+            observation = {key: source[f"data/{key}"][:2] for key in info.observation_fields}
+            prediction = runtime.predict(observation)
+            assert prediction.shape == (3, 19) and np.isfinite(prediction).all()
+            runtime.close()
+        (root / "source.zarr").rename(root / "unavailable.zarr")
+        artifacts = {path.relative_to(split): (path.stat().st_mtime_ns, path.read_bytes())
+                     for path in split.rglob("*") if path.is_file()}
+        from dexmani_policy.training.common.resume import main as resume_main
+        with patch("dexmani_policy.train.build_trainer", side_effect=AssertionError("Built completed trainer")):
+            assert prepare_resume(split, zarr_path=str(root / "missing.zarr"), use_compile=True, wandb=True) is None
+            assert resume_main(["--run", str(split), "--zarr-path", str(root / "missing.zarr"),
+                                "--compile", "--wandb"]) is None
+        assert artifacts == {path.relative_to(split): (path.stat().st_mtime_ns, path.read_bytes())
+                             for path in split.rglob("*") if path.is_file()}
 
 
 def check_nonfinite_group(device):

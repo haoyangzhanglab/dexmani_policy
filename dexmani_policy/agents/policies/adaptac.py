@@ -223,7 +223,7 @@ class AdapTac(Policy):
         predicted_force = self.force_predictor.predict_action(
             force_condition,
             (current_force.shape[0], self.future_steps, self.force_dim),
-            generator=generator, dtype=torch.float32,
+            generator=generator,
         )
         condition = self._action_condition(features, current_force, predicted_force)
         return self._predict_from_condition(

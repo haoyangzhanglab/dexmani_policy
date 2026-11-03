@@ -690,13 +690,39 @@ def check_image_geometry(device):
                                processor.process_images(quantized.float() / 255), rtol=0, atol=0)
 
 
+def check_fps(device):
+    from pytorch3d.ops import sample_farthest_points
+    from dexmani_policy.agents.obs_encoder.pointcloud.ops import farthest_point_sample, preprocess_point_cloud
+
+    points = torch.randn(2, 17, 6, device=device)
+    for random in (False, True):
+        torch.manual_seed(29)
+        _, expected_indices = sample_farthest_points(points[..., :3], K=7, random_start_point=random)
+        if random:
+            order = torch.rand(2, 7, device=device).argsort(dim=1)
+            expected_indices = expected_indices.gather(1, order)
+        expected_next = torch.rand(4, device=device)
+        for channels in (3, 6):
+            cloud = points[..., :channels]
+            torch.manual_seed(29)
+            sampled, indices = farthest_point_sample(cloud, 7, use_random=random)
+            torch.testing.assert_close(indices, expected_indices, rtol=0, atol=0)
+            torch.testing.assert_close(sampled, cloud.gather(1, indices[..., None].expand(-1, -1, channels)), rtol=0, atol=0)
+            torch.testing.assert_close(torch.rand(4, device=device), expected_next, rtol=0, atol=0)
+            torch.manual_seed(31)
+            first = preprocess_point_cloud(cloud, 7, training=False)
+            torch.manual_seed(47)
+            second = preprocess_point_cloud(cloud, 7, training=False)
+            torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_tactile, check_interaction, check_force_interaction, check_adaptac, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
+    for check in (check_fps, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

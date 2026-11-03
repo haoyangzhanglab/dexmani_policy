@@ -130,7 +130,7 @@ class DQRISE(Policy):
             raise NotImplementedError("DQ-RISE does not support RTC")
         reduced_action = self.action_decoder.predict_action(
             condition, (condition.shape[0], self.horizon, self.flow_action_dim),
-            inference_steps=inference_steps, dtype=torch.float32, generator=generator,
+            inference_steps=inference_steps, generator=generator,
         )
 
         arm_pred = reduced_action[..., : self.arm_dim]

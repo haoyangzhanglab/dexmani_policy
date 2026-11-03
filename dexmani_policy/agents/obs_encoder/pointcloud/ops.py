@@ -26,19 +26,16 @@ def farthest_point_sample(
     use_random: bool = True,
     use_random_start: bool = True,
     use_shuffle_output: bool = True,
-    random_noise_scale: float = 0.0,
 ):
-    """Sample original points (K <= N); XYZ noise affects only FPS selection."""
+    """Sample original points (K <= N) using XYZ distances."""
     torch3d_ops = load_pointcloud_ops()
 
     if pointcloud.size(-1) < 3:
         raise ValueError("pointcloud must have at least three XYZ channels")
 
     xyz = pointcloud[..., :3]
-    noisy = use_random and random_noise_scale > 0
-    sampling_xyz = xyz + torch.randn_like(xyz) * random_noise_scale if noisy else xyz
     sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
-        points=sampling_xyz,
+        points=xyz,
         K=num_samples,
         random_start_point=use_random and use_random_start,
     )
@@ -49,8 +46,8 @@ def farthest_point_sample(
         ).argsort(dim=1)
         sample_idx = torch.gather(sample_idx, 1, shuffle_perm)
 
-    # Reuse native XYZ output when sampling did not perturb coordinates.
-    if not noisy and pointcloud.size(-1) == 3:
+    # Reuse native output for XYZ-only input.
+    if pointcloud.size(-1) == 3:
         if shuffle_perm is not None:
             sampled_xyz = sampled_xyz.gather(
                 1,

@@ -115,7 +115,6 @@ class RectifiedFlow(nn.Module):
         action_shape: tuple[int, ...],
         inference_steps: int | None = None,
         *,
-        dtype: torch.dtype | None = None,
         generator: torch.Generator | None = None,
         rtc_prefix=None,
         delay_steps=0,
@@ -128,25 +127,21 @@ class RectifiedFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        dtype = torch.float32 if dtype is None else dtype
         if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
             return guided_flow(
                 self, cond, action_shape, rtc_prefix,
                 delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
-                steps=num_steps, dtype=dtype, generator=generator,
+                steps=num_steps, generator=generator,
             )
 
         batch_size = action_shape[0]
-        x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
+        x = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
         dt = 1.0 / num_steps
 
-        context_kwargs = {}
-        prepare = getattr(self.model, "prepare_context_kv", None)
-        if not self.training and num_steps > 1 and prepare is not None:
-            context_kwargs["context_kv"] = prepare(cond)
+        context_kv = self.model.prepare_context_kv(cond) if not self.training and num_steps > 1 else None
         for timestep in euler_time_grid(num_steps, x):
             t = timestep.expand(batch_size)
-            velocity = self.model(x=x, timestep=t, context=cond, **context_kwargs)
+            velocity = self.model(x=x, timestep=t, context=cond, context_kv=context_kv)
             x = x + dt * velocity
 
         return x
@@ -319,7 +314,6 @@ class ConsistencyFlow(nn.Module):
         action_shape: tuple[int, ...],
         inference_steps: int | None = None,
         *,
-        dtype: torch.dtype | None = None,
         generator: torch.Generator | None = None,
         rtc_prefix=None,
         delay_steps=0,
@@ -332,22 +326,18 @@ class ConsistencyFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        dtype = torch.float32 if dtype is None else dtype
         if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
             return guided_flow(
                 self, cond, action_shape, rtc_prefix,
                 delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
-                steps=num_steps, dtype=dtype, generator=generator,
+                steps=num_steps, generator=generator,
                 target_t_sample_mode=self.target_t_sample_mode,
             )
 
         batch_size = action_shape[0]
-        x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
+        x = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
         dt = 1.0 / num_steps
-        context_kwargs = {}
-        prepare = getattr(self.model, "prepare_context_kv", None)
-        if not self.training and num_steps > 1 and prepare is not None:
-            context_kwargs["context_kv"] = prepare(cond)
+        context_kv = self.model.prepare_context_kv(cond) if not self.training and num_steps > 1 else None
         timesteps = euler_time_grid(num_steps, x)
         target_times = (
             torch.full_like(timesteps, dt)
@@ -363,7 +353,7 @@ class ConsistencyFlow(nn.Module):
                 timestep=t,
                 target_t=target_t,
                 context=cond,
-                **context_kwargs,
+                context_kv=context_kv,
             )
             x = x + dt * velocity
 

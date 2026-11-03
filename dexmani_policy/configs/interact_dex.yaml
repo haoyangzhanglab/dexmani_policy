@@ -39,7 +39,6 @@ agent:
   fps_random_config:
     use_random: true
     use_random_start: true
-    random_noise_scale: 0.0
     use_shuffle_output: false
 
   pc_encoder_config:

@@ -47,7 +47,7 @@ class SpatialObservationEncoder(nn.Module):
 
         fps_config = {
             "use_random": True, "use_random_start": True,
-            "use_shuffle_output": False, "random_noise_scale": 0.0,
+            "use_shuffle_output": False,
             **(fps_random_config or {}),
         }
         pc_config = {"channels": 192, "depth": 2, "num_heads": 8, **(pc_encoder_config or {})}

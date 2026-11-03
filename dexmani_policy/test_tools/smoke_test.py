@@ -44,6 +44,7 @@ def main(argv=None):
         step = run_training(cfg, max_updates=args.max_updates)
         assert step == args.max_updates, "Fresh update count mismatch"
         trainer = prepare_resume(directory, device=args.device)
+        assert trainer is not None
         assert trainer.global_step == step, "Resume source mismatch"
         final = run_trainer(trainer, max_updates=args.resume_updates)
         expected = min(step + args.resume_updates, cfg.training.loop.total_train_steps)

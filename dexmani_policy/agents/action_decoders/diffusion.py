@@ -99,7 +99,6 @@ class Diffusion(nn.Module):
         action_shape: tuple[int, ...],
         inference_steps: int | None = None,
         *,
-        dtype: torch.dtype | None = None,
         generator: torch.Generator | None = None,
         rtc_prefix=None,
         delay_steps=0,
@@ -111,7 +110,6 @@ class Diffusion(nn.Module):
             if inference_steps is None
             else positive_int(inference_steps, "inference_steps")
         )
-        dtype = torch.float32 if dtype is None else dtype
 
         # Scheduler tensors are not module buffers; restored and trained instances need the same device.
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
@@ -130,11 +128,10 @@ class Diffusion(nn.Module):
                 offset=history_offset,
                 beta=rtc_guidance_cap,
                 steps=num_steps,
-                dtype=dtype,
                 generator=generator,
             )
         self.noise_scheduler.set_timesteps(num_steps)
-        sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
+        sample = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
         timesteps = self.noise_scheduler.timesteps.to(sample.device)
         for index, timestep in enumerate(self.noise_scheduler.timesteps.tolist()):
             output = self.model(x=sample, timestep=timesteps[index], context=cond)

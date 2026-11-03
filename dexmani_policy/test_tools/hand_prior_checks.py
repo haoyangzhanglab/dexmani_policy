@@ -239,14 +239,13 @@ def check_codebook_pipeline(device):
         assert torch.isfinite(loss)
         prediction = policy.eval().predict_action(obs)["future_actions"]
         assert prediction.shape == (2, 3, 19) and torch.isfinite(prediction).all()
-        try:
-            policy._predict_from_condition(
-                torch.zeros(2, 256, device=device), rtc_prefix=prediction[:, :1],
-            )
-        except NotImplementedError:
-            pass
-        else:
-            raise AssertionError("DQ-RISE accepted an unsupported RTC prefix")
+        for rtc in ({"rtc_prefix": prediction[:, :1]}, {"delay_steps": 1}, {"rtc_guidance_cap": 2}):
+            try:
+                policy.predict_action(obs, **rtc)
+            except NotImplementedError:
+                pass
+            else:
+                raise AssertionError("DQ-RISE accepted unsupported RTC arguments")
 
         ema = copy.deepcopy(policy)
         with torch.no_grad():

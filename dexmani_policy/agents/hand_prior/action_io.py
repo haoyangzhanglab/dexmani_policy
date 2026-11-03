@@ -29,9 +29,5 @@ class SATActionIO(nn.Module):
         descriptor = descriptor.to(trajectory.dtype).expand(x.shape[0], -1, -1)
         return torch.cat((trajectory, descriptor), dim=-1)
 
-    def decode_velocity(
-        self, tokens: torch.Tensor, *, return_features: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        prediction, features = self.final_layer(tokens, return_features=True)
-        velocity = prediction.transpose(1, 2)
-        return (velocity, features) if return_features else velocity
+    def decode_velocity(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.final_layer(tokens).transpose(1, 2)

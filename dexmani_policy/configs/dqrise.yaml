@@ -44,7 +44,6 @@ agent:
     use_random: true
     use_random_start: true
     use_shuffle_output: false
-    random_noise_scale: 0.0
 
   pc_encoder_config:
     channels: 192

@@ -113,7 +113,7 @@ class DexLatent(Policy):
             raise NotImplementedError("DexLatent does not support RTC")
         prediction = self.action_decoder.predict_action(
             condition, (condition.shape[0], self.horizon, self.flow_action_dim),
-            inference_steps=inference_steps, dtype=torch.float32, generator=generator,
+            inference_steps=inference_steps, generator=generator,
         )
         latent = self.normalizer["hand_latent"].unnormalize(prediction[..., 7:])
         hand = self.hand_prior.decode(latent)
