@@ -1,4 +1,6 @@
 import argparse
+import os
+import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -60,12 +62,7 @@ def load_run(method):
     if args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
         cfg.dataset.zarr_path = cfg.zarr_path
-    if checkpoint is None:
-        for name in ("encoder.pt", "resume.pt"):
-            path = Path(cfg.workspace.output_dir) / name
-            if path.exists():
-                raise FileExistsError(f"Pretraining output already exists: {path}")
-    return cfg, checkpoint, args.max_updates
+    return prepare_run(method, cfg, checkpoint, args.max_updates)
 
 
 def export_encoder(state, normalization, output_path):
@@ -97,14 +94,13 @@ def save_run(model, optimizer, scheduler, cfg, step):
         torch.save(checkpoint, temporary)
 
 
-def restore_run(model, optimizer, scheduler, checkpoint, *, device) -> int:
+def restore_run(model, optimizer, scheduler, checkpoint) -> int:
     # The optimizer already owns these Parameters, so restore their values in place.
     model.load_state_dict(checkpoint["model_state"], strict=True)
     if optimizer.param_groups[0]["param_names"] != checkpoint["optimizer_state"]["param_groups"][0]["param_names"]:
         raise ValueError("Optimizer parameter order changed")
     optimizer.load_state_dict(checkpoint["optimizer_state"])
     scheduler.load_state_dict(checkpoint["scheduler_state"])
-    set_rng_state(checkpoint["rng_state"], device)
     return checkpoint["global_step"]
 
 
@@ -131,7 +127,16 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
         set_rng_state(rng_state, device)
 
 
-def train(method, cfg, checkpoint=None, max_updates=None):
+def prepare_run(method, cfg, checkpoint=None, max_updates=None):
+    resuming = checkpoint is not None
+    if resuming and checkpoint["global_step"] >= cfg.training.loop.total_train_steps:
+        print(f"Pretraining already completed at step {checkpoint['global_step']}")
+        return
+    if not resuming:
+        for name in ("config.yaml", "metrics.jsonl", "checkpoints", "encoder.pt", "resume.pt"):
+            path = Path(cfg.workspace.output_dir) / name
+            if path.exists():
+                raise FileExistsError(f"Pretraining output already exists: {path}")
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
     positive_int(cfg.training.loop.log_interval_steps, "training.loop.log_interval_steps")
@@ -150,7 +155,7 @@ def train(method, cfg, checkpoint=None, max_updates=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    if checkpoint is None and set(cfg.normalization) != dataset.normalization_fields.keys():
+    if not resuming and set(cfg.normalization) != dataset.normalization_fields.keys():
         raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
@@ -165,43 +170,68 @@ def train(method, cfg, checkpoint=None, max_updates=None):
         from dexmani_policy.training.pretrain.obs.afro import AFRO
 
         model = AFRO(cfg.normalization)
-        with open_dict(cfg.training.loop):
-            cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
+        if not resuming:
+            with open_dict(cfg.training.loop):
+                cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
     else:
         from dexmani_policy.training.pretrain.obs.cordvip import CordViP
 
         model = CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
-    if checkpoint is None:
+    if not resuming:
         model.normalizer = fit_normalizer(
             dataset, cfg.normalization,
             feature_dims={key: field.scale.numel() for key, field in model.normalizer.fields.items()},
         )
     device = torch.device(cfg.training.device)
-    model.to(device)
+    model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
     optimizer = torch.optim.AdamW([dict(params=parameters, param_names=list(names))], **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
     scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
-    if checkpoint is not None:
-        step = restore_run(model, optimizer, scheduler, checkpoint, device=device)
+    rng_state = None
+    if resuming:
+        step = restore_run(model, optimizer, scheduler, checkpoint)
+        rng_state = checkpoint["rng_state"]
+    del checkpoint
     epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
-    if checkpoint is not None:
+    if resuming:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace, resume=checkpoint is not None)
+    logger = ExperimentLogger(**cfg.workspace, resume=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
+    try:
+        logger.save_config(cfg)
+        if rng_state is not None:
+            set_rng_state(rng_state, device)
+    except BaseException:
+        close_resources(lambda: close_data_loader(loader), logger.close)
+        raise
+    return cfg, model, loader, validation, optimizer, scheduler, step, stop_step, logger
+
+
+def train(method, cfg, model, loader, validation, optimizer, scheduler, step, stop_step, logger):
+    is_afro = method == "afro"
+    device = torch.device(cfg.training.device)
+    batches_per_epoch = loader.batch_sampler.batches_per_epoch
+    accumulation = cfg.training.loop.gradient_accumulation_steps
+    total = cfg.training.loop.total_train_steps
+    epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
     stop_requested = False
 
     def request_stop(signum, frame):
         nonlocal stop_requested
+        if stop_requested:
+            print(f"\nSecond {signal.Signals(signum).name} — forcing exit.", flush=True)
+            os._exit(1)
+        print(f"\n{signal.Signals(signum).name} — finishing current update, then saving.", flush=True)
         stop_requested = True
 
     iterator = None
     with training_signal_handlers(request_stop):
         try:
-            logger.save_config(cfg)
+            initial_step = step
             while step < stop_step and not stop_requested:
                 epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
                 loader.batch_sampler.set_epoch(epoch, start_batch)
@@ -211,7 +241,7 @@ def train(method, cfg, checkpoint=None, max_updates=None):
                 for group_start in range(start_batch, batches_per_epoch, accumulation):
                     group_size = min(accumulation, batches_per_epoch - group_start)
                     record = (
-                        step == 0
+                        step == initial_step
                         or (step + 1) % cfg.training.loop.log_interval_steps == 0
                         or step + 1 == stop_step
                     )
@@ -221,15 +251,17 @@ def train(method, cfg, checkpoint=None, max_updates=None):
                             torch.cuda.synchronize(device)
                         step_start = time.perf_counter()
                     optimizer.zero_grad(set_to_none=True)
+                    finite_loss = torch.ones((), dtype=torch.bool, device=device)
                     for _ in range(group_size):
                         batch = next(iterator)
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         loss, metrics = model(batch)
-                        if not torch.isfinite(loss):
-                            raise RuntimeError(f"Nonfinite {type(model).__name__} loss at step {step}")
+                        finite_loss &= torch.isfinite(loss.detach())
                         (loss / group_size).backward()
                         if record:
                             accumulate_metrics(totals, metrics)
+                    if not finite_loss:
+                        raise RuntimeError(f"Nonfinite {type(model).__name__} loss at step {step}")
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
                         model.update_teacher(current_epoch)

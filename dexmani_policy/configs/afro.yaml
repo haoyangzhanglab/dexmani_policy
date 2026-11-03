@@ -49,5 +49,5 @@ training:
 env_runner:
   env_kwargs:
 eval:
-  inference_steps: 10
-  use_ema: false
+  inference_steps: ${agent.num_inference_steps}
+  use_ema: ${training.use_ema}

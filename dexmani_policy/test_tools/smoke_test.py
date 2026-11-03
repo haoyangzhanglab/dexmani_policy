@@ -7,8 +7,8 @@ from pathlib import Path
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int, set_project_root
-from dexmani_policy.train import run_training
-from dexmani_policy.training.common.config import load_policy_config, prepare_training
+from dexmani_policy.train import run_trainer, run_training
+from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.resume import prepare_resume
 
 
@@ -41,14 +41,13 @@ def main(argv=None):
         cfg.workspace.wandb_cfg = None
         if args.device is not None:
             cfg.training.device = args.device
-        cfg = prepare_training(cfg)
         if cfg.training.loop.total_train_steps <= args.max_updates:
             raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
         step = run_training(cfg, max_updates=args.max_updates)
         assert step == args.max_updates, "Fresh update count mismatch"
-        resumed_cfg, checkpoint = prepare_resume(directory, device=args.device)
-        assert checkpoint.global_step == step, "Resume source mismatch"
-        final = run_training(resumed_cfg, checkpoint=checkpoint, max_updates=args.resume_updates)
+        trainer = prepare_resume(directory, device=args.device)
+        assert trainer.global_step == step, "Resume source mismatch"
+        final = run_trainer(trainer, max_updates=args.resume_updates)
         expected = min(step + args.resume_updates, cfg.training.loop.total_train_steps)
         assert final == expected, "Resume update count mismatch"
         saved = load_checkpoint(directory / "checkpoints" / "latest.pt")

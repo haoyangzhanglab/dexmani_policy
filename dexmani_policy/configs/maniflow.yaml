@@ -88,4 +88,4 @@ training:
 
 eval:
   inference_steps: 4  # 评测 NFE，独立于训练时间网格。
-  use_ema: true
+  use_ema: ${training.use_ema}

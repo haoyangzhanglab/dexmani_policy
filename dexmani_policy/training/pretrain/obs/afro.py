@@ -138,7 +138,9 @@ class AFRO(nn.Module):
 
 
 def main():
-    train("afro", *load_run("afro"))
+    prepared = load_run("afro")
+    if prepared is not None:
+        train("afro", *prepared)
 
 
 if __name__ == "__main__":

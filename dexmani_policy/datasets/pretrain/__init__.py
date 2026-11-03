@@ -17,7 +17,6 @@ class ObservationPretrainDataset(Dataset):
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError(f"No {type(self).__name__} training windows")
-        self.training = True
 
     def __len__(self):
         return len(self.sampler)
@@ -40,12 +39,9 @@ class ObservationPretrainDataset(Dataset):
             yield values
 
     def get_validation_dataset(self):
-        if not self.training:
-            return self
         if not self.val_mask.any():
             return None
         result = copy.copy(self)
-        result.training = False
         result.sampler = self.build_sampler(self.val_mask)
         if not len(result):
             raise ValueError(f"No {type(self).__name__} validation windows in selected val episodes")

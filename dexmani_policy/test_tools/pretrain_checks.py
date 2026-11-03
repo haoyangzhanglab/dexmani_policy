@@ -195,13 +195,21 @@ def check_training(root, method, device=torch.device("cpu")):
     for name, count in (("full", updates), ("resumed", 1)):
         cfg = copy.deepcopy(base)
         cfg.workspace.output_dir = str(root / method / name)
-        common.train(method, cfg, max_updates=count)
+        common.train(method, *common.prepare_run(method, cfg, max_updates=count))
     directory = root / method / "resumed"
     checkpoint = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
     cfg = OmegaConf.create(checkpoint["effective_config"])
-    with patch.object(common, "fit_normalizer", side_effect=AssertionError("Refit on resume")):
-        common.train(method, cfg, checkpoint, max_updates=updates - 1)
-    del checkpoint
+    save_config = common.ExperimentLogger.save_config
+
+    def initialize_logging(logger, config):
+        save_config(logger, config)
+        torch.rand(3, device=device)
+
+    with patch.object(common, "fit_normalizer", side_effect=AssertionError("Refit on resume")), \
+         patch.object(common.ExperimentLogger, "save_config", initialize_logging):
+        prepared = common.prepare_run(method, cfg, checkpoint, max_updates=updates - 1)
+        del checkpoint
+        common.train(method, *prepared)
     full = torch.load(root / method / "full/resume.pt", map_location="cpu", weights_only=False)
     resumed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
     for key in ("model_state", "scheduler_state", "global_step"):
@@ -234,7 +242,7 @@ def check_training(root, method, device=torch.device("cpu")):
         [dict(params=parameters[::-1], param_names=list(names[::-1]))], **cfg.optimizer,
     )
     try:
-        common.restore_run(model, reordered, None, resumed, device=device)
+        common.restore_run(model, reordered, None, resumed)
     except ValueError as error:
         assert "Optimizer parameter order" in str(error)
     else:
@@ -255,6 +263,7 @@ def check_training(root, method, device=torch.device("cpu")):
     actual_rng = get_rng_state(device)
     for key in ("torch", "torch_cuda"):
         torch.testing.assert_close(state[key], actual_rng[key], rtol=0, atol=0)
+
     stop = [False]
     def interrupted(batch):
         stop[0] = True
@@ -266,6 +275,43 @@ def check_training(root, method, device=torch.device("cpu")):
     actual_rng = get_rng_state(device)
     for key in ("torch", "torch_cuda"):
         torch.testing.assert_close(state[key], actual_rng[key], rtol=0, atol=0)
+
+    common.train(method, *common.prepare_run(
+        method, cfg, torch.load(directory / "resume.pt", map_location="cpu", weights_only=False),
+    ))
+    completed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
+    assert completed["global_step"] == cfg.training.loop.total_train_steps
+    artifacts = {path: path.stat().st_mtime_ns for path in directory.iterdir()}
+    assert common.prepare_run(method, OmegaConf.create(completed["effective_config"]), completed) is None
+    assert {path: path.stat().st_mtime_ns for path in directory.iterdir()} == artifacts
+
+    failed_cfg = copy.deepcopy(base)
+    failed_cfg.workspace.output_dir = str(root / method / "nonfinite")
+    model_class = AFRO if method == "afro" else CordViP
+    forward = model_class.forward
+    failed_model = None
+    initial_parameters = {}
+
+    def nonfinite_first_batch(model, batch):
+        nonlocal failed_model
+        first_batch = failed_model is None
+        if first_batch:
+            failed_model = model
+            initial_parameters.update({name: p.detach().clone() for name, p in model.named_parameters()})
+        loss, metrics = forward(model, batch)
+        return loss * (float("nan") if first_batch else 1.0), metrics
+
+    with patch.object(model_class, "forward", nonfinite_first_batch):
+        try:
+            common.train(method, *common.prepare_run(method, failed_cfg, max_updates=1))
+        except RuntimeError as error:
+            assert "Nonfinite" in str(error)
+        else:
+            raise AssertionError("Nonfinite accumulation group was updated")
+    for name, parameter in failed_model.named_parameters():
+        torch.testing.assert_close(parameter, initial_parameters[name], rtol=0, atol=0)
+    assert not (Path(failed_cfg.workspace.output_dir) / "resume.pt").exists()
+    assert not (Path(failed_cfg.workspace.output_dir) / "encoder.pt").exists()
 
 
 def check_train_only(root, method, device=torch.device("cpu")):
@@ -290,27 +336,29 @@ def check_train_only(root, method, device=torch.device("cpu")):
     with open_dict(incomplete.normalization):
         del incomplete.normalization[next(iter(incomplete.normalization))]
     try:
-        common.train(method, incomplete, max_updates=1)
+        common.prepare_run(method, incomplete, max_updates=1)
     except ValueError as error:
         assert "Normalization must declare" in str(error)
     else:
         raise AssertionError("Fresh pretraining accepted missing normalization modes")
-    dataset_class = hydra.utils.get_class(cfg.dataset._target_)
     with (
-        patch.object(dataset_class, "build_sampler", autospec=True,
-                     side_effect=dataset_class.build_sampler) as sampler,
         patch.object(common, "DataLoader", side_effect=AssertionError("Built val loader")),
         patch.object(ObservationPretrainDataset, "iter_normalization_data", side_effect=AssertionError("Read identity stats")),
         patch.object(common, "evaluate", side_effect=AssertionError("Evaluated without val")),
     ):
-        common.train(method, cfg, max_updates=1)
-    sampler.assert_called_once()
-    assert sampler.call_args.args[1].all(), "Built sampler for non-training episodes"
+        common.train(method, *common.prepare_run(method, cfg, max_updates=1))
     package = torch.load(Path(cfg.workspace.output_dir) / "encoder.pt", weights_only=True)
     assert package["normalizer_state"] == {}
     assert all(mode == "identity" for mode in package["normalization"].values())
     records = [json.loads(line) for line in (Path(cfg.workspace.output_dir) / "metrics.jsonl").read_text().splitlines()]
     assert all(not any(key.startswith("val/") for key in record) for record in records)
+    cfg.dataset.zarr_path = str(root / "missing.zarr")
+    try:
+        common.prepare_run(method, cfg, max_updates=1)
+    except FileExistsError as error:
+        assert "Pretraining output already exists" in str(error)
+    else:
+        raise AssertionError("Fresh pretraining reused an existing output")
 
 
 def check_pretrain_samples(root):
@@ -343,7 +391,7 @@ def check_pretrain_samples(root):
     np.testing.assert_array_equal(sample["contact_map"], cordvip_dataset.episode_store.read("contact_map", rows))
     assert "contact_map" not in sample["obs"]
     validation = cordvip_dataset.get_validation_dataset()
-    assert validation.episode_store is cordvip_dataset.episode_store and not validation.training
+    assert validation.episode_store is cordvip_dataset.episode_store
 
 
 def check_validation_weighting(device):

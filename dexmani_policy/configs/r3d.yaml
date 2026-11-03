@@ -84,5 +84,5 @@ training:
     total_train_steps: 100000
 
 eval:
-  inference_steps: 10
-  use_ema: true
+  inference_steps: ${agent.num_inference_steps}
+  use_ema: ${training.use_ema}
