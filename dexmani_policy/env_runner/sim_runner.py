@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, require_tactile_source
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES
 from dexmani_policy.common.image_util import preprocess_rgb_eval
 from dexmani_policy.common.io_util import close_resources
 
@@ -121,11 +121,9 @@ class SimRunner:
 
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
         self.environment = {}
-        source = require_tactile_source(
-            self.sensor_modalities, getattr(agent, "tactile_source", None),
-        )
-        if source == "real":
-            raise ValueError("Sim rollout requires sim-source tactile observations")
+        unsupported = (TACTILE_FEATURE_SHAPES.keys() & set(self.sensor_modalities)) - {"finger_tactile_force"}
+        if unsupported:
+            raise ValueError(f"Sim has no dense tactile producer for: {sorted(unsupported)}")
         env = None
         try:
             for index, seed in enumerate(seeds):

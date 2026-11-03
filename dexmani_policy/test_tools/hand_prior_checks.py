@@ -283,6 +283,8 @@ def check_vq_training(device):
         group.create_dataset("data/action", data=action, chunks=(5, 19))
         for val_episodes in (0, 1):
             output = Path(directory) / f"val{val_episodes}"
+            if val_episodes == 0:
+                output.mkdir()
             cfg = load_policy_config("pretrain/hand_prior/vqvae", [
                 f"dataset.zarr_path={source}", "dataset.max_train_episodes=2",
                 f"dataset.val_episodes={val_episodes}", f"workspace.output_dir={output}",
@@ -334,6 +336,26 @@ def check_vq_training(device):
             torch.save(periodic, minimal)
             assert export_codebook(minimal, output / "reexported.npz") == 3
             assert load_codebook(output / "reexported.npz")[0].num_codes == 3
+
+        for name in ("config.yaml", "metrics.jsonl", "checkpoints", "codebook.npz"):
+            output = Path(directory) / f"conflict-{name}"
+            output.mkdir()
+            artifact = output / name
+            if name == "checkpoints":
+                artifact.mkdir()
+            sentinel = artifact / "sentinel.pt" if artifact.is_dir() else artifact
+            sentinel.write_bytes(b"existing experiment")
+            cfg.workspace.output_dir = str(output)
+            with patch.object(vq_training, "prepare_hand_data", side_effect=AssertionError("Read data before conflict check")), \
+                 patch.object(vq_training, "HandVQVAE", side_effect=AssertionError("Built model before conflict check")):
+                try:
+                    vq_training.train(cfg)
+                except FileExistsError as error:
+                    assert str(artifact) in str(error)
+                else:
+                    raise AssertionError(f"VQ accepted existing {name}")
+            assert list(output.iterdir()) == [artifact]
+            assert sentinel.read_bytes() == b"existing experiment"
 
 
 def check_codebook_pipeline(device):

@@ -70,8 +70,6 @@ def assemble_policy_config(cfg):
             else:
                 cfg.dataset._target_ = "dexmani_policy.datasets.variants.tactile.InterActDexDataset"
                 cfg.dataset.interaction_horizon = cfg.interaction_horizon
-        if "tactile_source" in cfg:
-            cfg.agent.tactile_source = cfg.tactile_source
         cfg.env_runner.task_name = cfg.task_name
         cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
     return cfg

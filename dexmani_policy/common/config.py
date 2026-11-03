@@ -1,5 +1,4 @@
 import os
-from collections.abc import Iterable
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,12 +38,3 @@ def validate_action_window(horizon: int, n_obs_steps: int, n_action_steps: int) 
             f"n_action_steps ({n_action_steps}) exceeds future_steps ({future_steps}) "
             "for the configured horizon and n_obs_steps"
         )
-
-
-def require_tactile_source(fields: Iterable[str], source: str | None) -> str | None:
-    """Only force observations require an explicit production source."""
-    if TACTILE_FEATURE_SHAPES.keys() & set(fields):
-        if source not in ("real", "sim"):
-            raise ValueError("Tactile observations require tactile_source=real or sim")
-        return source
-    return None

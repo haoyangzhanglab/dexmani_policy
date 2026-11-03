@@ -34,13 +34,8 @@ def normalizer_shapes_from_state(
         scale, offset = parts
         if not (scale > 0).all():
             raise ValueError(f"Tactile scale must be positive: {key}")
-        if mode == "limits":
-            axes = [value.reshape(-1, 3) for value in parts]
-            shared = all(torch.equal(value, value[:1].expand_as(value)) for value in axes)
-        else:
-            shared = bool((scale == scale.flatten()[0]).all() and (offset == 0).all())
-        if not shared:
-            raise ValueError(f"Invalid shared tactile affine for {key} with mode={mode}")
+        if mode in {"rms", "max_abs"} and (offset != 0).any():
+            raise ValueError(f"Tactile offset must be zero for {key} with mode={mode}")
     prefix, suffix = "normalizer.fields.", ".scale"
     return {
         key[len(prefix):-len(suffix)]: value.shape

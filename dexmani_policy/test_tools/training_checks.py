@@ -214,6 +214,8 @@ def check_evaluation(_device):
                         "frame_skip": 6, "max_stability_retries": 0}
                     assert record["seeds"] == [row["seed"] for row in record["episodes"]] == [8, 3]
                     assert record["statistics"]["n_episodes"] == len(record["episodes"]) == 2
+                    assert not Path(record["checkpoint"]).is_absolute()
+                    assert (path.parent / record["checkpoint"]).resolve() == checkpoints[0]
                     assert all(row["steps"] == 2 and row["total_steps"] == 3 for row in record["episodes"])
                     assert record["environment"] == dict(
                         control_dt_s=6 / 240, frame_skip=6, action_cnt_limit=3, success_hold_steps=2,
@@ -222,6 +224,16 @@ def check_evaluation(_device):
                     moved_checkpoint = moved / internal[0].relative_to(run)
                     _, relocated_result = rollout.evaluate_policy(moved_checkpoint, seeds=[8], device="cpu", video=False)
                     assert relocated_result.parent.parent == moved / "eval"
+                    checkpoint_bytes = moved_checkpoint.read_bytes()
+                    relocated_run = root / "relocated-run"
+                    shutil.move(moved, relocated_run)
+                    assert not moved.exists()
+                    relocated_result = relocated_run / relocated_result.relative_to(moved)
+                    relocated_record = json.loads(relocated_result.read_text())
+                    assert not Path(relocated_record["checkpoint"]).is_absolute()
+                    referenced_checkpoint = (relocated_result.parent / relocated_record["checkpoint"]).resolve()
+                    assert referenced_checkpoint == relocated_run / moved_checkpoint.relative_to(moved)
+                    assert referenced_checkpoint.read_bytes() == checkpoint_bytes
                     runner = runners[0]
                     runner.env_kwargs = {"frame_skip": 12}
                     list(runner.run(agent, seeds=[8], inference_steps=2, action_steps=agent.n_action_steps))
@@ -712,8 +724,7 @@ def check_configs(_device):
     cases: list[tuple[str, list[str]]] = [(method, []) for method in methods]
     cases += [("r3d", [f"normalization.point_cloud={mode}"])
               for mode in ("identity", "gaussian", "rms", "max_abs")]
-    cases += [("adaptac", [f"tactile={kind}", "tactile_source=real"]) for kind in ("force", "taxel", "patch")]
-    cases += [("interact_dex", ["tactile=force", "tactile_source=real"])]
+    cases += [("adaptac", [f"tactile={kind}"]) for kind in ("force", "taxel", "patch")]
     for method, overrides in cases:
         cfg = load_policy_config(method, overrides)
         validate_config(cfg)
@@ -727,8 +738,6 @@ def check_configs(_device):
             assert cfg.normalization.finger_tactile_force == "limits"
             if "taxel_tactile_force" in cfg.normalization:
                 assert cfg.normalization.taxel_tactile_force == "limits"
-            assert cfg.agent.tactile_source == cfg.tactile_source
-            assert "tactile_source" not in cfg.dataset
             encoder = hydra.utils.instantiate(cfg.agent.tactile_encoder)
             assert encoder.input_key in cfg.dataset.sensor_modalities
             assert (encoder.num_tokens, encoder.out_dim) == (5, 64)

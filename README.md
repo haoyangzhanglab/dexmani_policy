@@ -111,12 +111,12 @@ bash scripts/training/train.sh sat 'task_name=<task>' \
 
 ## InterAct-Dex 动作耦合交互状态预测
 
-`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `CoupledDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。使用 `tactile=force`，通过 `tactile_source=sim`（默认）或 `tactile_source=real` 选择来源，分别使用各来源训练数据的 aggregate 触觉统计。
+`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `CoupledDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。默认使用 `tactile=force`，直接归一化生产端原始 aggregate 触觉，不根据来源旋转。当前仿真训练和仿真评测均使用世界系接触合力。
 
 ```bash
 bash scripts/training/train.sh interact_dex tactile=force 'zarr_path=<sim_zarr>'
 python -m dexmani_policy.test_tools.smoke_test interact_dex \
-  --override tactile=force --override tactile_source=real --override 'zarr_path=<real_zarr>'
+  --override tactile=force --override 'zarr_path=<real_zarr>'
 ```
 
 InterAct-Dex 包含以下四部分：
@@ -126,17 +126,17 @@ InterAct-Dex 包含以下四部分：
 3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistoryEncoder 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
 4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandSceneFusion 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。
 
-力目标使用原始 batch：sim 先作世界系力差，再使用 query 时刻的末端旋转；real 直接作 SDK 通道差值。残差乘已有触觉 normalizer 的 scale，不另拟合统计。共享 `768→128→3` 力 head 的末层零初始化。
+力目标使用原始 batch：`target = (F_future - F_current) * scale`，仿真中即世界系未来力增量。只乘已有触觉 normalizer 的 scale，不加 offset、不旋转、不裁剪；端点之间的归一化增量可以达到 ±2，不另拟合统计。共享 `768→128→3` 力 head 的末层零初始化。
 
 标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。权重为0时使用普通 Dataset，无需未来标签，但六个交互 token 仍参与动作生成。训练只编码一次观测并执行一次 Flow forward；推理跳过力 head，每次 velocity evaluation 重建交互状态，仅积分 FP32 动作。保持768维、8层、8 heads、10步 Euler，以及 `future_actions[B,13,19]` 输出。
 
-完整 checkpoint 保存配置、optimizer、EMA 和归一化统计，按当前模型结构严格加载。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-动作耦合交互状态预测)。
+完整 checkpoint 保存配置、optimizer、EMA 和归一化统计，按当前模型结构严格加载。权重和 affine 必须来自相同的原始触觉约定；使用 EEF 触觉输入训练的模型须重新训练。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-动作耦合交互状态预测)。
 
 interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.py` 组织。InterAct-Dex 固定使用场景聚合与因果历史编码；AdapTac 的力引导融合使用 cross-attention＋FFN。
 
 ## AdapTac 触觉实验
 
-通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 默认使用 sim，真实 aggregate 数据追加 `tactile_source=real`；`taxel`、`patch` 默认使用 real，目前仅支持真实 dense 数据。preset 声明默认 `tactile_source`，命令行可覆盖；顶层值只传给解释触觉语义的 agent，Dataset 不接收该参数。模型触觉输入不允许来源缺失、null 或非法值；`fingertip_xyz` 单独存在不要求来源。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
+通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 接收仿真或真实 aggregate 原始通道；`taxel`、`patch` 目前仅有真实 dense 数据生产端。无需指定来源参数，SimRunner 根据请求的观测字段，在创建环境前明确拒绝 dense 输入。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
 
 | preset | 来源 | 必需触觉输入 | encoder | 默认尺度 |
 | --- | --- | --- | --- | --- |
@@ -146,7 +146,7 @@ interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.
 
 ```bash
 bash scripts/training/train.sh adaptac tactile=force 'zarr_path=<sim_zarr>'
-bash scripts/training/train.sh adaptac tactile=force tactile_source=real 'zarr_path=<real_zarr>'
+bash scripts/training/train.sh adaptac tactile=force 'zarr_path=<real_zarr>'
 bash scripts/training/train.sh adaptac tactile=taxel 'zarr_path=<real_zarr>'
 bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 ```
@@ -157,13 +157,13 @@ AdapTac 默认关闭 compile；启用 `training.use_compile=true` 时仅编译 `
 
 触觉新训练默认使用 `limits`（Min-Max），无需额外参数。aggregate 沿时间和手指归约，dense 再归约 taxel，两个字段独立保留 XYZ 三轴极值。每轴 `scale=2/(max-min)`、`offset=-1-scale*min`；`span<1e-4` 使用 `scale=1、offset=-min`。三个参数广播为原有 `(5,3)` / `(5,120,3)` buffers。只统计 train 真实源帧，合法零值保留；不含验证集、padding、窗口重复和增强。
 
-非退化拟合数据映射至 `[-1,1]`，新数据可能越界；affine 可逆且不裁剪。AdapTac 当前与未来绝对力共用完整 affine（含 offset），力扩散不裁剪。InterAct-Dex sim 先将每帧原始世界系力转到该帧 EEF 系，再归一化；新 limits 在相同 EEF 系拟合。残差先在原始空间作差，用 query 姿态旋转整个差值后只乘 scale，offset 相消；未来残差不受 `[-1,1]` 限制。real 保持 SDK 语义，AdapTac 不增加坐标转换。
+非退化拟合数据映射至 `[-1,1]`，新数据可能越界；affine 可逆且不裁剪。AdapTac 当前与未来绝对力共用完整 affine（含 offset），力扩散不裁剪。InterAct-Dex 当前输入和统计都使用原始力，未来增量直接作差后只乘 scale，offset 相消，且不受 `[-1,1]` 限制。仿真原始力为世界系；真实传感器保持原生 SDK 通道，不能宣称为世界系。本仓库不自动对齐不同来源，也不提供跨来源混训功能。字段、形状、手指顺序和存储格式保持原样；`eef_pose` 及其他几何、动作变换继续保留。
 
-逐轴尺度改变力损失的数值权重，当前 loss 类型、mask 和权重不自动调整，效果须实际训练验证。续训、EMA、评测和部署复用 checkpoint 的保存配置与 affine，不在线拟合或迁移。加载检查必需触觉 affine 完整性、shape、有限正 scale 及共享方式，limits 允许非零 offset。
+逐轴尺度改变力损失的数值权重，当前 loss 类型、mask 和权重不自动调整，效果须实际训练验证。续训、EMA、评测和部署复用 checkpoint 的保存配置与 affine，不在线拟合或迁移。加载检查必需触觉 affine 完整性、shape、参数有限性和正 scale；limits 允许非零 offset，RMS/MaxAbs 要求 offset=0。恢复直接保留保存的实际参数，允许跨指或跨 taxel 不同；默认拟合仍产生共享参数。
 
 参考 [KineDex normalizer](https://github.com/DinoMini00/KineDex_code/blob/9246f77d7b969b181b0f1b600601b9a9c8083011/diffusion_policy/model/common/normalizer.py) 的三轴拟合方式与 [FTP-1 normalization](https://github.com/michaelyuancb/ftp1-policy/blob/89fa681d6c014cce28300946b7526db808e0b1c1/src/openpi/normalization.py) 的输入语义统计组织；不引入分位数、在线统计或额外裁剪。
 
-显式可选的 RMS/MaxAbs 分别从 train 原始标量拟合字段级 `S=sqrt(sum(x²)/N)` 或 `S=max(abs(x))`，固定执行 `x/S`，offset 为零，不裁剪；非空全零字段使用 identity affine。两字段独立统计。InterAct-Dex sim 的这些标量模式在世界系拟合，保存尺度与零偏移使其可与旋转交换。
+显式可选的 RMS/MaxAbs 分别从 train 原始标量拟合字段级 `S=sqrt(sum(x²)/N)` 或 `S=max(abs(x))`，固定执行 `x/S`，offset 为零，不裁剪；非空全零字段使用 identity affine。两字段独立统计。这些已有可选模式同样使用原始训练观测，不做触觉旋转。
 
 ```bash
 # 合成数据：三轴统计、坐标、Patch、raw/EMA 保存及连续训练/续训对照
@@ -231,7 +231,7 @@ run 使用固定的 `run_id`，例如 `2026-11-03_14-30-00_seed42`；同次运�
 
 设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验保留配置、Checkpoint 和对应源码；数据加工版本、模板等笔记按实验需要记录，不要求 source_id/commit/template 手工清单作为使用条件。
 
-选模完成独立测试后保存 `selection_result.json`，不自动发布 best 指针。`selection_result.json` 内的路径相对结果目录，`--output-dir` 可指定任意空目录。使用胜者时显式指定 checkpoint、weights、NFE 与执行长度；Real 的执行长度在其运行配置设置。详见[仿真评测机制](docs/仿真评测机制.md)。
+选模完成独立测试后保存 `selection_result.json`，不自动发布 best 指针。`selection_result.json` 内的路径及单次评测 `result_details.json` 的 `checkpoint` 均相对各自结果目录；完整 run 搬迁保留内部引用，外部 checkpoint 仍需保持相对位置。`--output-dir` 可指定任意空目录。使用胜者时显式指定 checkpoint、weights、NFE 与执行长度；Real 的执行长度在其运行配置设置。详见[仿真评测机制](docs/仿真评测机制.md)。
 
 每个 run 使用单写者，fresh 在昂贵初始化前检查输出冲突。保存采用同目录临时文件加 `os.replace`，不提供并发排他、强制 fsync 或多文件事务。远程下载用一次普通 rsync，同步已停止/完成的 run，全部成功后再使用。时间采样接口仅保留 uniform、beta、discrete；旧额外分布实验使用原源码版本。
 

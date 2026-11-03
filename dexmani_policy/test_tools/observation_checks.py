@@ -58,7 +58,7 @@ def check_tactile(device):
         policy = hydra.utils.instantiate({
             "_target_": "dexmani_policy.agents.policies.adaptac.AdapTac",
             "horizon": 4, "n_obs_steps": 1, "n_action_steps": 2, "action_dim": 19,
-            "tactile_source": "real", "tactile_encoder": encoder.effective_config,
+            "tactile_encoder": encoder.effective_config,
             "pc_dim": 3, "num_points": 16, "feature_dim": 16, "state_out_dim": 8,
             "pc_encoder_config": dict(channels=24, num_patches=4, group_size=4, depth=1, num_heads=4),
             "down_dims": [16, 32], "diffusion_step_embed_dim": 32,
@@ -71,27 +71,15 @@ def check_tactile(device):
     restored.load_state_dict(encoder.state_dict(), strict=True)
 
     from dexmani_policy.env_runner.sim_runner import SimRunner
-    from dexmani_policy.agents.policies.interact_dex import InterActDex
 
     runner = SimRunner("unused", 1, ["joint_state", "point_cloud", "finger_tactile_force", "taxel_tactile_force"], {})
-    with patch.object(runner, "make_env", side_effect=AssertionError("Created environment for real tactile")):
+    with patch.object(runner, "make_env", side_effect=AssertionError("Created environment for dense tactile")):
         try:
             next(runner.run(policy, seeds=[1], inference_steps=2, action_steps=2))
         except ValueError as error:
-            assert "sim-source" in str(error)
+            assert "taxel_tactile_force" in str(error) and "no dense" in str(error)
         else:
-            raise AssertionError("SimRunner accepted real tactile")
-    force = torch.tensor([1., 2., 3.], device=device).expand(1, 1, 5, 3)
-    rotation = torch.tensor([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]], device=device)
-    pose = torch.tensor([0., 0., 0., 0., 1., 0., -1., 0., 0.], device=device).reshape(1, 1, 9)
-    batch = dict(obs=dict(finger_tactile_force=torch.zeros_like(force), eef_pose=pose),
-                 future_force=force, future_force_valid=torch.ones(1, 1, dtype=torch.bool, device=device))
-    for source in ("real", "sim"):
-        owner = SimpleNamespace(tactile_source=source,
-                                normalizer={"finger_tactile_force": SimpleNamespace(scale=2.)})
-        target = (force @ rotation if source == "sim" else force) * 2
-        loss, _ = InterActDex._compute_future_force_loss(cast(Any, owner), target, batch)
-        torch.testing.assert_close(loss, torch.zeros((), device=device))
+            raise AssertionError("SimRunner accepted dense tactile")
 
 
 def check_interaction(device):

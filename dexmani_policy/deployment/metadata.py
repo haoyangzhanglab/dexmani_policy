@@ -45,7 +45,6 @@ class PolicyInfo:
     pointcloud_config: dict | None
     hand_pointcloud_config: dict | None
     fingertip_link_names: tuple[str, ...] | None
-    tactile_source: str | None
 
     @property
     def future_steps(self) -> int:
@@ -100,5 +99,4 @@ def inspect_policy(experiment, checkpoint="latest", weights=None, inference_step
         pointcloud_config=deployment.get("pointcloud_config"),
         hand_pointcloud_config=deployment.get("hand_pointcloud_config"),
         fingertip_link_names=tuple(fingertip_links) if fingertip_links is not None else None,
-        tactile_source=cfg.get("tactile_source"),
     )

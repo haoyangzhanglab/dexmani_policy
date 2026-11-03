@@ -90,7 +90,6 @@ class PolicyTrainer:
             normalizer = fit_normalizer(
                 dataset, cfg.normalization, initial_state=pretrained_state,
                 feature_dims=model.normalization_dims, hand_affine=hand_affine,
-                policy_name=cfg.policy_name, tactile_source=cfg.get("tactile_source"),
             )
             print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
             model.normalizer = normalizer

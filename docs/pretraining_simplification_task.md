@@ -249,7 +249,7 @@ python -m dexmani_policy.test_tools.contact_map_checks
 - T7：触觉配置并入 training_checks，接触生成迁至 contact_map_checks；核心预训练使用直接写入的合成 Zarr，删除机械调用次数及历史元数据断言。
 - T8：同步使用文档、导出调用方和测试入口，压缩生命周期等实施说明。
 
-当前代码已具备的样本加权、EMA 初始化修正、direct FP32 距离、initialized 缓存/hook、严格加载及归一化继承未重复改写。空 VQ 输入继续由已有数据/normalizer 边界明确失败，单样本 limits 已可用，无需另加校验层。迁移触觉检查时，将原测试中“存在 overrides 就要求 taxel”的判断收窄到 taxel/patch，以覆盖新增的 force+real 组合；生产配置行为未改变。
+当前代码已具备的样本加权、EMA 初始化修正、direct FP32 距离、initialized 缓存/hook、严格加载及归一化继承未重复改写。空 VQ 输入继续由已有数据/normalizer 边界明确失败，单样本 limits 已可用，无需另加校验层。触觉配方的当前输入约定与检查入口见 [README 的 AdapTac 触觉实验](../README.md#adaptac-触觉实验)。
 
 训练配方变化仅为 VQ 尾批：每 epoch ceil(N/B) 次更新，尾批使用原 EMA decay。其余修改保留默认数学语义；未实施第 7 节研究项，未增加旧格式兼容或新管理框架。
 

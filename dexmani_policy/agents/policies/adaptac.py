@@ -22,7 +22,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
-from dexmani_policy.common.config import require_tactile_source
 
 
 class AdapTacEncoder(nn.Module):
@@ -87,7 +86,6 @@ class AdapTac(Policy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        tactile_source: str,
         tactile_encoder: nn.Module,
         pc_dim: int = 6,
         num_points: int = 1024,
@@ -111,9 +109,6 @@ class AdapTac(Policy):
     ) -> None:
         if (n_obs_steps, action_dim) != (1, 19):
             raise ValueError("AdapTac requires single-frame observations and 19D joint state/actions")
-        require_tactile_source(("finger_tactile_force",), tactile_source)
-        if tactile_source == "sim" and tactile_encoder.input_key != "finger_tactile_force":
-            raise ValueError("Sim has no dense taxel producer")
         if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
             raise ValueError("force_loss_weight must be finite and nonnegative")
         validate_unet_horizon(horizon, down_dims)
@@ -162,7 +157,6 @@ class AdapTac(Policy):
             num_heads=fusion_num_heads,
             dropout=fusion_dropout,
         )
-        self.tactile_source = tactile_source
         self.force_loss_weight = force_loss_weight
 
     def _preprocess_obs(self, obs_dict: dict) -> dict:

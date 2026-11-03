@@ -71,7 +71,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                             action_steps=action_steps,
                             video_save_dir=directory / "videos" / runner.task_name if video else None)) as results:
         episode_results = list(results)
-    record = dict(checkpoint=str(checkpoint), global_step=global_step, weights=weights,
+    record = dict(checkpoint=os.path.relpath(checkpoint, path.parent), global_step=global_step, weights=weights,
                   inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
                   seed=seed, device=str(device), video=video, runner_options=options,
                   environment=runner.environment,

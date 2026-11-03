@@ -96,7 +96,11 @@ def train(cfg):
     if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
     output_dir = Path(cfg.workspace.output_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=False)
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints", "codebook.npz"):
+        path = output_dir / name
+        if path.exists():
+            raise FileExistsError(f"VQ training output already exists: {path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir()
     logger.info("VQ run: %s", output_dir.resolve())

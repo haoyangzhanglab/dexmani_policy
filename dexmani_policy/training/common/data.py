@@ -13,17 +13,7 @@ from dexmani_policy.common.normalizer import (
 )
 
 
-def iter_eef_force(dataset):
-    from dexmani_policy.agents.obs_encoder.proprio import force_world_to_eef
-
-    store = dataset.episode_store
-    for start, force in store.iter_chunks("finger_tactile_force", episode_mask=dataset.train_mask):
-        pose = store.read("eef_pose", slice(start, start + len(force)))
-        yield force_world_to_eef(torch.as_tensor(force), torch.as_tensor(pose))
-
-
-def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affine=None,
-                   policy_name=None, tactile_source=None):
+def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affine=None):
     """Assemble the train affine once, inheriting complete fields before fitting the rest."""
     expected_shapes = normalization_feature_shapes(feature_dims)
     initial_state = {} if initial_state is None else initial_state
@@ -49,9 +39,6 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affi
                 arm_dim = feature_dims[key] - hand_affine["scale"].numel()
                 chunks = (values[..., :arm_dim] for values in chunks)
             tactile_limits = key in TACTILE_FEATURE_SHAPES and mode == "limits"
-            if (key == "finger_tactile_force" and tactile_limits
-                    and policy_name == "interact-dex" and tactile_source == "sim"):
-                chunks = iter_eef_force(dataset)
             normalizer.fit_field(key, chunks, mode=mode,
                                  last_n_dims=1 if tactile_limits else len(expected_shapes[key]))
             if tactile_limits:

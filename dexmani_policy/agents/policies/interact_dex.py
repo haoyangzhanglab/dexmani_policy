@@ -13,9 +13,9 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
-from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder, force_world_to_eef
+from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
-from dexmani_policy.common.config import positive_int, require_tactile_source
+from dexmani_policy.common.config import positive_int
 
 
 class InterActDexEncoder(nn.Module):
@@ -24,7 +24,6 @@ class InterActDexEncoder(nn.Module):
     def __init__(
         self,
         tactile_encoder: nn.Module,
-        tactile_source: str,
         pc_dim: int,
         num_points: int,
         n_obs_steps: int,
@@ -34,7 +33,6 @@ class InterActDexEncoder(nn.Module):
         super().__init__()
         self.n_obs_steps = n_obs_steps
         self.num_points = num_points
-        self.tactile_source = tactile_source
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
@@ -50,7 +48,6 @@ class InterActDexEncoder(nn.Module):
             "pc_encoder_config": self.pc_encoder.effective_config,
             "fps_random_config": self.pc_encoder.fps_random_config,
             "tactile_encoder": self.hand_scene.tactile_encoder.effective_config,
-            "tactile_source": self.tactile_source,
             "n_obs_steps": self.n_obs_steps,
         }
 
@@ -87,7 +84,6 @@ class InterActDex(Policy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        tactile_source: str,
         tactile_encoder: nn.Module,
         pc_dim: int = 6,
         num_points: int = 1024,
@@ -117,7 +113,6 @@ class InterActDex(Policy):
             )
         if action_dim != 19:
             raise ValueError("InterActDex requires 19D joint state and actions")
-        require_tactile_source(("finger_tactile_force",), tactile_source)
         if tactile_encoder.input_key != "finger_tactile_force":
             raise ValueError("InterActDex requires aggregate finger_tactile_force")
         if (tactile_encoder.num_tokens, tactile_encoder.out_dim) != (5, 64):
@@ -125,7 +120,6 @@ class InterActDex(Policy):
 
         obs_encoder = InterActDexEncoder(
             tactile_encoder=tactile_encoder,
-            tactile_source=tactile_source,
             pc_dim=pc_dim,
             num_points=num_points,
             n_obs_steps=n_obs_steps,
@@ -171,10 +165,6 @@ class InterActDex(Policy):
             nn.init.zeros_(self.future_force_head[-1].bias)
 
     @property
-    def tactile_source(self) -> str:
-        return self.obs_encoder.tactile_source
-
-    @property
     def effective_config(self) -> dict:
         return {
             **super().effective_config,
@@ -182,13 +172,6 @@ class InterActDex(Policy):
             "future_force_loss_weight": self.future_force_loss_weight,
             "interaction_horizon": self.interaction_horizon,
         }
-
-    def _preprocess_obs(self, obs_dict: dict) -> dict:
-        if self.tactile_source == "sim":
-            obs_dict = {**obs_dict, "finger_tactile_force": force_world_to_eef(
-                obs_dict["finger_tactile_force"], obs_dict["eef_pose"],
-            )}
-        return super()._preprocess_obs(obs_dict)
 
     def _compute_future_force_loss(
         self, prediction: torch.Tensor, batch: dict,
@@ -199,9 +182,6 @@ class InterActDex(Policy):
         with torch.autocast(device_type=force.device.type, enabled=False):
             current = batch["obs"]["finger_tactile_force"][:, -1:].float()
             delta = torch.where(valid[..., None, None], force.float() - current, 0.0)
-            if self.tactile_source == "sim":
-                # Rotate the world-frame difference using only the query pose.
-                delta = force_world_to_eef(delta, batch["obs"]["eef_pose"][:, -1:])
             target = delta * self.normalizer["finger_tactile_force"].scale
         element_loss = F.smooth_l1_loss(
             prediction.float(), target.float(), reduction="none", beta=1.0,

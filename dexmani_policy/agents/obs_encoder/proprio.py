@@ -59,13 +59,6 @@ def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
     return torch.stack((b1, b2, b3), dim=-1)
 
 
-def force_world_to_eef(force: torch.Tensor, eef_pose: torch.Tensor) -> torch.Tensor:
-    """Rotate row-vector forces with their observation/query pose, without changing inputs."""
-    with torch.autocast(device_type=force.device.type, enabled=False):
-        rotation = _rotation_6d_to_matrix(eef_pose[..., 3:].float())
-        return force.float() @ rotation
-
-
 class HandStateEncoder(nn.Module):
     """Encode aligned joints and measured world geometry; the wrist uses the EEF frame."""
 
