@@ -263,7 +263,7 @@ python -m dexmani_policy.training.common.resume --run <run> --no-cudnn-benchmark
 
 `taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 使用零参考输入 `u=N(x)-N(0)=x*scale`，全部活动度、区域加权力、峰值和强度描述均基于 u，活动度为 `w=||u||/(||u||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 默认 limits，也支持 RMS/MaxAbs；零参考是描述构造步骤，其结果不保证位于 `[-1,1]`。原始零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建区域索引与大小。
 
-仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
+仿真入口在创建环境前拒绝 dense tactile。aggregate 字段不代表已验证 sim/real 来源兼容；当前不自动校验或转换触觉单位和坐标系。该检查位于公开入口 `SimRunner.run()`，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 按 checkpoint 中的模型配置与 affine 恢复模型，不据此保证跨 sim/real 兼容；触觉来源及数值语义未被完整保存或校验，设备侧适配由独立的 real 项目负责。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
 
 ## 实验产物
 

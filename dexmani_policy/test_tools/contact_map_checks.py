@@ -49,7 +49,7 @@ def check_contact_data(root):
     assert (labels >= 0).all() and (labels <= 1).all()
     policy_data = DemonstrationDataset(
         root / "serial.zarr", sensor_modalities=list(CordViPPretrainDataset.sensor_modalities),
-        horizon=12, obs_horizon=4, pad_before=3, pad_after=5, pc_dim=3,
+        horizon=16, obs_horizon=3, pad_before=2, pad_after=7, pc_dim=3,
     )
     rows = policy_data.sampler.sample_source_rows(0)
     np.testing.assert_array_equal(policy_data[0]["action"], original["action"][rows].astype(np.float32))
@@ -57,7 +57,7 @@ def check_contact_data(root):
     del source["data/action"]
     generate(root / "source.zarr", root / "without_action.zarr")
     assert "action" not in zarr.open_group(str(root / "without_action.zarr"), mode="r")["data"]
-    assert len(CordViPPretrainDataset(root / "without_action.zarr")) > 0
+    assert len(CordViPPretrainDataset(root / "without_action.zarr")) == 24
     try:
         DemonstrationDataset(root / "without_action.zarr", sensor_modalities=["joint_state"], obs_horizon=1)
     except KeyError:

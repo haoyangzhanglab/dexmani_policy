@@ -219,7 +219,7 @@ def test_adaptac_tactile_configs(preset, encoder):
     ["+normalization.taxel_tactile_force=limits"],
     ["~normalization.finger_tactile_force"],
 ])
-def test_adaptac_single_source_validation(overrides):
+def test_adaptac_single_field_validation(overrides):
     from dexmani_policy.training.common.config import validate_config
     cfg = load_policy_config("adaptac", overrides)
     with pytest.raises(ValueError):
@@ -227,7 +227,7 @@ def test_adaptac_single_source_validation(overrides):
 
 
 @pytest.mark.parametrize("fields", [[], ["finger_tactile_force", "taxel_tactile_force"]])
-def test_adaptac_dataset_rejects_ambiguous_source_before_open(fields):
+def test_adaptac_dataset_rejects_ambiguous_fields_before_open(fields):
     from dexmani_policy.datasets.variants.tactile import AdapTacDataset
     with pytest.raises(ValueError, match="exactly one tactile field"):
         AdapTacDataset("missing.zarr", sensor_modalities=fields)
@@ -256,7 +256,7 @@ def test_interact_mixed_fields_rejected():
         "finger_tactile_force,taxel_tactile_force]",
         "+normalization.taxel_tactile_force=limits",
     ])
-    with pytest.raises(ValueError, match="one tactile source"):
+    with pytest.raises(ValueError, match="one tactile field"):
         validate_config(cfg)
     with pytest.raises(ValueError, match="only tactile field"):
         InterActDexDataset("missing.zarr", sensor_modalities=cfg.dataset.sensor_modalities,

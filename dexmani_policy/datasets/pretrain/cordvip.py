@@ -9,8 +9,8 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
     sensor_modalities = ("hand_pointcloud", "object_pointcloud", "joint_state")
 
     def __init__(self, zarr_path, *, seed=42, val_episodes=0,
-                 max_train_episodes=None, horizon=12,
-                 obs_horizon=4, pad_before=3, pad_after=5):
+                 max_train_episodes=None, horizon=4,
+                 obs_horizon=4, pad_before=3, pad_after=0):
         if not 1 <= obs_horizon <= horizon:
             raise ValueError("obs_horizon must satisfy 1 <= N <= horizon")
         buffer = EpisodeStore(zarr_path, keys=(*self.sensor_modalities, "contact_map"))

@@ -13,10 +13,10 @@ model:
 dataset:
   _target_: dexmani_policy.datasets.pretrain.cordvip.CordViPPretrainDataset
   zarr_path: ${zarr_path}
-  horizon: 12
+  horizon: ${n_obs_steps}
   obs_horizon: ${n_obs_steps}
   pad_before: 3
-  pad_after: 5
+  pad_after: 0
   seed: 42
   val_episodes: 0
   max_train_episodes: null

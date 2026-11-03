@@ -137,7 +137,7 @@ def validate_config(cfg):
         encoder = hydra.utils.get_class(cfg.agent.tactile_encoder._target_)
         if fields != {encoder.input_key} or normalized != fields:
             raise ValueError(
-                f"{cfg.policy_name} requires one tactile source matching encoder input_key={encoder.input_key!r}; "
+                f"{cfg.policy_name} requires one tactile field matching encoder input_key={encoder.input_key!r}; "
                 f"dataset={sorted(fields)}, normalization={sorted(normalized)}"
             )
     if cfg.get("max_updates") is not None:

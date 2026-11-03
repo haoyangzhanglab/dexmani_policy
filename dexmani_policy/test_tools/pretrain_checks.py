@@ -44,11 +44,11 @@ def check_run_config(root):
 def check_cordvip_branches(device):
     from dexmani_policy.training.pretrain.obs.cordvip import CordViP
     modes = dict(hand_pointcloud="identity", object_pointcloud="identity", joint_state="identity")
-    model = CordViP(modes, n_obs_steps=2).to(device)
-    batch = {"obs": {"hand_pointcloud": torch.randn(2, 2, 8, 3, device=device),
-                     "object_pointcloud": torch.randn(2, 2, 1024, 3, device=device),
-                     "joint_state": torch.randn(2, 2, 19, device=device)},
-             "contact_map": torch.rand(2, 2, 1024, device=device)}
+    model = CordViP(modes).to(device)
+    batch = {"obs": {"hand_pointcloud": torch.randn(2, 4, 8, 3, device=device),
+                     "object_pointcloud": torch.randn(2, 4, 1024, 3, device=device),
+                     "joint_state": torch.randn(2, 4, 19, device=device)},
+             "contact_map": torch.rand(2, 4, 1024, device=device)}
     loss, metrics = model(batch)
     loss.backward()
     gradients = {name: p.grad.clone() for name, p in model.named_parameters()}
@@ -57,11 +57,11 @@ def check_cordvip_branches(device):
     contact_loss = torch.nn.functional.mse_loss(model.contact_head(torch.cat((robot, objects), -1)), batch["contact_map"])
     arm_loss = torch.nn.functional.mse_loss(
         model.arm_head(torch.cat((robot.flatten(1), objects.flatten(1), hand.flatten(1)), 1)),
-        batch["obs"]["joint_state"][:, 1, :7],
+        batch["obs"]["joint_state"][:, -1, :7],
     )
     hand_loss = torch.nn.functional.mse_loss(
         model.hand_head(torch.cat((robot.flatten(1), objects.flatten(1), arm.flatten(1)), 1)),
-        batch["obs"]["joint_state"][:, 1, 7:],
+        batch["obs"]["joint_state"][:, -1, 7:],
     )
     expected = arm_loss + hand_loss + contact_loss
     expected.backward()
@@ -240,7 +240,7 @@ def check_training(root, method, device=torch.device("cpu")):
     assert package["normalization"] == saved["normalization"]
     for key in ("encoder_state", "normalizer_state"):
         torch.testing.assert_close(package[key], saved[key], rtol=0, atol=0)
-    encoder = AFROEncoder(2).pc_encoder if method == "afro" else CordViPEncoder(2).interaction_encoder
+    encoder = AFROEncoder(2).pc_encoder if method == "afro" else CordViPEncoder(3).interaction_encoder
     encoder.load_state_dict(package["encoder_state"], strict=True)
 
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all").get_validation_dataset()
@@ -430,6 +430,41 @@ def check_pretrain_samples(root):
     assert validation.episode_store is cordvip_dataset.episode_store
 
 
+def check_cordvip_coverage(root):
+    path = root / "cordvip_coverage.zarr"
+    source = zarr.open_group(str(path), mode="w")
+    # Include a full trajectory, a singleton and an episode shorter than N.
+    ends = np.array([20, 21, 23])
+    starts = np.r_[0, ends[:-1]]
+    source.create_dataset("meta/episode_ends", data=ends)
+    for key, shape in (("hand_pointcloud", (23, 2, 3)), ("object_pointcloud", (23, 1024, 3)),
+                       ("joint_state", (23, 19)), ("contact_map", (23, 1024))):
+        rows = np.arange(23, dtype=np.float32).reshape((23,) + (1,) * (len(shape) - 1))
+        source.create_dataset(f"data/{key}", data=np.broadcast_to(rows, shape).copy())
+
+    cfg = load_policy_config("pretrain/obs/cordvip", [f"zarr_path={path}"])
+    assert cfg.n_obs_steps == cfg.dataset.horizon == cfg.dataset.obs_horizon == 4
+    assert (cfg.dataset.pad_before, cfg.dataset.pad_after) == (3, 0)
+    for dataset in (CordViPPretrainDataset(path), hydra.utils.instantiate(cfg.dataset)):
+        assert len(dataset) == 23
+        for index in range(len(dataset)):
+            start = starts[np.searchsorted(ends, index, side="right")]
+            expected = np.maximum(np.arange(index - 3, index + 1), start)
+            np.testing.assert_array_equal(dataset.sampler.sample_source_rows(index), expected)
+            sample = dataset[index]
+            for values in (*sample["obs"].values(), sample["contact_map"]):
+                assert values.shape[0] == 4
+                np.testing.assert_array_equal(values.reshape(4, -1),
+                                              np.broadcast_to(expected[:, None], (4, values[0].numel())))
+
+    split = CordViPPretrainDataset(path, val_episodes=1)
+    for dataset, mask in ((split, split.train_mask), (split.get_validation_dataset(), split.val_mask)):
+        expected = np.concatenate([np.arange(start, end) for start, end, selected in
+                                   zip(starts, ends, mask) if selected])
+        np.testing.assert_array_equal([dataset.sampler.sample_source_rows(i)[-1]
+                                       for i in range(len(dataset))], expected)
+
+
 def check_validation_weighting(device):
     class MeanModel(torch.nn.Module):
         def forward(self, batch):
@@ -465,7 +500,8 @@ def main():
             labels = np.arange(24 * 1024, dtype=np.float32).reshape(24, 1024) / (24 * 1024)
             group.create_dataset("data/contact_map", data=labels)
         check_pretrain_samples(root)
-        print("PASS AFRO stride and CordViP source-row/contact alignment", flush=True)
+        check_cordvip_coverage(root)
+        print("PASS AFRO stride; CordViP full-frame coverage, padding, episode boundaries and contact alignment", flush=True)
         for method in ("afro", "cordvip"):
             check_train_only(root, method, args.device)
             check_training(root, method, args.device)
