@@ -13,7 +13,7 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
-from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder, _rotation_6d_to_matrix
+from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder, force_world_to_eef
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
 from dexmani_policy.common.config import positive_int, require_tactile_source
 
@@ -64,15 +64,10 @@ class InterActDexEncoder(nn.Module):
             patches["tokens"], patches["xyz"],
         ))
         hand = self.hand_state(obs["joint_state"], obs["eef_pose"], obs["fingertip_xyz"])
-        tactile = obs["finger_tactile_force"]
-        if self.tactile_source == "sim":
-            # The scalar RMS/MaxAbs affine commutes with this world-to-EEF rotation.
-            with torch.autocast(device_type=tactile.device.type, enabled=False):
-                tactile = tactile.float() @ hand["rotation_world_from_eef"].float()
         interaction = self.hand_scene(
             pc, patches, hand["anchor_xyz"], hand["hand_tokens"],
             rotation_world_from_eef=hand["rotation_world_from_eef"],
-            query_context=scene.mean(dim=1), tactile=tactile,
+            query_context=scene.mean(dim=1), tactile=obs["finger_tactile_force"],
         )
         scene = scene.unflatten(0, (-1, self.n_obs_steps))
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps))
@@ -188,6 +183,13 @@ class InterActDex(Policy):
             "interaction_horizon": self.interaction_horizon,
         }
 
+    def _preprocess_obs(self, obs_dict: dict) -> dict:
+        if self.tactile_source == "sim":
+            obs_dict = {**obs_dict, "finger_tactile_force": force_world_to_eef(
+                obs_dict["finger_tactile_force"], obs_dict["eef_pose"],
+            )}
+        return super()._preprocess_obs(obs_dict)
+
     def _compute_future_force_loss(
         self, prediction: torch.Tensor, batch: dict,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -199,8 +201,7 @@ class InterActDex(Policy):
             delta = torch.where(valid[..., None, None], force.float() - current, 0.0)
             if self.tactile_source == "sim":
                 # Rotate the world-frame difference using only the query pose.
-                rotation = _rotation_6d_to_matrix(batch["obs"]["eef_pose"][:, -1, 3:].float())
-                delta = delta @ rotation[:, None]
+                delta = force_world_to_eef(delta, batch["obs"]["eef_pose"][:, -1:])
             target = delta * self.normalizer["finger_tactile_force"].scale
         element_loss = F.smooth_l1_loss(
             prediction.float(), target.float(), reduction="none", beta=1.0,

@@ -20,6 +20,7 @@ from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
 from dexmani_policy.common.config import require_tactile_source
 
@@ -163,6 +164,17 @@ class AdapTac(Policy):
         )
         self.tactile_source = tactile_source
         self.force_loss_weight = force_loss_weight
+
+    def _preprocess_obs(self, obs_dict: dict) -> dict:
+        encoder = self.obs_encoder.tactile_encoder
+        if not isinstance(encoder, XHandPatchEncoder):
+            return super()._preprocess_obs(obs_dict)
+        key = encoder.input_key
+        result = super()._preprocess_obs({k: v for k, v in obs_dict.items() if k != key})
+        scale = self.normalizer[key].scale
+        # Patch descriptors measure force relative to N(0), without an affine round trip.
+        result[key] = (obs_dict[key].to(scale) * scale).flatten(0, 1)
+        return result
 
     def _encode_force_inputs(
         self, obs_dict: dict,

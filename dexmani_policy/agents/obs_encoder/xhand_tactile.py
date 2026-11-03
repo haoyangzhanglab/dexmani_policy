@@ -98,14 +98,16 @@ def right_hand_region_ids() -> torch.Tensor:
 
 
 class XHandPatchEncoder(nn.Module):
-    """Regional force descriptors and soft-activity pooling into five 64D tokens."""
+    """Pool zero-reference scaled forces [BT,5,120,3] into five 64D tokens."""
 
     num_tokens = 5
     num_regions = 5
     out_dim = 64
     input_key = "taxel_tactile_force"
 
-    def __init__(self, region_ids: torch.Tensor | None = None, activity_scale: float = 1.0) -> None:
+    def __init__(
+        self, region_ids: torch.Tensor | list[list[int]] | None = None, activity_scale: float = 1.0,
+    ) -> None:
         super().__init__()
         activity_scale = torch.tensor(activity_scale, dtype=torch.float32).item()
         if not math.isfinite(activity_scale) or activity_scale <= 0:
@@ -148,9 +150,9 @@ class XHandPatchEncoder(nn.Module):
             "region_ids": self.region_ids.tolist(),
         }
 
-    def _patch_descriptors(self, z):
-        with torch.autocast(device_type=z.device.type, enabled=False):
-            force = z.float()
+    def _patch_descriptors(self, u: torch.Tensor) -> torch.Tensor:
+        with torch.autocast(device_type=u.device.type, enabled=False):
+            force = u.float()
             magnitude = torch.linalg.vector_norm(force, dim=-1)
             activity = magnitude / (magnitude + self.activity_scale)
             region = self.region_ids[None].expand(force.shape[0], -1, -1)
@@ -172,8 +174,9 @@ class XHandPatchEncoder(nn.Module):
                 (mean_force, peak_force, activity_fraction[..., None], strength[..., None]), dim=-1
             )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        descriptors = self._patch_descriptors(x)
+    def forward(self, u: torch.Tensor) -> torch.Tensor:
+        """Consume u = N(raw) - N(0) = raw * scale, supplied by the Policy."""
+        descriptors = self._patch_descriptors(u)
         patch_features = self.patch_mlp(descriptors)
         patch_features = (
             patch_features

@@ -140,9 +140,9 @@ interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.
 
 | preset | 来源 | 必需触觉输入 | encoder | 默认尺度 |
 | --- | --- | --- | --- | --- |
-| `force`（默认） | sim（默认）或 real | `finger_tactile_force [5,3]` | XHandForceEncoder | aggregate RMS |
-| `taxel` | real | aggregate + `taxel_tactile_force [5,120,3]` | XHandTaxelEncoder | 两字段独立 RMS |
-| `patch` | real | aggregate + dense | XHandPatchEncoder | 两字段独立 RMS |
+| `force`（默认） | sim（默认）或 real | `finger_tactile_force [5,3]` | XHandForceEncoder | aggregate 三轴共享 Min-Max (`limits`) |
+| `taxel` | real | aggregate + `taxel_tactile_force [5,120,3]` | XHandTaxelEncoder | 两字段独立三轴共享 Min-Max (`limits`) |
+| `patch` | real | aggregate + dense | XHandPatchEncoder | 两字段独立三轴共享 Min-Max (`limits`) |
 
 ```bash
 bash scripts/training/train.sh adaptac tactile=force 'zarr_path=<sim_zarr>'
@@ -151,13 +151,25 @@ bash scripts/training/train.sh adaptac tactile=taxel 'zarr_path=<real_zarr>'
 bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 ```
 
-任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可以覆盖 `normalization.finger_tactile_force=max_abs`、`normalization.taxel_tactile_force=max_abs`（dense 模式）及 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。设为 0 仅关闭显式 force MSE；未来真值 force 的加噪输入及 action loss 仍可训练 force predictor，不是无未来标签基线。
+任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可将各触觉字段的 `normalization.*` 显式设为 `rms` 或 `max_abs`，并覆盖 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。设为 0 仅关闭显式 force MSE；未来真值 force 的加噪输入及 action loss 仍可训练 force predictor，不是无未来标签基线。
 
-AdapTac 默认关闭 compile；启用 `training.use_compile=true` 时仅编译 `action_decoder.model`，force predictor 始终使用 eager。此前在 PyTorch 2.4.1 / RTX 4090 的缩小模型上，编译 force predictor 并启用 BF16、accumulation=2 可出现 loss 有限但上游观测梯度非有限。本项目停止支持该特殊编译路径；这不表示底层问题已修复，也不承诺性能提升。
+AdapTac 默认关闭 compile；启用 `training.use_compile=true` 时仅编译 `action_decoder.model`，force predictor 始终使用 eager。
 
-RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=sqrt(sum(x²)/N)`，然后固定执行 `x/S`，不去均值、不裁剪；非空全零字段使用 identity affine。aggregate 与 dense 独立统计，完整 FP32 affine 随 checkpoint 保存。非退化字段应满足 `mean(z²)≈1`，不要求均值为零。该变换保留零点、方向和相对幅度，不能消除异常峰值或跨源物理差异。
+触觉新训练默认使用 `limits`（Min-Max），无需额外参数。aggregate 沿时间和手指归约，dense 再归约 taxel，两个字段独立保留 XYZ 三轴极值。每轴 `scale=2/(max-min)`、`offset=-1-scale*min`；`span<1e-4` 使用 `scale=1、offset=-min`。三个参数广播为原有 `(5,3)` / `(5,120,3)` buffers。只统计 train 真实源帧，合法零值保留；不含验证集、padding、窗口重复和增强。
+
+非退化拟合数据映射至 `[-1,1]`，新数据可能越界；affine 可逆且不裁剪。AdapTac 当前与未来绝对力共用完整 affine（含 offset），力扩散不裁剪。InterAct-Dex sim 先将每帧原始世界系力转到该帧 EEF 系，再归一化；新 limits 在相同 EEF 系拟合。残差先在原始空间作差，用 query 姿态旋转整个差值后只乘 scale，offset 相消；未来残差不受 `[-1,1]` 限制。real 保持 SDK 语义，AdapTac 不增加坐标转换。
+
+逐轴尺度改变力损失的数值权重，当前 loss 类型、mask 和权重不自动调整，效果须实际训练验证。续训、EMA、评测和部署复用 checkpoint 的保存配置与 affine，不在线拟合或迁移。加载检查必需触觉 affine 完整性、shape、有限正 scale 及共享方式，limits 允许非零 offset。
+
+参考 [KineDex normalizer](https://github.com/DinoMini00/KineDex_code/blob/9246f77d7b969b181b0f1b600601b9a9c8083011/diffusion_policy/model/common/normalizer.py) 的三轴拟合方式与 [FTP-1 normalization](https://github.com/michaelyuancb/ftp1-policy/blob/89fa681d6c014cce28300946b7526db808e0b1c1/src/openpi/normalization.py) 的输入语义统计组织；不引入分位数、在线统计或额外裁剪。
+
+显式可选的 RMS/MaxAbs 分别从 train 原始标量拟合字段级 `S=sqrt(sum(x²)/N)` 或 `S=max(abs(x))`，固定执行 `x/S`，offset 为零，不裁剪；非空全零字段使用 identity affine。两字段独立统计。InterAct-Dex sim 的这些标量模式在世界系拟合，保存尺度与零偏移使其可与旋转交换。
 
 ```bash
+# 合成数据：三轴统计、坐标、Patch、raw/EMA 保存及连续训练/续训对照
+python -m dexmani_policy.test_tools.tactile_normalization_checks
+python -m dexmani_policy.test_tools.tactile_normalization_checks --device cuda:0
+
 # 实际数据短训、续训及保存恢复；按硬件资源设置 batch/worker
 python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 2 \
   --override tactile=taxel --override 'zarr_path=<real_zarr>' \
@@ -193,7 +205,9 @@ fresh 按数据事实和配方输入保存控制周期、点云配方、depth �
 
 future 标签从 query+1 的下一观测行开始，真实后继有效，重复末帧补齐后缀不计力损失或误差。零净力、力相消、reset 零值和合法 SDK hold 不代表无效；real 两通道有独立时间戳及有界 previous-valid hold，后继行不能解释为精确瞬时动作后真值。沿用现有数据时钟与 freshness 准入，不插值或补零修复。
 
-`taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 在 normalized dense 上计算 `w=||z||/(||z||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 只允许 RMS/MaxAbs。零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建 mask。
+合成检查覆盖 InterAct-Dex 与 AdapTac Patch 的 limits、rms、max_abs 短训、raw/EMA 加载及续训。GPU 对照固定 CUDA/cuDNN 算法，要求模型与 EMA 权重在测试容差内一致、affine 完全一致；生产训练不承诺逐位确定性。CPU/GPU 检查及 Dataset 的 fork/spawn 检查已通过，真实触觉数据训练与任务效果仍未验证。
+
+`taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 使用零参考输入 `u=N(x)-N(0)=x*scale`，全部活动度、区域加权力、峰值和强度描述均基于 u，活动度为 `w=||u||/(||u||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 默认 limits，也支持 RMS/MaxAbs；零参考是描述构造步骤，其结果不保证位于 `[-1,1]`。原始零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建区域索引与大小。
 
 仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
 

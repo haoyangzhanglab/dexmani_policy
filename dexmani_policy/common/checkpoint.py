@@ -66,13 +66,17 @@ def _restore_policy(
     if state_dict is None:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
 
+    feature_dims = effective_config["normalization_dims"]
+    feature_shapes = normalizer_shapes_from_state(
+        state_dict, normalization=effective_config["normalization"], feature_dims=feature_dims,
+    )
     rng_state = get_rng_state()
     try:
         agent = hydra.utils.instantiate(effective_config["agent"], _convert_="all")
     finally:
         set_rng_state(rng_state)
 
-    agent.configure_normalizer(effective_config["normalization_dims"], normalizer_shapes_from_state(state_dict))
+    agent.configure_normalizer(feature_dims, feature_shapes)
     agent.load_state_dict(state_dict, strict=True, assign=True)
     agent.to(device=device, dtype=torch.float32)
     agent.eval()

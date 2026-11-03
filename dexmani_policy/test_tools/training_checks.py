@@ -388,7 +388,8 @@ def check_policy_roundtrips(device):
             path = Path(directory) / "model.pt"
             save_checkpoint(path, Checkpoint(
                 2, policy.state_dict(), None, optimizer.state_dict(), {}, get_rng_state(device),
-                dict(agent=saved_agent, normalization_dims=dims),
+                dict(agent=saved_agent, normalization_dims=dims,
+                     normalization=OmegaConf.to_container(cfg.normalization)),
             ))
             # Deployment restores all parameters in FP32, including the frozen RGB encoder.
             policy.float()
@@ -470,6 +471,7 @@ def check_normalizer_restore(root, device):
     averaged = {key: value.clone() for key, value in raw.items()}
     averaged["normalizer.fields.action.scale"].fill_(3)
     config: dict[str, Any] = dict(agent=OmegaConf.to_container(cfg.agent, resolve=True), normalization_dims=dims,
+                  normalization=dict(joint_state="limits", point_cloud="identity", action="limits"),
                   eval=dict(use_ema=True, inference_steps=2), dataset={},
                   policy_metadata=dict(action_start_index=model.action_start_index),
                   env_runner=dict(task_name="synthetic"))
@@ -722,6 +724,9 @@ def check_configs(_device):
             if any(value in overrides for value in ("tactile=taxel", "tactile=patch")):
                 assert "taxel_tactile_force" in cfg.dataset.sensor_modalities
         if method in ("adaptac", "interact_dex"):
+            assert cfg.normalization.finger_tactile_force == "limits"
+            if "taxel_tactile_force" in cfg.normalization:
+                assert cfg.normalization.taxel_tactile_force == "limits"
             assert cfg.agent.tactile_source == cfg.tactile_source
             assert "tactile_source" not in cfg.dataset
             encoder = hydra.utils.instantiate(cfg.agent.tactile_encoder)

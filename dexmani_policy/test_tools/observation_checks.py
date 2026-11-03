@@ -267,7 +267,7 @@ def check_adaptac(device):
 
     policy.eval()
     config: dict[str, Any] = {key: OmegaConf.to_container(cfg[key], resolve=True)
-                              for key in ("agent", "eval", "env_runner", "dataset")}
+                              for key in ("agent", "eval", "env_runner", "dataset", "normalization")}
     config["agent"].update(policy.effective_config)
     config["normalization_dims"] = dims
     with tempfile.TemporaryDirectory(prefix="dexmani-adaptac-check-") as temporary:
@@ -440,7 +440,8 @@ def check_rgb_deployment(device):
                 if ".lora_B." in name:
                     param.mul_(0.8)
         config = dict(agent={"_target_": "dexmani_policy.agents.policies.dp.DP", **kwargs},
-                      normalization_dims=dims)
+                      normalization_dims=dims,
+                      normalization=dict(joint_state="limits", rgb="identity", action="limits"))
         with tempfile.TemporaryDirectory(prefix="dexmani-lora-restore-") as directory:
             raw, averaged = copy.deepcopy(policy), copy.deepcopy(ema)
             for model in (raw, averaged):

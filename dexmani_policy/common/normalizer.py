@@ -1,9 +1,9 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
 
 
 def normalization_feature_shapes(dims):
@@ -13,7 +13,34 @@ def normalization_feature_shapes(dims):
     }
 
 
-def normalizer_shapes_from_state(state):
+def normalizer_shapes_from_state(
+    state: Mapping[str, torch.Tensor], *, normalization: Mapping[str, str], feature_dims: Mapping[str, int],
+) -> dict[str, torch.Size]:
+    """Validate declared tactile affine before rebuilding saved buffer shapes."""
+    required = TACTILE_FEATURE_SHAPES.keys() & (set(feature_dims) | set(normalization))
+    for key in required:
+        mode = normalization.get(key)
+        if mode not in {"limits", "rms", "max_abs"}:
+            raise ValueError(f"Missing or invalid saved tactile normalization mode for {key}: {mode}")
+        parts = []
+        for part in ("scale", "offset"):
+            name = f"normalizer.fields.{key}.{part}"
+            if name not in state:
+                raise ValueError(f"Missing required tactile affine: {name}")
+            value = state[name].float()
+            if tuple(value.shape) != TACTILE_FEATURE_SHAPES[key] or not torch.isfinite(value).all():
+                raise ValueError(f"Invalid tactile affine shape or nonfinite parameter: {name}")
+            parts.append(value)
+        scale, offset = parts
+        if not (scale > 0).all():
+            raise ValueError(f"Tactile scale must be positive: {key}")
+        if mode == "limits":
+            axes = [value.reshape(-1, 3) for value in parts]
+            shared = all(torch.equal(value, value[:1].expand_as(value)) for value in axes)
+        else:
+            shared = bool((scale == scale.flatten()[0]).all() and (offset == 0).all())
+        if not shared:
+            raise ValueError(f"Invalid shared tactile affine for {key} with mode={mode}")
     prefix, suffix = "normalizer.fields.", ".scale"
     return {
         key[len(prefix):-len(suffix)]: value.shape

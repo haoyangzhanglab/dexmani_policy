@@ -6,4 +6,4 @@ agent:
 dataset:
   sensor_modalities: [joint_state, point_cloud, finger_tactile_force]
 normalization:
-  finger_tactile_force: rms
+  finger_tactile_force: limits

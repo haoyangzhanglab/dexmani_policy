@@ -48,7 +48,9 @@ class PolicyTrainer:
             raise ValueError("Resume data/model mismatch: normalization_dims")
         model.configure_normalizer(
             data_description["field_dims"] if checkpoint is None else cfg.normalization_dims,
-            {} if checkpoint is None else normalizer_shapes_from_state(checkpoint.model_state),
+            {} if checkpoint is None else normalizer_shapes_from_state(
+                checkpoint.model_state, normalization=cfg.normalization, feature_dims=cfg.normalization_dims,
+            ),
         )
         if checkpoint is None:
             sources = cfg.get("initialization", {})
@@ -88,6 +90,7 @@ class PolicyTrainer:
             normalizer = fit_normalizer(
                 dataset, cfg.normalization, initial_state=pretrained_state,
                 feature_dims=model.normalization_dims, hand_affine=hand_affine,
+                policy_name=cfg.policy_name, tactile_source=cfg.get("tactile_source"),
             )
             print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
             model.normalizer = normalizer
@@ -126,6 +129,9 @@ class PolicyTrainer:
             if ema_model is not None:
                 if checkpoint.ema_model_state is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
+                normalizer_shapes_from_state(
+                    checkpoint.ema_model_state, normalization=cfg.normalization, feature_dims=cfg.normalization_dims,
+                )
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
         model.to(device=device, dtype=torch.float32)
         if ema_model is not None:

@@ -456,6 +456,7 @@ def check_codebook_pipeline(device):
             agent={"_target_": "dexmani_policy.agents.policies.dqrise.DQRISE",
                    **policy_config, **policy.effective_config},
             normalization_dims=dims,
+            normalization={key: "limits" if key in ("joint_state", "action") else "identity" for key in dims},
         )
         checkpoint = Checkpoint(
             global_step=1, model_state=policy.state_dict(), ema_model_state=ema.state_dict(),
