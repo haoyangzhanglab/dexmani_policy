@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, CoupledDiTX, DiTX
 from dexmani_policy.agents.action_decoders.backbones.one_way_transformer import OneWayTransformer
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalResidualBlock1D, ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.agents.policies.base import Policy
@@ -156,6 +157,38 @@ def check_token_decoders(device):
         assert (prediction[..., 19:] - perturbed_ee[..., 19:]).abs().sum() > 0
 
 
+def check_unet_conditioning(device):
+    for predict_scale in (False, True):
+        model = ConditionalUNet1D(
+            input_dim=3, context_dim=9, diffusion_step_embed_dim=8,
+            down_dims=(8, 16, 32), kernel_size=3, n_groups=2,
+            cond_predict_scale=predict_scale,
+        ).to(device=device, dtype=torch.float64)
+        actions = torch.randn(2, 8, 3, device=device, dtype=torch.float64, requires_grad=True)
+        timestep = torch.tensor([1., 7.], device=device, dtype=torch.float64, requires_grad=True)
+        context = torch.randn(2, 9, device=device, dtype=torch.float64, requires_grad=True)
+        expected_cond = F.mish(torch.cat((model.diffusion_step_encoder(timestep), context), dim=-1))
+        blocks = [module for module in model.modules() if isinstance(module, ConditionalResidualBlock1D)]
+        conditions = []
+        hooks = [block.register_forward_pre_hook(lambda _, args: conditions.append(args[1])) for block in blocks]
+        with patch.object(F, "mish", wraps=F.mish) as mish:
+            output = model(actions, timestep, context)
+        for hook in hooks:
+            hook.remove()
+        # Distinguish the shared condition from convolution and timestep activations.
+        condition_calls = [call for call in mish.call_args_list if call.args[0].shape == expected_cond.shape]
+        assert len(condition_calls) == 1
+        assert len(conditions) == len(blocks) and all(value is conditions[0] for value in conditions)
+        torch.testing.assert_close(conditions[0], expected_cond, rtol=0, atol=0)
+        assert output.shape == actions.shape
+        projections = [block.cond_encoder.get_submodule("1") for block in blocks]
+        assert len({id(projection.weight) for projection in projections}) == len(blocks)
+        for block in blocks:
+            assert list(block.cond_encoder.state_dict()) == ["1.weight", "1.bias"]
+        # Numerical derivatives catch detached conditions, including the timestep path.
+        assert torch.autograd.gradcheck(model, (actions, timestep, context), fast_mode=True)
+
+
 def check_ddim_clipping(device):
     from diffusers.schedulers.scheduling_ddim import DDIMScheduler
     from dexmani_policy.common.normalizer import FieldNormalizer
@@ -258,7 +291,8 @@ def main():
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_time, check_precision, check_decoder_precision, check_token_decoders, check_ddim_clipping, check_policies,):
+    for check in (check_time, check_precision, check_decoder_precision, check_token_decoders,
+                  check_unet_conditioning, check_ddim_clipping, check_policies):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

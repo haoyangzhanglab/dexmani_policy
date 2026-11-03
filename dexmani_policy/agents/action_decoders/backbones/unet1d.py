@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .modules import TimestepMLP, batch_timesteps
 
@@ -55,14 +56,13 @@ class ConditionalResidualBlock1D(nn.Module):
         )
 
         cond_channels = out_channels * 2 if cond_predict_scale else out_channels
-        self.cond_encoder = nn.Sequential(
-            nn.Mish(),
-            nn.Linear(cond_dim, cond_channels),
-        )
+        self.cond_encoder = nn.Sequential()
+        # Checkpoint parameter paths are cond_encoder.1.{weight,bias}.
+        self.cond_encoder.add_module("1", nn.Linear(cond_dim, cond_channels))
 
-    def forward(self, x, cond):
+    def forward(self, x: torch.Tensor, activated_cond: torch.Tensor) -> torch.Tensor:
         out = self.blocks[0](x)
-        embed = self.cond_encoder(cond).unsqueeze(-1)
+        embed = self.cond_encoder(activated_cond).unsqueeze(-1)
         if self.cond_predict_scale:
             # Diffusion Policy FiLM uses scale directly, without an identity offset.
             scale, bias = embed.chunk(2, dim=1)
@@ -140,29 +140,31 @@ class ConditionalUNet1D(nn.Module):
             nn.Conv1d(start_dim, input_dim, 1),
         )
 
-    def forward(self, x, timestep, context):
+    def forward(
+        self, x: torch.Tensor, timestep: torch.Tensor | float | int, context: torch.Tensor
+    ) -> torch.Tensor:
         x = x.transpose(1, 2)
 
         timestep = batch_timesteps(timestep, x)
         t_embed = self.diffusion_step_encoder(timestep)
 
-        cond = torch.cat([t_embed, context], dim=-1)
+        activated_cond = F.mish(torch.cat([t_embed, context], dim=-1))
 
         skips = []
         for index, (resnet, resnet2, downsample) in enumerate(self.down_modules):
-            x = resnet(x, cond)
-            x = resnet2(x, cond)
+            x = resnet(x, activated_cond)
+            x = resnet2(x, activated_cond)
             if index > 0:
                 skips.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:
-            x = mid_module(x, cond)
+            x = mid_module(x, activated_cond)
 
         for resnet, resnet2, upsample in self.up_modules:
             x = torch.cat((x, skips.pop()), dim=1)
-            x = resnet(x, cond)
-            x = resnet2(x, cond)
+            x = resnet(x, activated_cond)
+            x = resnet2(x, activated_cond)
             x = upsample(x)
 
         x = self.final_conv(x)
