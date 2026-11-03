@@ -115,6 +115,8 @@ def validate_normalization(cfg):
         physical = {"point_cloud", "camera_intrinsic", "camera_extrinsic"}
     elif cfg.policy_name == "interact-dex":
         physical = {"point_cloud", "eef_pose", "fingertip_xyz"}
+    elif cfg.policy_name == "adaptac":
+        physical = {"point_cloud"}
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         physical.add("rgb")
     for key in physical:

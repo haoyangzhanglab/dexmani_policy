@@ -675,6 +675,8 @@ def check_configs(_device):
     methods = ("dp", "dp3", "r3d", "afro", "cordvip", "maniflow", "sat", "dqrise",
                "dexlatent", "adaptac", "interact_dex")
     cases: list[tuple[str, list[str]]] = [(method, []) for method in methods]
+    cases += [("r3d", [f"normalization.point_cloud={mode}"])
+              for mode in ("identity", "gaussian", "rms", "max_abs")]
     cases += [("adaptac", [f"tactile={kind}", "tactile_source=real"]) for kind in ("force", "taxel", "patch")]
     cases += [("interact_dex", ["tactile=force", "tactile_source=real"])]
     for method, overrides in cases:
@@ -701,6 +703,14 @@ def check_configs(_device):
         assert not disabled.eval.use_ema
     validate_normalization(load_policy_config("dp3", ["normalization.action=gaussian",
                                                        "agent.clip_sample=false"]))
+    for mode in ("limits", "gaussian", "rms", "max_abs"):
+        cfg = load_policy_config("adaptac", [f"normalization.point_cloud={mode}"])
+        try:
+            validate_normalization(cfg)
+        except ValueError as error:
+            assert all(part in str(error) for part in ("point_cloud", "identity", "physical geometry"))
+        else:
+            raise AssertionError(f"AdapTac accepted non-metric point_cloud normalization: {mode}")
 
 
 def small_training_config(source, output, device, *, bfloat16=False):
