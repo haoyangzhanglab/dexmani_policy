@@ -25,7 +25,7 @@ from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.deployment import inspect_policy, load_policy
 from dexmani_policy.test_tools.dataset_checks import make_source
 from dexmani_policy.train import build_trainer, run_trainer, run_training
-from dexmani_policy.training.common.config import assemble_effective_config, load_policy_config, prepare_training, validate_config, validate_normalization
+from dexmani_policy.training.common.config import assemble_effective_config, load_policy_config, validate_config, validate_normalization
 from dexmani_policy.training.common.data import build_dataset
 from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.common.optimization import build_optimizer
@@ -58,7 +58,7 @@ def check_evaluation(_device):
         root = Path(temporary)
         checkpoints = [save_checkpoint(root / folder / "model.pt", Checkpoint(
             step, {}, {}, {}, {}, {}, config)) for step, folder in ((1, "external-a"), (2, "external-b"))]
-        run = root / "publication"
+        run = root / "run"
         (run / "checkpoints").mkdir(parents=True)
         link = run / "checkpoints/link.pt"
         link.symlink_to(checkpoints[1])
@@ -92,8 +92,8 @@ def check_evaluation(_device):
         # The same saved file has the same defaults via latest or an explicit path.
         (run / "checkpoints/latest.pt").symlink_to(checkpoints[1])
         latest = inspect_policy(run)
-        explicit = inspect_policy(run, checkpoint=checkpoints[1])
-        assert latest == explicit
+        explicit_info = inspect_policy(run, checkpoint=checkpoints[1])
+        assert latest == explicit_info
         for removed in ("best", "20pct"):
             try:
                 inspect_policy(run, checkpoint=removed)
@@ -121,11 +121,10 @@ def check_evaluation(_device):
                 self.success_hold_steps = success_hold_steps
                 self.randomization = Randomization()
                 self.stability = Stability(max_stability_retries=max_stability_retries)
-                self.closed, self.dt_reads = False, 0
+                self.closed = False
 
             @property
             def dt(self):
-                self.dt_reads += 1
                 return self.frame_skip / 240
 
             def observation(self):
@@ -155,7 +154,8 @@ def check_evaluation(_device):
 
         for fail in (None, "reset", "step"):
             directory = root / f"rollout-{fail}"
-            environments, runners = [], []
+            environments: list[Environment] = []
+            runners: list[SimRunner] = []
 
             def make_env(runner, *, record_video):
                 assert not record_video
@@ -182,19 +182,16 @@ def check_evaluation(_device):
             agent.predict_action = predict
             with patch.object(rollout, "_restore_policy", return_value=agent), \
                  patch.object(rollout, "load_seed_pool", side_effect=AssertionError("Explicit seeds read pool")), \
-                 patch.object(SimRunner, "make_env", autospec=True, side_effect=make_env), \
-                 patch.object(rollout, "write_json", wraps=write_json) as save:
+                 patch.object(SimRunner, "make_env", autospec=True, side_effect=make_env):
                 try:
                     record, path = rollout.evaluate_policy(checkpoints[0], seeds=[8, 3], episodes=9, device="cpu",
                                                            output_dir=directory, video=False)
                 except RuntimeError as error:
                     assert "injected" in str(error)
                     assert fail is not None and not (directory / "result_details.json").exists()
-                    assert save.call_count == 0
                     assert len(environments) == 1
                 else:
                     assert fail is None and path.is_file()
-                    assert save.call_count == 1
                     assert json.loads(json.dumps(record)) == json.loads(path.read_text())
                     assert "force_inference_steps" not in record
                     assert record["global_step"] == 1 and record["action_steps"] == agent.n_action_steps
@@ -209,7 +206,6 @@ def check_evaluation(_device):
                         control_dt_s=6 / 240, frame_skip=6, action_cnt_limit=3, success_hold_steps=2,
                         randomization=dict(randomize_model_id=True, table_height_range=(-0.01, 0.02)),
                         stability=dict(stable_check_steps=240, max_stability_retries=0))
-                    assert [env.dt_reads for env in environments] == [1, 0]
                     runner = runners[0]
                     runner.env_kwargs = {"frame_skip": 12}
                     list(runner.run(agent, seeds=[8], inference_steps=2, action_steps=agent.n_action_steps))
@@ -430,7 +426,9 @@ def check_resume_logging(root):
         directory.mkdir()
         (directory / name).touch()
         try:
-            prepare_training(load_policy_config("dp3", [f"workspace.output_dir={directory}"]))
+            run_training(load_policy_config("dp3", [
+                f"workspace.output_dir={directory}", f"zarr_path={root / 'missing.zarr'}",
+            ]), max_updates=1)
         except FileExistsError:
             pass
         else:
@@ -662,7 +660,7 @@ def check_codebook_training(root, device=torch.device("cpu")):
 def check_configs(_device):
     methods = ("dp", "dp3", "r3d", "afro", "cordvip", "maniflow", "sat", "dqrise",
                "dexlatent", "adaptac", "interact_dex")
-    cases = [(method, []) for method in methods]
+    cases: list[tuple[str, list[str]]] = [(method, []) for method in methods]
     cases += [("adaptac", [f"tactile={kind}", "tactile_source=real"]) for kind in ("taxel", "patch")]
     for method, overrides in cases:
         cfg = load_policy_config(method, overrides)

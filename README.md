@@ -153,6 +153,8 @@ bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 
 任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可以覆盖 `normalization.finger_tactile_force=max_abs`、`normalization.taxel_tactile_force=max_abs`（dense 模式）及 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。设为 0 仅关闭显式 force MSE；未来真值 force 的加噪输入及 action loss 仍可训练 force predictor，不是无未来标签基线。
 
+AdapTac 默认关闭 compile。PyTorch 2.4.1 / RTX 4090 上的缩小模型验证发现，编译 force predictor 并启用 BF16、accumulation=2 时，可出现 loss 有限但上游观测梯度非有限，裁剪会报错停止；审查基线也有同一现象。默认 eager 路径的 BF16 累积训练、保存及恢复已通过，不能据此推断编译路径有效。
+
 RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=sqrt(sum(x²)/N)`，然后固定执行 `x/S`，不去均值、不裁剪；非空全零字段使用 identity affine。aggregate 与 dense 独立统计，完整 FP32 affine 随 checkpoint 保存。非退化字段应满足 `mean(z²)≈1`，不要求均值为零。该变换保留零点、方向和相对幅度，不能消除异常峰值或跨源物理差异。
 
 ```bash
@@ -179,7 +181,7 @@ python -m dexmani_policy.test_tools.pretrain_checks --device cpu
 python -m dexmani_policy.test_tools.remote_checks
 ```
 
-默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
+默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 指定保留产物的目录，空目录可用，已有训练产物由正式 fresh 入口拒绝覆盖；未指定时使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
 离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用保存配置、affine 与 strict load，不读取外部 config.yaml。inspect 默认 latest，也接受明确文件路径，相对文件名以实验 checkpoints 目录解析；不支持 best 或百分比 selector。Runtime 返回完整未来动作窗口，调用方设置实际执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。
 

@@ -18,9 +18,7 @@ def smoke_output(output_dir):
         with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as temporary:
             yield Path(temporary)
     else:
-        directory = output_dir.resolve()
-        directory.mkdir(parents=True, exist_ok=False)
-        yield directory
+        yield output_dir.resolve()
 
 
 def main(argv=None):

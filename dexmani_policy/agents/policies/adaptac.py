@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -243,4 +243,4 @@ class AdapTac(Policy):
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
         super().compile_backbone(**compile_kwargs)
-        self.force_predictor.model = torch.compile(self.force_predictor.model, **compile_kwargs)
+        self.force_predictor.model = cast(nn.Module, torch.compile(self.force_predictor.model, **compile_kwargs))

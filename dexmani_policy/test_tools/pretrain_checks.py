@@ -308,6 +308,7 @@ def check_training(root, method, device=torch.device("cpu")):
             assert "Nonfinite" in str(error)
         else:
             raise AssertionError("Nonfinite accumulation group was updated")
+    assert failed_model is not None
     for name, parameter in failed_model.named_parameters():
         torch.testing.assert_close(parameter, initial_parameters[name], rtol=0, atol=0)
     assert not (Path(failed_cfg.workspace.output_dir) / "resume.pt").exists()

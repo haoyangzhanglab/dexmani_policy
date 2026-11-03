@@ -215,15 +215,17 @@ def check_adaptac(device):
     policy.configure_normalizer(dims, normalization_feature_shapes(dims))
     policy.to(device)
     policy.modality_dropout_probs = {"finger_tactile_force": 0.3}
+    obs = dict(joint_state=torch.randn(2, 1, 19, device=device),
+               point_cloud=torch.randn(2, 1, 48, 6, device=device),
+               finger_tactile_force=torch.randn(2, 1, 5, 3, device=device))
+    valid = torch.ones(2, 8, dtype=torch.bool, device=device)
+    valid[1, -2:] = False
     batch = dict(
-        obs=dict(joint_state=torch.randn(2, 1, 19, device=device),
-                 point_cloud=torch.randn(2, 1, 48, 6, device=device),
-                 finger_tactile_force=torch.randn(2, 1, 5, 3, device=device)),
+        obs=obs,
         action=torch.randn(2, 8, 19, device=device),
         future_force=torch.randn(2, 8, 5, 3, device=device),
-        future_force_valid=torch.ones(2, 8, dtype=torch.bool, device=device),
+        future_force_valid=valid,
     )
-    batch["future_force_valid"][1, -2:] = False
 
     for training, steps in ((True, None), (False, None), (False, 10)):
         policy.train(training)
@@ -249,7 +251,7 @@ def check_adaptac(device):
                 loss.backward()
                 policy.force_loss_weight = cfg.agent.force_loss_weight
             else:
-                output = policy.predict_action(batch["obs"], inference_steps=steps, generator=generator)
+                output = policy.predict_action(obs, inference_steps=steps, generator=generator)
                 assert output["future_actions"].shape == (2, 8, 19)
                 assert torch.isfinite(output["future_actions"]).all()
             assert preprocess.call_count == encoder.call_count == 1
@@ -265,8 +267,8 @@ def check_adaptac(device):
                        for p in policy.force_predictor.parameters())
 
     policy.eval()
-    config = {key: OmegaConf.to_container(cfg[key], resolve=True)
-              for key in ("agent", "eval", "env_runner", "dataset")}
+    config: dict[str, Any] = {key: OmegaConf.to_container(cfg[key], resolve=True)
+                              for key in ("agent", "eval", "env_runner", "dataset")}
     config["agent"].update(policy.effective_config)
     config["normalization_dims"] = dims
     with tempfile.TemporaryDirectory(prefix="dexmani-adaptac-check-") as temporary:
@@ -284,7 +286,7 @@ def check_adaptac(device):
                                   wraps=agent.force_predictor.model.forward) as force_model, \
                      patch.object(agent.action_decoder.model, "forward",
                                   wraps=agent.action_decoder.model.forward) as action_model:
-                    agent.predict_action(batch["obs"], inference_steps=options["inference_steps"],
+                    agent.predict_action(obs, inference_steps=options["inference_steps"],
                                          generator=torch.Generator(device=device).manual_seed(456))
                 assert force_model.call_count == force_steps
                 assert action_model.call_count == (steps or 20)
