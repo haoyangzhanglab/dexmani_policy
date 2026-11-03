@@ -176,6 +176,70 @@ def check_affine_math():
         raise AssertionError("Partial imported affine accepted")
 
 
+def check_adaptac_history_targets(root):
+    for preset in ("force", "taxel", "patch"):
+        check_adaptac_source_targets(root, preset)
+
+
+def check_adaptac_source_targets(root, preset):
+    path = root / f"adaptac-history-{preset}.zarr"
+    source = make_source(path, [1, 21, 41])
+    for key in ("action", "joint_state", "finger_tactile_force"):
+        shape = source[f"data/{key}"].shape
+        source[f"data/{key}"][:] = np.broadcast_to(
+            np.arange(41, dtype=np.float32).reshape(41, *([1] * (len(shape) - 1))), shape,
+        )
+    key = "finger_tactile_force" if preset == "force" else "taxel_tactile_force"
+    shape = (5, 3) if preset == "force" else (5, 120, 3)
+    values = (np.arange(41, dtype=np.float32).reshape(41, *([1] * len(shape))) * 2048
+              + np.arange(np.prod(shape), dtype=np.float32).reshape(shape))
+    if preset == "force":
+        source[f"data/{key}"][:] = values
+    else:
+        source.create_dataset(f"data/{key}", data=values)
+        del source["data/finger_tactile_force"]
+    for action_steps in (8, 15):
+        cfg = load_policy_config("adaptac", [f"tactile={preset}", f"zarr_path={path}", "dataset.augmentation_cfg=null",
+                                              f"n_action_steps={action_steps}"])
+        dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
+        assert (dataset.obs_horizon, dataset.horizon, dataset.action_start_index) == (2, 16, 1)
+        expected_queries = []
+        for start, end in ((0, 1), (1, 21), (21, 41)):
+            for window_start in range(-1, end - start - 16 + action_steps):
+                rows = np.clip(start + window_start + np.arange(16), start, end - 1)
+                query = rows[1]
+                if query + 1 == end:
+                    continue
+                expected_queries.append(query)
+                index = len(expected_queries) - 1
+                sample = dataset[index]
+                np.testing.assert_array_equal(sample["obs"]["joint_state"][:, 0], rows[:2])
+                np.testing.assert_array_equal(sample["obs"][key], values[rows[:2]])
+                np.testing.assert_array_equal(sample["action"][:, 0], rows)
+                targets = query + np.arange(1, 16)
+                assert sample["future_force"].shape == (15, *shape)
+                np.testing.assert_array_equal(sample["future_force"], values[np.minimum(targets, end - 1)])
+                np.testing.assert_array_equal(sample["future_force_valid"], targets < end)
+                assert sample["future_force_valid"].any()
+        assert len(dataset) == len(expected_queries)
+        if action_steps == 8:
+            np.testing.assert_array_equal(dataset[0]["obs"]["joint_state"][:, 0], [1, 1])
+            assert not dataset[-1]["future_force_valid"][-1]
+            np.testing.assert_array_equal(dataset[1]["obs"]["joint_state"][:, 0], [1, 2])
+            np.testing.assert_array_equal(dataset[1]["action"][:, 0], np.arange(1, 17))
+            np.testing.assert_array_equal(dataset[1]["future_force"], values[np.arange(3, 18)])
+        else:
+            # A maximal action window exposes last-row queries before AdapTac filters them.
+            unfiltered = DemonstrationDataset(
+                str(path), sensor_modalities=list(cfg.dataset.sensor_modalities),
+                obs_horizon=2, horizon=16, pad_before=1, pad_after=14,
+            )
+            queries = [unfiltered.sampler.sample_source_rows(i)[1] for i in range(len(unfiltered))]
+            assert {0, 20, 40} <= set(queries)
+            assert not {0, 20, 40} & set(expected_queries)
+            assert len(unfiltered) - len(dataset) == 3
+
+
 def check_method_targets(root):
     path = root / "targets.zarr"
     source = make_source(path, [2, 7, 13])
@@ -215,7 +279,7 @@ def check_method_targets(root):
         expected_rows[~expected_valid] = end - 1
         expected = force_data[expected_rows]
         with patch.object(force_store, "read", wraps=force_store.read) as read:
-            force, valid = read_future_force(force_store, query, offsets)
+            force, valid = read_future_force(force_store, query, offsets, field="finger_tactile_force")
         read.assert_called_once_with(
             "finger_tactile_force", slice(int(expected_rows.min()), int(expected_rows.max()) + 1),
         )
@@ -444,6 +508,7 @@ def main():
         root = Path(directory)
         check_source_statistics(root)
         check_method_targets(root)
+        check_adaptac_history_targets(root)
         check_dataset_reads(root)
         check_worker_reads(root)
         check_rgb_preprocessing(root)

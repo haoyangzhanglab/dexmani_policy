@@ -70,7 +70,7 @@ RGB 在 CPU 预处理后统一为连续 CHW uint8，模型内转浮点；颜色�
 
 ## SAT / DQ-RISE / DexLatent dense observation
 
-三种策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一标准 uniform flow matching、10 步 Euler 和 `Nobs=2,H=16,C=8`。SAT 采用“SAT 动作表示 + 6 层 768D DiTX 的本地适配”：`SATActionIO` 参照[官方动作表示](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)拼接关节轨迹与身份，形成 19 个 token，经公共 DiTX 后读出 `[B,16,19]` 动作速度；Flow 始终在归一化动作坐标中训练与积分。DQ 使用普通时间 token 输入输出，预测 7D arm 和连续码本索引后 lookup。三者共享 6 层、768D DiTX 层型与主干配置，但表示维度、token 数、输入输出头和量化机制不同，不是“只交换 token 轴”的消融，也不能直接横比 Flow MSE。默认 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
+三种策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一为 uniform + LBS 高噪声偏置训练采样（`time_shift_alpha=3.0`）、5 步均匀 Euler 和 `Nobs=2,H=16,C=8`。SAT 采用“SAT 动作表示 + 6 层 768D DiTX 的本地适配”：`SATActionIO` 参照[官方动作表示](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)拼接关节轨迹与身份，形成 19 个 token，经公共 DiTX 后读出 `[B,16,19]` 动作速度；Flow 始终在归一化动作坐标中训练与积分。DQ 使用普通时间 token 输入输出，预测 7D arm 和连续码本索引后 lookup。三者共享 6 层、768D DiTX 层型与主干配置，但表示维度、token 数、输入输出头和量化机制不同，不是“只交换 token 轴”的消融，也不能直接横比 Flow MSE。默认 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
 
 DexLatent 使用同一观测及普通时间 token DiTX，内部预测 7D arm + 32D hand latent，对外保持 19D 绝对关节动作。官方 XHand E/D 冻结并使用 FP32 确定性 mean，保留官方 URDF 尺度；内部 latent limits 只拟合训练真实动作行。原始权重只在 fresh 初始化读取，完整策略内嵌先验和统计。训练、恢复、离线推理命令及预训练来源差异见 [手部动作表示](docs/手部动作表示.md#dexlatent-连续手部表示)。
 
@@ -136,13 +136,19 @@ interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.
 
 ## AdapTac 触觉实验
 
-通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 接收仿真或真实 aggregate 原始通道；`taxel`、`patch` 目前仅有真实 dense 数据生产端。无需指定来源参数，SimRunner 根据请求的观测字段，在创建环境前明确拒绝 dense 输入。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
+默认采用多帧扩展配方 `N/H/C=2/16/8`：共享视觉、触觉和状态编码器逐帧处理，再按从旧到新的顺序拼接历史特征。batch=128、梯度累积1、100000次 optimizer updates及原学习率、EMA、网络宽度和损失权重保持不变；动作与力 diffusion 的默认推理步数均为20，与 horizon=16 无关。
+
+以最后观测时刻 t 为准，无 padding 时观测为 `[t-1,t]`，训练动作为 `[t-1,...,t+14]`；策略返回 `[t,...,t+14]` 共15步，默认执行前8步。未来力标签为 `[t+1,...,t+15]`，超出 episode 的目标用末行填充并由 mask 排除，无有效后继力的窗口过滤。guide 按 `[观测力历史,预测未来力]` 拼接，force 为255维、dense 为30600维；动作损失继续通过预测力反传到 force predictor。
+
+新配方使用新的训练 run。aggregate 可显式使用 `n_obs_steps=1 horizon=20 n_action_steps=8`；完整 checkpoint 按保存配置严格加载，配置窗口必须与权重形状一致。多帧结构与合成检查不代表速度或任务成功率提升。
+
+通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 接收仿真或真实 aggregate 原始通道；`taxel`、`patch` 目前仅有真实 dense 数据生产端。无需指定来源参数，SimRunner 根据请求的观测字段，在创建环境前明确拒绝 dense 输入。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；每次运行仅选择一种触觉字段，观测、future target 和 current guide 均来自该字段。force 的力预测宽度为 15，taxel/patch 为 1800；数据文件可以包含两种字段，但运行只读取和统计选中的一种。
 
 | preset | 来源 | 必需触觉输入 | encoder | 默认尺度 |
 | --- | --- | --- | --- | --- |
 | `force`（默认） | sim（默认）或 real | `finger_tactile_force [5,3]` | XHandForceEncoder | aggregate 三轴共享 Min-Max (`limits`) |
-| `taxel` | real | aggregate + `taxel_tactile_force [5,120,3]` | XHandTaxelEncoder | 两字段独立三轴共享 Min-Max (`limits`) |
-| `patch` | real | aggregate + dense | XHandPatchEncoder | 两字段独立三轴共享 Min-Max (`limits`) |
+| `taxel` | real | `taxel_tactile_force [5,120,3]` | XHandTaxelEncoder | dense 三轴共享 Min-Max (`limits`) |
+| `patch` | real | `taxel_tactile_force [5,120,3]` | XHandPatchEncoder | dense 三轴共享 Min-Max (`limits`) |
 
 ```bash
 bash scripts/training/train.sh adaptac tactile=force 'zarr_path=<sim_zarr>'
@@ -155,7 +161,7 @@ bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 
 AdapTac 默认关闭 compile；启用 `training.use_compile=true` 时仅编译 `action_decoder.model`，force predictor 始终使用 eager。
 
-触觉新训练默认使用 `limits`（Min-Max），无需额外参数。aggregate 沿时间和手指归约，dense 再归约 taxel，两个字段独立保留 XYZ 三轴极值。每轴 `scale=2/(max-min)`、`offset=-1-scale*min`；`span<1e-4` 使用 `scale=1、offset=-min`。三个参数广播为原有 `(5,3)` / `(5,120,3)` buffers。只统计 train 真实源帧，合法零值保留；不含验证集、padding、窗口重复和增强。
+触觉新训练默认使用 `limits`（Min-Max），无需额外参数。aggregate 沿时间和手指归约，dense 再归约 taxel，每次仅对选中字段保留 XYZ 三轴极值。每轴 `scale=2/(max-min)`、`offset=-1-scale*min`；`span<1e-4` 使用 `scale=1、offset=-min`。三个参数广播为原有 `(5,3)` / `(5,120,3)` buffers。只统计 train 真实源帧，合法零值保留；不含验证集、padding、窗口重复和增强。
 
 非退化拟合数据映射至 `[-1,1]`，新数据可能越界；affine 可逆且不裁剪。AdapTac 当前与未来绝对力共用完整 affine（含 offset），力扩散不裁剪。InterAct-Dex 当前输入和统计都使用原始力，未来增量直接作差后只乘 scale，offset 相消，且不受 `[-1,1]` 限制。仿真原始力为世界系；真实传感器保持原生 SDK 通道，不能宣称为世界系。本仓库不自动对齐不同来源，也不提供跨来源混训功能。字段、形状、手指顺序和存储格式保持原样；`eef_pose` 及其他几何、动作变换继续保留。
 
@@ -163,7 +169,7 @@ AdapTac 默认关闭 compile；启用 `training.use_compile=true` 时仅编译 `
 
 参考 [KineDex normalizer](https://github.com/DinoMini00/KineDex_code/blob/9246f77d7b969b181b0f1b600601b9a9c8083011/diffusion_policy/model/common/normalizer.py) 的三轴拟合方式与 [FTP-1 normalization](https://github.com/michaelyuancb/ftp1-policy/blob/89fa681d6c014cce28300946b7526db808e0b1c1/src/openpi/normalization.py) 的输入语义统计组织；不引入分位数、在线统计或额外裁剪。
 
-显式可选的 RMS/MaxAbs 分别从 train 原始标量拟合字段级 `S=sqrt(sum(x²)/N)` 或 `S=max(abs(x))`，固定执行 `x/S`，offset 为零，不裁剪；非空全零字段使用 identity affine。两字段独立统计。这些已有可选模式同样使用原始训练观测，不做触觉旋转。
+显式可选的 RMS/MaxAbs 分别从 train 原始标量拟合字段级 `S=sqrt(sum(x²)/N)` 或 `S=max(abs(x))`，固定执行 `x/S`，offset 为零，不裁剪；非空全零字段使用 identity affine。每次仅统计选中字段。这些已有可选模式同样使用原始训练观测，不做触觉旋转。
 
 ```bash
 # 合成数据：三轴统计、坐标、Patch、raw/EMA 保存及连续训练/续训对照
@@ -188,6 +194,8 @@ python -m dexmani_policy.test_tools.decoder_checks --device cpu
 python -m dexmani_policy.test_tools.observation_checks --device cpu
 python -m dexmani_policy.test_tools.hand_prior_checks --device cpu
 python -m dexmani_policy.test_tools.training_checks --device cpu
+python -m pytest dexmani_policy/test_tools/config_checks.py  # pytest 来自 pip install -e ".[test]"
+python -m dexmani_policy.test_tools.tactile_normalization_checks --device cpu
 python -m dexmani_policy.test_tools.dataset_checks
 python -m dexmani_policy.test_tools.pretrain_checks --device cpu
 # 可选：安装 [preprocess] 后检查接触标签生成
@@ -205,7 +213,21 @@ fresh 按数据事实和配方输入保存控制周期、点云配方、depth �
 
 future 标签从 query+1 的下一观测行开始，真实后继有效，重复末帧补齐后缀不计力损失或误差。零净力、力相消、reset 零值和合法 SDK hold 不代表无效；real 两通道有独立时间戳及有界 previous-valid hold，后继行不能解释为精确瞬时动作后真值。沿用现有数据时钟与 freshness 准入，不插值或补零修复。
 
-合成检查覆盖 InterAct-Dex 与 AdapTac Patch 的 limits、rms、max_abs 短训、raw/EMA 加载及续训。GPU 对照固定 CUDA/cuDNN 算法，要求模型与 EMA 权重在测试容差内一致、affine 完全一致；生产训练不承诺逐位确定性。CPU/GPU 检查及 Dataset 的 fork/spawn 检查已通过，真实触觉数据训练与任务效果仍未验证。
+合成检查覆盖 InterAct-Dex 与 AdapTac 三种 preset 的 limits、rms、max_abs 短训、raw/EMA 加载及续训。GPU 对照固定 CUDA/cuDNN 算法，要求模型与 EMA 权重在测试容差内一致、affine 完全一致；生产训练不承诺逐位确定性。本次单源改动的 CPU 与 RTX 4090 GPU 小模型检查已通过；真实触觉任务效果仍未验证。
+
+力 MSE 按有效时间数 × 力宽度取均值。Patch 编码器使用 `raw*scale`，其历史 guide 与未来目标使用同一 dense 字段的完整 `raw*scale+offset`。
+
+新 dense-only 结构与旧“dense 观测＋aggregate 未来力”checkpoint 不兼容，必须新建训练 run；不迁移或放宽严格加载。aggregate 的参数形状和数值行为保持不变。按默认宽度，dense 力预测与 guide 投影相对 15D 分支增加 16,452,345 个参数（FP32 参数约 62.76 MiB，不含梯度、优化器和 EMA）。
+
+RTX 4090（24 GiB，PyTorch 2.4.1+cu124）合成资源短测使用正式 AdapTac 网络宽度、batch 128、1024 点、N/H/C=2/16/8、FP32、EMA、compile=false，动作和力推理均为 20 步。每种 preset 独立进程执行一次预热、三次更新及有限推理，均通过；关闭数据增强、num_workers=0，计时不含 DataLoader 取数，包含训练输入搬运、backward、optimizer 和 EMA。表中为 PyTorch peak allocated（含模型、EMA 和优化器），不含桌面和其他进程占用：
+
+| preset | 首次更新峰值 GiB | 后续更新峰值 GiB | 后续更新均值 ms | B=1 推理均值 ms |
+|---|---:|---:|---:|---:|
+| force | 6.25 | 5.74 | 109.4 | 47.6 |
+| taxel | 20.38 | 6.15 | 111.3 | 47.4 |
+| patch | 6.46 | 6.12 | 113.0 | 48.1 |
+
+沿用训练入口的 cuDNN benchmark=true；taxel 首次更新的临时峰值明显高于后续更新，容量规划应保留这部分空间。这些是单卡三次采样的合成短测，不能视为真实数据吞吐、长训稳定性或方法性能比较，也不代表更小显存设备能够运行正式 batch。
 
 `taxel` 是基础 dense 选项；`patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 使用零参考输入 `u=N(x)-N(0)=x*scale`，全部活动度、区域加权力、峰值和强度描述均基于 u，活动度为 `w=||u||/(||u||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 默认 limits，也支持 RMS/MaxAbs；零参考是描述构造步骤，其结果不保证位于 `[-1,1]`。原始零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建区域索引与大小。
 

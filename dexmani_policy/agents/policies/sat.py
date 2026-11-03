@@ -34,9 +34,10 @@ class SAT(Policy):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
-        num_inference_steps: int = 10,
+        num_inference_steps: int = 5,
         qkv_bias: bool = True,
         qk_norm: bool = True,
+        time_shift_alpha: float = 1.0,
     ) -> None:
         if n_obs_steps != 2 or action_dim != 19 or hidden_dim % 4:
             raise ValueError("SAT requires n_obs_steps=2, joint action_dim=19 and hidden_dim divisible by 4")
@@ -71,7 +72,7 @@ class SAT(Policy):
             model=backbone,
             num_inference_steps=num_inference_steps,
             t_sample_mode="uniform",
-            time_shift_alpha=1.0,
+            time_shift_alpha=time_shift_alpha,
         )
         super().__init__(
             obs_encoder=obs_encoder,
@@ -81,3 +82,7 @@ class SAT(Policy):
             n_action_steps=n_action_steps,
             action_dim=action_dim,
         )
+
+    @property
+    def effective_config(self) -> dict:
+        return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha}

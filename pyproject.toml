@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 preprocess = ["open3d"]
+test = ["pytest"]
 
 [tool.setuptools.packages.find]
 where = ["."]

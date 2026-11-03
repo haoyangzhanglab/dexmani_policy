@@ -12,7 +12,8 @@ from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, CoupledDiTX, DiTX
 from dexmani_policy.agents.action_decoders.backbones.one_way_transformer import OneWayTransformer
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalResidualBlock1D, ConditionalUNet1D
-from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid, shift_time_to_noise
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.agents.policies.dp3 import DP3
@@ -40,6 +41,40 @@ def check_time(device):
             pass
         else:
             raise AssertionError(f"Accepted invalid FP32 beta concentration: {value}")
+
+
+def check_flow_time_shift(device):
+    uniform = torch.tensor([0., .25, .5, .75, 1.], device=device)
+    shifted = torch.tensor([0., .1, .25, .5, 1.], device=device)
+    torch.testing.assert_close(shift_time_to_noise(uniform, 1), uniform, rtol=0, atol=0)
+    torch.testing.assert_close(shift_time_to_noise(uniform, 3), shifted)
+    assert (shifted[1:-1] < uniform[1:-1]).all()
+
+    class Velocity(torch.nn.Module):
+        def forward(self, x, timestep, context):
+            self.inputs = (x, timestep)
+            return torch.full_like(x, 2.)
+
+    target = torch.arange(30, device=device).reshape(5, 2, 3).float() / 10
+    noise = torch.full_like(target, -0.5)
+    for alpha, expected_time in ((1., uniform), (3., shifted)):
+        model = Velocity()
+        decoder = RectifiedFlow(model, t_sample_mode="uniform", time_shift_alpha=alpha)
+        with patch.object(decoder.time_sampler, "sample", return_value=uniform) as sample, \
+             patch("torch.randn_like", return_value=noise):
+            loss, _ = decoder.compute_loss(torch.zeros(5, 4, device=device), target)
+        sample.assert_called_once_with(5, "uniform", device=target.device)
+        xt, timestep = model.inputs
+        torch.testing.assert_close(timestep, expected_time)
+        torch.testing.assert_close(xt, noise * (1 - expected_time[:, None, None]) + target * expected_time[:, None, None])
+        torch.testing.assert_close(loss, F.mse_loss(torch.full_like(target, 2.), target - noise))
+    for alpha in (0., .5, float("nan"), float("inf")):
+        try:
+            RectifiedFlow(Velocity(), time_shift_alpha=alpha)
+        except ValueError as error:
+            assert "time_shift_alpha" in str(error)
+        else:
+            raise AssertionError(f"Accepted invalid time shift: {alpha}")
 
 
 def check_precision(device):
@@ -291,7 +326,7 @@ def main():
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_time, check_precision, check_decoder_precision, check_token_decoders,
+    for check in (check_time, check_flow_time_shift, check_precision, check_decoder_precision, check_token_decoders,
                   check_unet_conditioning, check_ddim_clipping, check_policies):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)

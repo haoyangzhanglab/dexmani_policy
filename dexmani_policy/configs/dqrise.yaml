@@ -73,11 +73,12 @@ agent:
   qk_norm: false
   timestep_embed_dim: 128
 
-  num_inference_steps: 10
+  num_inference_steps: 5
+  time_shift_alpha: 3.0  # Training only; >1 shifts uniform samples toward noise (t=0).
 
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-6
+  weight_decay: 1.0e-3
   betas: [0.95, 0.999]
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6

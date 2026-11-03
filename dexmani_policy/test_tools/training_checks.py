@@ -307,11 +307,145 @@ def check_sim_construction(_device):
             assert not errors.getvalue()
 
 
+def check_flow_recipes(device):
+    for method, flow_dim in (("sat", 19), ("dqrise", 8), ("dexlatent", 39)):
+        defaults = load_policy_config(method)
+        assert (defaults.n_obs_steps, defaults.horizon, defaults.n_action_steps) == (2, 16, 8)
+        assert (defaults.agent.n_layers, defaults.agent.hidden_dim, defaults.dataloader.batch_size) == (6, 768, 128)
+        assert defaults.training.loop.total_train_steps == 100000
+        overrides = [
+            "workspace.output_dir=/tmp/flow-recipe-check", "training.use_compile=false",
+            "agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=4", "agent.timestep_embed_dim=32",
+            "agent.p_drop_attn=0", "agent.num_points=16", "agent.pc_encoder_config.channels=24",
+            "agent.pc_encoder_config.num_patches=4", "agent.pc_encoder_config.group_size=4",
+            "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4",
+            "agent.fps_random_config.use_random=false", "agent.rgb_backbone_config.image_size=[28,28]",
+            "+agent.rgb_backbone_config.architecture={model_type:dinov2,hidden_size:24,"
+            "intermediate_size:48,num_hidden_layers:1,num_attention_heads:4,image_size:28,patch_size:14}",
+        ]
+        if method == "dqrise":
+            overrides += ["+agent.num_codes=3"]
+        cfg = load_policy_config(method, overrides)
+        policy = hydra.utils.instantiate(cfg.agent, _convert_="all")
+        assert cfg.agent.num_inference_steps == cfg.eval.inference_steps == policy.action_decoder.num_inference_steps == 5
+        assert policy.action_decoder.t_sample_mode == "uniform"
+        assert policy.action_decoder.time_shift_alpha == policy.effective_config["time_shift_alpha"] == 3.
+        assert policy.action_decoder.time_sampler.num_steps == 4
+        assert policy.obs_encoder.effective_config.items() <= policy.effective_config.items()
+        if method == "dqrise":
+            policy.hand_codebook.sorted_hand_poses.copy_(torch.linspace(-1, 1, 36).reshape(3, 12))
+            assert policy.effective_config["num_codes"] == 3
+        dims = dict(joint_state=19, point_cloud=3, rgb=3, camera_intrinsic=9, camera_extrinsic=12, action=19)
+        shapes = {key: shape for key, shape in normalization_feature_shapes(dims).items()
+                  if cfg.normalization[key] != "identity"}
+        if method == "dexlatent":
+            shapes["hand_latent"] = (32,)
+        policy.configure_normalizer(dims, shapes)
+        policy.to(device)
+        obs = dict(joint_state=torch.randn(2, 2, 19, device=device),
+                   point_cloud=torch.randn(2, 2, 16, 3, device=device) * .05,
+                   rgb=torch.randint(256, (2, 2, 3, 28, 28), dtype=torch.uint8, device=device),
+                   camera_intrinsic=torch.tensor([20., 0., 13.5, 0., 20., 13.5, 0., 0., 1.], device=device).expand(2, 2, 9),
+                   camera_extrinsic=torch.eye(4, device=device)[:3].flatten().expand(2, 2, 12))
+        obs["point_cloud"][..., 2] += 1
+        optimizer = build_optimizer(policy, **cfg.optimizer)
+        grouped = set()
+        decay_sides = set()
+        for group in optimizer.param_groups:
+            assert group["lr"] == 1e-4 and tuple(group["betas"]) == (.95, .999)
+            for name, param in zip(group["param_names"], group["params"]):
+                assert param.requires_grad and id(param) not in grouped
+                grouped.add(id(param))
+                side = "obs" if name.startswith("obs_encoder.") else "action"
+                assert side == "obs" or name.startswith("action_decoder.")
+                owner, field = name.rsplit(".", 1)
+                module = policy.get_submodule(owner)
+                if isinstance(module, (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d,
+                                       torch.nn.MultiheadAttention)) and field.endswith("weight"):
+                    assert group["weight_decay"] == (1e-6 if side == "obs" else 1e-3)
+                    decay_sides.add(side)
+                else:
+                    assert group["weight_decay"] == 0, (name, type(module), group["weight_decay"])
+        assert decay_sides == {"obs", "action"}
+        assert grouped == {id(p) for p in policy.parameters() if p.requires_grad}
+        assert any(not p.requires_grad for p in policy.obs_encoder.rgb_encoder.parameters())
+        batch = dict(obs=obs, action=torch.randn(2, 16, 19, device=device))
+        with patch.object(policy.action_decoder, "compute_loss", wraps=policy.action_decoder.compute_loss) as flow:
+            loss, _ = policy.compute_loss(batch)
+        assert flow.call_args.args[1].shape == (2, 16, flow_dim)
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.action_decoder.parameters())
+        assert all(torch.isfinite(p.grad).all() for p in policy.parameters() if p.grad is not None)
+        assert all(p.grad is None for p in policy.parameters() if not p.requires_grad)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        policy.eval()
+        forward = policy.action_decoder.model.forward
+        for steps in (None, 7):
+            reference = None
+            for alpha in (1., 3.):
+                policy.action_decoder.time_shift_alpha = alpha
+                evaluations = []
+
+                def velocity(**kwargs):
+                    result = forward(**kwargs)
+                    evaluations.append((kwargs["x"].clone(), kwargs["timestep"].clone(), result.clone()))
+                    return result
+
+                with patch.object(policy.action_decoder.model, "forward", side_effect=velocity):
+                    prediction = policy.predict_action(obs, inference_steps=steps,
+                                                       generator=torch.Generator(device=device).manual_seed(19))
+                count = steps or 5
+                assert len(evaluations) == count
+                for index, (state, time, value) in enumerate(evaluations):
+                    torch.testing.assert_close(time, torch.full_like(time, index / count), rtol=0, atol=0)
+                    if index + 1 < count:
+                        torch.testing.assert_close(evaluations[index + 1][0], state + value / count)
+                assert prediction["future_actions"].shape == (2, 15, 19)
+                assert prediction["future_actions"][:, :policy.n_action_steps].shape == (2, 8, 19)
+                assert torch.isfinite(prediction["future_actions"]).all()
+                if reference is not None:
+                    torch.testing.assert_close(prediction, reference, rtol=0, atol=0)
+                reference = prediction
+        effective = assemble_effective_config(cfg, {"deployment_metadata": {}}, policy)
+        assert effective.agent.time_shift_alpha == 3.
+        with tempfile.TemporaryDirectory(prefix="dexmani-flow-recipe-") as temporary:
+            for legacy in (False, True):
+                saved_cfg = OmegaConf.to_container(effective, resolve=True)
+                state = copy.deepcopy(optimizer.state_dict())
+                if legacy:
+                    saved_cfg["agent"].pop("time_shift_alpha")
+                    saved_cfg["agent"]["num_inference_steps"] = saved_cfg["eval"]["inference_steps"] = 10
+                    saved_cfg["optimizer"]["weight_decay"] = 1e-6
+                    for group in state["param_groups"]:
+                        if group["weight_decay"]:
+                            group["weight_decay"] = 1e-6
+                path = save_checkpoint(Path(temporary) / f"{legacy}.pt", Checkpoint(
+                    1, policy.state_dict(), None, state, {}, {}, saved_cfg))
+                restored = restore_policy(path, use_ema=False, device=device)
+                assert restored.action_decoder.time_shift_alpha == (1. if legacy else 3.)
+                assert restored.action_decoder.num_inference_steps == (10 if legacy else 5)
+                torch.testing.assert_close(restored.state_dict(), policy.state_dict(), rtol=0, atol=0)
+                restored_optimizer = build_optimizer(restored, **cfg.optimizer)
+                restored_optimizer.load_state_dict(load_checkpoint(path).optimizer_state)
+                restored_state = restored_optimizer.state_dict()
+                assert restored_state["param_groups"] == state["param_groups"]
+                torch.testing.assert_close(restored_state["state"], state["state"], rtol=0, atol=0)
+                expected = policy.predict_action(obs, inference_steps=10 if legacy else None,
+                                                 generator=torch.Generator(device=device).manual_seed(19))
+                actual = restored.predict_action(obs, generator=torch.Generator(device=device).manual_seed(19))
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        override = load_policy_config(method, ["agent.time_shift_alpha=2.0", "agent.num_inference_steps=3"])
+        assert override.agent.time_shift_alpha == 2. and override.eval.inference_steps == 3
+        print(f"PASS {method}: LBS, 5-step Euler, optimizer groups, loss/backward and checkpoint restore", flush=True)
+
+
 def check_policy_roundtrips(device):
     for method, auxiliary in (("dp", False), ("afro", False), ("maniflow", False),
                               ("dexlatent", False), ("cordvip", False), ("adaptac", False), ("interact_dex", False),
                               ("sat", False), ("r3d", False), ("r3d", True)):
-        overrides = ["horizon=8", "n_action_steps=2", "agent.num_inference_steps=2"]
+        overrides = [] if method == "cordvip" else ["horizon=8", "n_action_steps=2", "agent.num_inference_steps=2"]
         if method not in ("r3d", "cordvip", "afro", "dp"):
             overrides += ["agent.pc_dim=3"]
         if method in ("interact_dex", "sat", "dexlatent", "maniflow"):
@@ -731,14 +865,15 @@ def check_configs(_device):
         validate_normalization(cfg)
         assert cfg.dataset.max_train_episodes is None
         if method == "adaptac":
-            assert "finger_tactile_force" in cfg.dataset.sensor_modalities
-            if any(value in overrides for value in ("tactile=taxel", "tactile=patch")):
-                assert "taxel_tactile_force" in cfg.dataset.sensor_modalities
+            assert (cfg.n_obs_steps, cfg.horizon, cfg.n_action_steps) == (2, 16, 8)
+            assert (cfg.agent.n_obs_steps, cfg.agent.horizon, cfg.agent.n_action_steps, cfg.agent.action_dim) == (2, 16, 8, 19)
+            assert (cfg.dataset.obs_horizon, cfg.dataset.horizon, cfg.dataset.pad_before, cfg.dataset.pad_after) == (2, 16, 1, 7)
+            assert (cfg.agent.num_inference_steps, cfg.agent.force_num_inference_steps) == (20, 20)
+            assert (cfg.dataloader.batch_size, cfg.training.loop.gradient_accumulation_steps,
+                    cfg.training.loop.total_train_steps) == (128, 1, 100000)
         if method in ("adaptac", "interact_dex"):
-            assert cfg.normalization.finger_tactile_force == "limits"
-            if "taxel_tactile_force" in cfg.normalization:
-                assert cfg.normalization.taxel_tactile_force == "limits"
             encoder = hydra.utils.instantiate(cfg.agent.tactile_encoder)
+            assert cfg.normalization[encoder.input_key] == "limits"
             assert encoder.input_key in cfg.dataset.sensor_modalities
             assert (encoder.num_tokens, encoder.out_dim) == (5, 64)
             if method == "interact_dex":
@@ -948,7 +1083,7 @@ def main():
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_evaluation, check_sim_construction, check_policy_roundtrips, check_configs, check_training_resume, check_nonfinite_group, check_training_lifecycle,):
+    for check in (check_evaluation, check_sim_construction, check_flow_recipes, check_policy_roundtrips, check_configs, check_training_resume, check_nonfinite_group, check_training_lifecycle,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

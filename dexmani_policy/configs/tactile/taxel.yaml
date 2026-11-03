@@ -3,7 +3,6 @@ agent:
   tactile_encoder:
     _target_: dexmani_policy.agents.obs_encoder.xhand_tactile.XHandTaxelEncoder
 dataset:
-  sensor_modalities: [joint_state, point_cloud, finger_tactile_force, taxel_tactile_force]
+  sensor_modalities: [joint_state, point_cloud, taxel_tactile_force]
 normalization:
-  finger_tactile_force: limits
   taxel_tactile_force: limits

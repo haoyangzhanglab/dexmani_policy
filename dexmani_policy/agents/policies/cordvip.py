@@ -39,9 +39,9 @@ class CordViP(Policy):
 
     def __init__(
         self,
-        horizon: int = 12,
-        n_obs_steps: int = 4,
-        n_action_steps: int = 6,
+        horizon: int = 16,
+        n_obs_steps: int = 3,
+        n_action_steps: int = 8,
         action_dim: int = 19,
         down_dims: tuple[int, ...] = (512, 1024, 2048),
         diffusion_step_embed_dim: int = 64,

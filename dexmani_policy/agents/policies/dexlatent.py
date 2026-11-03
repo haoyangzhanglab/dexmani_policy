@@ -38,7 +38,8 @@ class DexLatent(Policy):
         qk_norm: bool = True,
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
-        num_inference_steps: int = 10,
+        num_inference_steps: int = 5,
+        time_shift_alpha: float = 1.0,
     ) -> None:
         if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DexLatent requires two observations and 19D joint actions/state")
@@ -72,7 +73,7 @@ class DexLatent(Policy):
             model=backbone,
             num_inference_steps=num_inference_steps,
             t_sample_mode="uniform",
-            time_shift_alpha=1.0,
+            time_shift_alpha=time_shift_alpha,
         )
         super().__init__(
             obs_encoder=obs_encoder,
@@ -83,6 +84,10 @@ class DexLatent(Policy):
             action_dim=action_dim,
         )
         self.hand_prior = DexLatentHandPrior()
+
+    @property
+    def effective_config(self) -> dict:
+        return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha}
 
     @torch.no_grad()
     def _encode_actions(self, actions) -> tuple[torch.Tensor, torch.Tensor]:

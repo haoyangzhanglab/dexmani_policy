@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,7 +73,7 @@ def check_tactile(device):
 
     from dexmani_policy.env_runner.sim_runner import SimRunner
 
-    runner = SimRunner("unused", 1, ["joint_state", "point_cloud", "finger_tactile_force", "taxel_tactile_force"], {})
+    runner = SimRunner("unused", 1, ["joint_state", "point_cloud", "taxel_tactile_force"], {})
     with patch.object(runner, "make_env", side_effect=AssertionError("Created environment for dense tactile")):
         try:
             next(runner.run(policy, seeds=[1], inference_steps=2, action_steps=2))
@@ -191,7 +192,7 @@ def check_adaptac(device):
     from dexmani_policy.evaluation import rollout
 
     cfg = load_policy_config("adaptac", [
-        "horizon=8", "n_action_steps=8", "agent.num_points=32",
+        "horizon=8", "n_obs_steps=1", "n_action_steps=8", "agent.num_points=32",
         "agent.pc_encoder_config.channels=24", "agent.pc_encoder_config.num_patches=12",
         "agent.pc_encoder_config.group_size=8", "agent.pc_encoder_config.depth=1",
         "agent.pc_encoder_config.num_heads=4", "agent.feature_dim=32", "agent.state_out_dim=8",
@@ -287,6 +288,140 @@ def check_adaptac(device):
             assert record["force_inference_steps"] == force_steps
             assert record["action_steps"] == 8
             assert json.loads(path.read_text()) == json.loads(json.dumps(record))
+
+
+def check_adaptac_history(device):
+    cfg = load_policy_config("adaptac")
+    with torch.device("meta"):
+        default = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    assert default.force_predictor.model.cond_obs_emb.in_features == 2048
+    assert default.force_predictor.model.pos_emb.shape == (1, 15, 256)
+    assert default.force_predictor.model.cond_pos_emb.shape == (1, 2, 256)
+    assert default.force_fusion.visual_proj.in_features == default.force_fusion.tactile_proj.in_features == 1024
+    assert default.force_fusion.force_proj.in_features == 255
+    assert default.action_decoder.model.down_modules[0][0].cond_encoder.get_submodule("1").in_features == 256 + 640
+    for kind, history in (("force", 2), ("taxel", 2), ("patch", 2), ("force", 3)):
+        cfg = load_policy_config("adaptac", [
+            f"tactile={kind}", f"n_obs_steps={history}", "agent.pc_dim=3", "agent.num_points=16",
+            "agent.pc_encoder_config.channels=24", "agent.pc_encoder_config.num_patches=4",
+            "agent.pc_encoder_config.group_size=4", "agent.pc_encoder_config.depth=1",
+            "agent.pc_encoder_config.num_heads=4", "agent.feature_dim=16", "agent.state_out_dim=8",
+            "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=32",
+            "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=16",
+            "agent.force_predictor_config.dropout=0", "agent.fusion_dropout=0",
+            "agent.fps_random_config.use_random=false", "dataset.augmentation_cfg=null",
+        ])
+        policy = hydra.utils.instantiate(cfg.agent, _convert_="all").to(device).eval()
+        key = policy.force_key
+        dims = dict(joint_state=19, point_cloud=3, action=19, **{key: policy.force_dim})
+        obs = dict(joint_state=torch.randn(2, history, 19, device=device),
+                   point_cloud=torch.randn(2, history, 16, 3, device=device),
+                   **{key: torch.randn(2, history, *policy.force_shape, device=device)})
+        policy.configure_normalizer(dims, {key: shape for key, shape in normalization_feature_shapes(dims).items()
+                                          if cfg.normalization[key] != "identity"})
+        policy.to(device)
+        for field in policy.normalizer.fields.values():
+            field.scale.fill_(0.7)
+            field.offset.fill_(-0.3)
+        assert (policy.horizon, policy.action_start_index, policy.future_steps) == (16, history - 1, 17 - history)
+        assert policy.force_predictor.model.cond_obs_emb.in_features == 2 * history * 16
+        assert policy.force_predictor.model.cond_pos_emb.shape == (1, 2, 16)
+        assert policy.force_fusion.visual_proj.in_features == policy.force_fusion.tactile_proj.in_features == history * 16
+        assert policy.force_fusion.force_proj.in_features == 17 * policy.force_dim
+
+        markers = 10 * torch.arange(1, 3, device=device)[:, None] + torch.arange(history, device=device)
+        marked = {**obs, "joint_state": markers[..., None].expand(2, history, 19).float()}
+        frame_features = tuple(markers.flatten()[:, None].expand(-1, width).float() + shift
+                               for width, shift in ((16, 0), (16, 100), (8, 200)))
+        with patch.object(policy.obs_encoder, "forward", return_value=frame_features) as encoder:
+            features, current, condition = policy._encode_force_inputs(marked)
+        encoder.assert_called_once()
+        torch.testing.assert_close(encoder.call_args.args[0]["joint_state"],
+                                   policy.normalizer["joint_state"].normalize(marked["joint_state"]).flatten(0, 1))
+        for actual, width, shift in zip(features, (16, 16, 8), (0, 100, 200)):
+            expected = torch.stack([torch.cat([torch.full((width,), value + shift, device=device)
+                                               for value in row]) for row in markers])
+            torch.testing.assert_close(actual, expected.float(), rtol=0, atol=0)
+        torch.testing.assert_close(condition, torch.cat(features[:2], -1).unsqueeze(1))
+        torch.testing.assert_close(current, policy.normalizer[key].normalize(
+            obs[key]).flatten(start_dim=2))
+
+        with torch.no_grad():
+            features, current, condition = policy._encode_force_inputs(obs)
+            assert [tuple(value.shape) for value in features] == [(2, history * 16), (2, history * 16), (2, history * 8)]
+            assert condition.shape == (2, 1, 2 * history * 16)
+            for changed_key, branch, width in (("point_cloud", 0, 16),
+                                       (policy.obs_encoder.tactile_encoder.input_key, 1, 16),
+                                       ("joint_state", 2, 8)):
+                changed = {name: value.clone() for name, value in obs.items()}
+                changed[changed_key][:, 0] += torch.randn_like(changed[changed_key][:, 0])
+                altered, _, _ = policy._encode_force_inputs(changed)
+                assert not torch.allclose(altered[branch][:, :width], features[branch][:, :width])
+                torch.testing.assert_close(altered[branch][:, width:], features[branch][:, width:], rtol=0, atol=0)
+            if kind == "patch":
+                raw = obs["taxel_tactile_force"]
+                torch.testing.assert_close(policy._preprocess_obs(obs)["taxel_tactile_force"],
+                                           (raw * policy.normalizer["taxel_tactile_force"].scale).flatten(0, 1))
+
+        predicted = torch.arange(2 * policy.future_steps * policy.force_dim, device=device).reshape(2, policy.future_steps, policy.force_dim).float()
+        with patch.object(policy.force_fusion, "forward", wraps=policy.force_fusion.forward) as fusion:
+            action_condition = policy._action_condition(features, current, predicted)
+        assert action_condition.shape == (2, 16 + history * 8)
+        torch.testing.assert_close(fusion.call_args.args[2], torch.cat((current, predicted), 1).flatten(1))
+        valid = torch.ones(2, policy.future_steps, dtype=torch.bool, device=device)
+        valid[1, -3:] = False
+        batch = dict(obs=obs, action=torch.randn(2, 16, 19, device=device),
+                     future_force=torch.randn(2, policy.future_steps, *policy.force_shape, device=device),
+                     future_force_valid=valid)
+        target = policy.normalizer[key].normalize(batch["future_force"]).flatten(start_dim=2)
+        with patch.object(policy.force_predictor.model, "forward", return_value=target + 0.5):
+            force_loss, _ = policy.force_predictor.compute_loss_and_prediction(condition, target, valid)
+        torch.testing.assert_close(force_loss, torch.tensor(0.25, device=device))
+        for weight in (1., 0.):
+            policy.force_loss_weight = weight
+            policy.zero_grad(set_to_none=True)
+            with patch.object(policy.force_predictor, "compute_loss_and_prediction",
+                              wraps=policy.force_predictor.compute_loss_and_prediction) as force:
+                loss, metrics = policy.compute_loss(batch)
+            assert torch.isfinite(loss)
+            torch.testing.assert_close(force.call_args.args[1],
+                                       policy.normalizer[key].normalize(batch["future_force"]).flatten(start_dim=2))
+            loss.backward()
+            assert all(torch.isfinite(p.grad).all() for p in policy.parameters() if p.grad is not None)
+            assert policy.force_predictor.model.head.weight.grad.abs().sum() > 0
+            if weight == 0:
+                assert metrics["loss_force_weighted"] == 0
+                try:
+                    policy.compute_loss({key: value for key, value in batch.items() if key != "future_force"})
+                except KeyError as error:
+                    assert error.args == ("future_force",)
+                else:
+                    raise AssertionError("Zero force weight bypassed future labels")
+        policy.force_loss_weight = cfg.agent.force_loss_weight
+        policy.zero_grad(set_to_none=True)
+        expected = policy.predict_action(obs, generator=torch.Generator(device=device).manual_seed(91))
+        future = expected["future_actions"]
+        assert future.shape == (2, policy.future_steps, 19) and torch.isfinite(future).all()
+        assert future[:, :policy.n_action_steps].shape == (2, 8, 19)
+        indexed = torch.arange(16, device=device)[None, :, None].expand(2, 16, 19)
+        torch.testing.assert_close(policy._action_output(indexed)["future_actions"][:, :8],
+                                   indexed[:, history - 1:history + 7])
+
+        ema = copy.deepcopy(policy)
+        with torch.no_grad():
+            ema.force_predictor.model.head.bias.add_(0.1)
+        config = dict(agent={**OmegaConf.to_container(cfg.agent, resolve=True), **policy.effective_config},
+                      normalization_dims=dims, normalization=OmegaConf.to_container(cfg.normalization))
+        with tempfile.TemporaryDirectory(prefix="dexmani-adaptac-history-") as temporary:
+            path = save_checkpoint(Path(temporary) / "model.pt", Checkpoint(
+                1, policy.state_dict(), ema.state_dict(), {}, {}, {}, config))
+            for use_ema, original in ((False, policy), (True, ema)):
+                restored = restore_policy(path, use_ema=use_ema, device=device)
+                torch.testing.assert_close(restored.state_dict(), original.state_dict(), rtol=0, atol=0)
+                actual = restored.predict_action(obs, generator=torch.Generator(device=device).manual_seed(91))
+                reference = original.predict_action(obs, generator=torch.Generator(device=device).manual_seed(91))
+                torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+        print(f"PASS AdapTac {kind} N={history}: history, affine, gradients, inference, raw/EMA", flush=True)
 
 
 def check_rgb(device):
@@ -709,9 +844,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
     args = parser.parse_args()
+    if args.device.type == "cuda":
+        # Exact history/replay comparisons require deterministic CUDA kernels.
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_fps, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
+    for check in (check_fps, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_adaptac_history, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

@@ -44,7 +44,8 @@ class DQRISE(Policy):
         qk_norm: bool = True,
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
-        num_inference_steps: int = 10,
+        num_inference_steps: int = 5,
+        time_shift_alpha: float = 1.0,
     ) -> None:
         if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DQ-RISE requires n_obs_steps=2 and joint action=7+12")
@@ -78,7 +79,7 @@ class DQRISE(Policy):
             model=backbone,
             num_inference_steps=num_inference_steps,
             t_sample_mode="uniform",
-            time_shift_alpha=1.0,
+            time_shift_alpha=time_shift_alpha,
         )
         super().__init__(
             obs_encoder=obs_encoder,
@@ -95,7 +96,11 @@ class DQRISE(Policy):
 
     @property
     def effective_config(self) -> dict:
-        return {**super().effective_config, "num_codes": self.hand_codebook.num_codes}
+        return {
+            **super().effective_config,
+            "num_codes": self.hand_codebook.num_codes,
+            "time_shift_alpha": self.action_decoder.time_shift_alpha,
+        }
 
     def initialize_training(self, data_description, codebook) -> None:
         validate_hand_coordinates(data_description["hand_coordinates"])

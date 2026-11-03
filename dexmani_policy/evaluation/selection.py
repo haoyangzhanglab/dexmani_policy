@@ -14,6 +14,17 @@ def candidate_score(candidate):
     return (stats["success_rate"], -(steps if steps is not None else float("inf")), candidate["global_step"])
 
 
+def _environment_conditions(config):
+    runner = config["env_runner"]
+    # Match SimRunner's defaults; all other kwargs pass through to dexmani_sim.
+    kwargs = {"render_mode": "rgb_array", **(runner.get("env_kwargs") or {})}
+    return {
+        "env_runner.task_name": runner["task_name"],
+        "env_runner.env_rebuild_interval": runner.get("env_rebuild_interval", 25),
+        **{f"env_runner.env_kwargs.{key}": value for key, value in kwargs.items()},
+    }
+
+
 def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_steps=None,
                  selection_episodes=25, test_episodes=100, seed=1024, device="cuda:0",
                  video=True, output_dir=None):
@@ -24,7 +35,26 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
         if not checkpoint.is_file():
             raise ValueError(f"Checkpoint must be a file: {checkpoint}")
     root = checkpoints[0].parent.parent
-    cfg = load_checkpoint(checkpoints[0]).effective_config
+    loaded = load_checkpoint(checkpoints[0])
+    cfg = loaded.effective_config
+    del loaded
+    baseline = _environment_conditions(cfg)
+    for checkpoint in checkpoints[1:]:
+        loaded = load_checkpoint(checkpoint)
+        conditions = _environment_conditions(loaded.effective_config)
+        del loaded
+        differences = []
+        for field in sorted(baseline.keys() | conditions.keys()):
+            if field in baseline and field in conditions and baseline[field] == conditions[field]:
+                continue
+            expected = repr(baseline[field]) if field in baseline else "<unspecified>"
+            actual = repr(conditions[field]) if field in conditions else "<unspecified>"
+            differences.append(f"{field}: {expected} != {actual}")
+        if differences:
+            raise ValueError(
+                f"Environment conditions differ between baseline checkpoint {checkpoints[0]} "
+                f"and candidate checkpoint {checkpoint}: {'; '.join(differences)}"
+            )
     weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
     if weights not in {"raw", "ema"}:
         raise ValueError("weights must be raw or ema")

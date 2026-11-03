@@ -3,6 +3,7 @@
 import argparse
 import copy
 import os
+import shutil
 import tempfile
 from contextlib import closing
 from pathlib import Path
@@ -10,11 +11,13 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
+import zarr
 
 from dexmani_policy.common.checkpoint import _restore_policy, load_checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 from dexmani_policy.common.normalizer import normalizer_shapes_from_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
+from dexmani_policy.deployment import inspect_policy, load_policy
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.test_tools.dataset_checks import make_source
 from dexmani_policy.training.common.config import load_policy_config
@@ -102,7 +105,8 @@ def check_affine_validation():
 def check_unshared_affine_restore(saved, directory, device):
     checkpoint = copy.deepcopy(saved)
     for index, state in enumerate((checkpoint.model_state, checkpoint.ema_model_state)):
-        for key, shape in TACTILE_FEATURE_SHAPES.items():
+        for key in TACTILE_FEATURE_SHAPES.keys() & checkpoint.effective_config["normalization"].keys():
+            shape = TACTILE_FEATURE_SHAPES[key]
             prefix = f"normalizer.fields.{key}."
             values = torch.arange(int(np.prod(shape)), dtype=torch.float32).reshape(shape) / 1000
             state[prefix + "scale"] = values + .5 + index
@@ -155,20 +159,20 @@ def config(method, source, output, mode="limits", kind="force", device="cpu"):
                  f"training.device={device}", "training.use_compile=false", "training.lr_warmup_steps=0",
                  "training.loop.total_train_steps=4", "training.loop.log_interval_steps=10",
                  "dataloader.batch_size=2", "dataloader.num_workers=0", "dataloader.pin_memory=false",
-                 "dataset.augmentation_cfg=null", "horizon=4", "n_action_steps=2",
+                 "dataset.augmentation_cfg=null",
                  "agent.num_points=16", "agent.pc_encoder_config.channels=24",
                  "agent.pc_encoder_config.num_patches=12", "agent.pc_encoder_config.group_size=4",
-                 "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4",
-                 "agent.num_inference_steps=2", f"normalization.finger_tactile_force={mode}"]
+                 "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4"]
     if method == "adaptac":
         overrides += [f"tactile={kind}", "agent.feature_dim=16", "agent.state_out_dim=8",
                       "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=32",
-                      "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=16",
-                      "agent.force_num_inference_steps=2"]
-        if kind != "force":
-            overrides += [f"normalization.taxel_tactile_force={mode}"]
+                      "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=16"]
+        key = "finger_tactile_force" if kind == "force" else "taxel_tactile_force"
+        overrides += [f"normalization.{key}={mode}"]
     else:
-        overrides += ["n_obs_steps=2", "interaction_horizon=1", "agent.n_layers=1",
+        overrides += ["horizon=4", "n_action_steps=2", "agent.num_inference_steps=2",
+                      f"normalization.finger_tactile_force={mode}", "n_obs_steps=2",
+                      "interaction_horizon=1", "agent.n_layers=1",
                       "agent.hidden_dim=32", "agent.n_head=4", "agent.timestep_embed_dim=32"]
     return load_policy_config(method, overrides)
 
@@ -231,79 +235,113 @@ def check_training(root, device="cpu"):
             group[f"data/{key}"][:] = values
     torch.testing.assert_close(states[0], states[1], rtol=0, atol=0)
     cases = [(method, kind, mode)
-             for method, kind in (("interact_dex", "force"), ("adaptac", "patch"))
+             for method, kind in (("interact_dex", "force"), ("adaptac", "force"), ("adaptac", "taxel"), ("adaptac", "patch"))
              for mode in ("limits", "rms", "max_abs")]
     for method, kind, mode in cases:
-        cfg = config(method, source, root / f"{method}-{kind}-{mode}", mode, kind, device)
-        trainer = build_trainer(cfg)
-        initial_rng = get_rng_state(device)
-        model = trainer.model
-        field = model.normalizer["finger_tactile_force"]
-        obs = {k: torch.tensor(group[f"data/{k}"][:cfg.n_obs_steps], device=device)[None]
-               for k in cfg.dataset.sensor_modalities}
-        original = {k: v.clone() for k, v in obs.items()}
-        processed = model._preprocess_obs(obs)
-        raw = obs["finger_tactile_force"]
-        torch.testing.assert_close(processed["finger_tactile_force"], field.normalize(raw).flatten(0, 1))
-        torch.testing.assert_close(obs, original, rtol=0, atol=0)
-        if method == "interact_dex":
-            if mode == "limits":
-                assert field.offset.abs().sum() > 0
-                z = field.normalize(torch.tensor(force, dtype=torch.float32, device=device))
-                torch.testing.assert_close(z.amin((0, 1)), -torch.ones(3, device=device))
-                torch.testing.assert_close(z.amax((0, 1)), torch.ones(3, device=device))
-            check_force_targets(model, obs)
-        else:
-            encoder = model.obs_encoder.tactile_encoder
-            for value in (0., 2.):
-                obs["taxel_tactile_force"] = torch.full_like(obs["taxel_tactile_force"], value, requires_grad=True)
-                u = model._preprocess_obs(obs)["taxel_tactile_force"]
-                expected = obs["taxel_tactile_force"] * model.normalizer["taxel_tactile_force"].scale
-                torch.testing.assert_close(u, expected.flatten(0, 1), rtol=0, atol=0)
-                desc = encoder._patch_descriptors(u)
-                assert bool(desc.abs().sum() > 0) == bool(value)
-                desc.sum().backward()
-                assert torch.isfinite(obs["taxel_tactile_force"].grad).all()
-            batch = dict_apply(next(iter(trainer.train_loader)), lambda x: x.to(device))
-            with patch.object(model.force_predictor, "compute_loss_and_prediction", wraps=model.force_predictor.compute_loss_and_prediction) as call, \
-                 patch.object(model, "_action_condition", wraps=model._action_condition) as condition:
-                model.compute_loss(batch)
-            torch.testing.assert_close(call.call_args.args[1], field.normalize(batch["future_force"]).flatten(-2))
-            torch.testing.assert_close(condition.call_args.args[1], field.normalize(batch["obs"]["finger_tactile_force"]).flatten(-2))
-        set_rng_state(initial_rng, device)
-        assert run_reproducible_training(trainer, max_updates=2) == 2
-        checkpoint = Path(cfg.workspace.output_dir) / "checkpoints/latest.pt"
-        saved = load_checkpoint(checkpoint)
-        for ema in (False, True):
-            restored = restore_policy(checkpoint, use_ema=ema, device=device)
-            torch.testing.assert_close(restored.normalizer.state_dict(), model.normalizer.state_dict(), rtol=0, atol=0)
-            if method == "interact_dex" and mode == "limits":
-                output = restored.predict_action(obs)["future_actions"]
-                assert output.shape == (1, cfg.horizon - cfg.n_obs_steps + 1, 19)
-                assert torch.isfinite(output).all()
-                torch.testing.assert_close(restored.normalizer.state_dict(), model.normalizer.state_dict(), rtol=0, atol=0)
-        with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
-            resumed = prepare_resume(cfg.workspace.output_dir, device=str(device))
-        assert run_reproducible_training(resumed, max_updates=1) == 3
-        continuous_cfg = config(method, source, root / f"continuous-{method}-{mode}", mode, kind, device)
-        continuous = build_trainer(continuous_cfg)
-        assert run_reproducible_training(continuous, max_updates=3) == 3
-        for expected, actual in ((continuous.model, resumed.model), (continuous.ema_model, resumed.ema_model)):
-            expected_state, actual_state = expected.state_dict(), actual.state_dict()
-            torch.testing.assert_close(expected_state, actual_state, rtol=1e-6, atol=1e-7)
-            torch.testing.assert_close(expected.normalizer.state_dict(), actual.normalizer.state_dict(), rtol=0, atol=0)
-        for key in TACTILE_FEATURE_SHAPES.keys() & model.normalization_dims.keys():
-            prefix = f"normalizer.fields.{key}."
-            broken = {name: value for name, value in saved.model_state.items() if not name.startswith(prefix)}
-            try:
-                _restore_policy(saved.effective_config, broken, device)
-            except ValueError as error:
-                assert key in str(error) and "Missing required tactile affine" in str(error)
+        key = "finger_tactile_force" if kind == "force" else "taxel_tactile_force"
+        unused = "taxel_tactile_force" if kind == "force" else "finger_tactile_force"
+        selected_source = root / f"source-{method}-{kind}-{mode}.zarr"
+        shutil.copytree(source, selected_source)
+        selected_group = zarr.open_group(str(selected_source), mode="a")
+        if mode != "rms":
+            del selected_group[f"data/{unused}"]
+        read_array = zarr.Array.__getitem__
+
+        def selected_read(array, selection, *args, **kwargs):
+            if array.path == f"data/{unused}":
+                raise AssertionError(f"Read unselected tactile field {unused}")
+            return read_array(array, selection, *args, **kwargs)
+
+        with patch.object(zarr.Array, "__getitem__", selected_read):
+            cfg = config(method, selected_source, root / f"{method}-{kind}-{mode}", mode, kind, device)
+            trainer = build_trainer(cfg)
+            initial_rng = get_rng_state(device)
+            model = trainer.model
+            field = model.normalizer[key]
+            obs = {k: torch.tensor(selected_group[f"data/{k}"][:cfg.n_obs_steps], device=device)[None]
+                   for k in cfg.dataset.sensor_modalities}
+            original = {k: v.clone() for k, v in obs.items()}
+            processed = model._preprocess_obs(obs)
+            raw = obs[key]
+            expected_input = raw * field.scale if kind == "patch" else field.normalize(raw)
+            torch.testing.assert_close(processed[key], expected_input.flatten(0, 1))
+            torch.testing.assert_close(obs, original, rtol=0, atol=0)
+            if method == "interact_dex":
+                if mode == "limits":
+                    assert field.offset.abs().sum() > 0
+                    z = field.normalize(torch.tensor(force, dtype=torch.float32, device=device))
+                    torch.testing.assert_close(z.amin((0, 1)), -torch.ones(3, device=device))
+                    torch.testing.assert_close(z.amax((0, 1)), torch.ones(3, device=device))
+                check_force_targets(model, obs)
             else:
-                raise AssertionError(f"Restored policy without required {key} affine")
-        if method == "adaptac":
-            check_unshared_affine_restore(saved, root / f"unshared-{mode}", device)
-        print(f"PASS tactile train/save/raw/EMA/resume: {method} {kind} {mode}", flush=True)
+                encoder = model.obs_encoder.tactile_encoder
+                for value in ((0., 2.) if kind == "patch" else ()):
+                    obs["taxel_tactile_force"] = torch.full_like(obs["taxel_tactile_force"], value, requires_grad=True)
+                    u = model._preprocess_obs(obs)["taxel_tactile_force"]
+                    expected = obs["taxel_tactile_force"] * model.normalizer["taxel_tactile_force"].scale
+                    torch.testing.assert_close(u, expected.flatten(0, 1), rtol=0, atol=0)
+                    desc = encoder._patch_descriptors(u)
+                    assert bool(desc.abs().sum() > 0) == bool(value)
+                    desc.sum().backward()
+                    assert torch.isfinite(obs["taxel_tactile_force"].grad).all()
+                batch = dict_apply(next(iter(trainer.train_loader)), lambda x: x.to(device))
+                with patch.object(model.force_predictor, "compute_loss_and_prediction", wraps=model.force_predictor.compute_loss_and_prediction) as call, \
+                     patch.object(model, "_action_condition", wraps=model._action_condition) as condition:
+                    model.compute_loss(batch)
+                torch.testing.assert_close(call.call_args.args[1], field.normalize(batch["future_force"]).flatten(start_dim=2))
+                torch.testing.assert_close(condition.call_args.args[1], field.normalize(batch["obs"][key]).flatten(start_dim=2))
+            set_rng_state(initial_rng, device)
+            assert run_reproducible_training(trainer, max_updates=2) == 2
+            checkpoint = Path(cfg.workspace.output_dir) / "checkpoints/latest.pt"
+            saved = load_checkpoint(checkpoint)
+            assert set(saved.effective_config["dataset"]["sensor_modalities"]) & TACTILE_FEATURE_SHAPES.keys() == {key}
+            assert set(saved.effective_config["normalization"]) & TACTILE_FEATURE_SHAPES.keys() == {key}
+            for ema in (False, True):
+                restored = restore_policy(checkpoint, use_ema=ema, device=device)
+                torch.testing.assert_close(restored.normalizer.state_dict(), model.normalizer.state_dict(), rtol=0, atol=0)
+                assert set(restored.normalization_dims) & TACTILE_FEATURE_SHAPES.keys() == {key}
+                assert set(restored.normalizer.fields) & TACTILE_FEATURE_SHAPES.keys() == {key}
+                info = inspect_policy(cfg.workspace.output_dir, weights="ema" if ema else "raw")
+                assert set(info.observation_fields) & TACTILE_FEATURE_SHAPES.keys() == {key}
+                runtime = load_policy(info, device=device)
+                history = {name: value[0].detach().cpu().numpy() for name, value in original.items()}
+                result = runtime.predict(history)
+                assert result.shape == (cfg.horizon - cfg.n_obs_steps + 1, 19)
+                assert np.isfinite(result).all()
+                try:
+                    runtime.predict({name: value for name, value in history.items() if name != key})
+                except KeyError as error:
+                    assert error.args == (key,)
+                else:
+                    raise AssertionError("Accepted missing selected tactile history")
+                runtime.close()
+                if method == "interact_dex" and mode == "limits":
+                    output = restored.predict_action(obs)["future_actions"]
+                    assert output.shape == (1, cfg.horizon - cfg.n_obs_steps + 1, 19)
+                    assert torch.isfinite(output).all()
+                    torch.testing.assert_close(restored.normalizer.state_dict(), model.normalizer.state_dict(), rtol=0, atol=0)
+            with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
+                resumed = prepare_resume(cfg.workspace.output_dir, device=str(device))
+            assert run_reproducible_training(resumed, max_updates=1) == 3
+            continuous_cfg = config(method, selected_source, root / f"continuous-{method}-{kind}-{mode}", mode, kind, device)
+            continuous = build_trainer(continuous_cfg)
+            assert run_reproducible_training(continuous, max_updates=3) == 3
+            for expected, actual in ((continuous.model, resumed.model), (continuous.ema_model, resumed.ema_model)):
+                expected_state, actual_state = expected.state_dict(), actual.state_dict()
+                torch.testing.assert_close(expected_state, actual_state, rtol=1e-6, atol=1e-7)
+                torch.testing.assert_close(expected.normalizer.state_dict(), actual.normalizer.state_dict(), rtol=0, atol=0)
+            for key in TACTILE_FEATURE_SHAPES.keys() & model.normalization_dims.keys():
+                prefix = f"normalizer.fields.{key}."
+                broken = {name: value for name, value in saved.model_state.items() if not name.startswith(prefix)}
+                try:
+                    _restore_policy(saved.effective_config, broken, device)
+                except ValueError as error:
+                    assert key in str(error) and "Missing required tactile affine" in str(error)
+                else:
+                    raise AssertionError(f"Restored policy without required {key} affine")
+            if method == "adaptac":
+                check_unshared_affine_restore(saved, root / f"unshared-{kind}-{mode}", device)
+            print(f"PASS tactile train/save/raw/EMA/resume: {method} {kind} {mode}", flush=True)
 
 
 if __name__ == "__main__":

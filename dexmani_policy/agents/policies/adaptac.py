@@ -22,6 +22,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
+from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 
 
 class AdapTacEncoder(nn.Module):
@@ -107,8 +108,8 @@ class AdapTac(Policy):
         fusion_num_heads: int = 8,
         fusion_dropout: float = 0.1,
     ) -> None:
-        if (n_obs_steps, action_dim) != (1, 19):
-            raise ValueError("AdapTac requires single-frame observations and 19D joint state/actions")
+        if action_dim != 19:
+            raise ValueError("AdapTac requires 19D joint state/actions")
         if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
             raise ValueError("force_loss_weight must be finite and nonnegative")
         validate_unet_horizon(horizon, down_dims)
@@ -123,7 +124,7 @@ class AdapTac(Policy):
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
-            context_dim=feature_dim + state_out_dim,
+            context_dim=feature_dim + n_obs_steps * state_out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=down_dims,
             kernel_size=kernel_size,
@@ -138,11 +139,13 @@ class AdapTac(Policy):
             clip_sample=clip_sample,
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-        self.force_dim = 15
+        self.force_key = tactile_encoder.input_key
+        self.force_shape = TACTILE_FEATURE_SHAPES[self.force_key]
+        self.force_dim = math.prod(self.force_shape)
         self.force_predictor = ForceDiffusion(
             ForceTransformer(
                 horizon=self.future_steps,
-                cond_dim=2 * feature_dim,
+                cond_dim=2 * n_obs_steps * feature_dim,
                 force_dim=self.force_dim,
                 **(force_predictor_config or {}),
             ),
@@ -150,8 +153,8 @@ class AdapTac(Policy):
             force_num_inference_steps,
         )
         self.force_fusion = ForceGuidedFusion(
-            visual_dim=feature_dim,
-            tactile_dim=feature_dim,
+            visual_dim=n_obs_steps * feature_dim,
+            tactile_dim=n_obs_steps * feature_dim,
             guide_dim=self.force_dim * (n_obs_steps + self.future_steps),
             hidden_dim=feature_dim,
             num_heads=fusion_num_heads,
@@ -174,10 +177,18 @@ class AdapTac(Policy):
         self, obs_dict: dict,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         obs = self._preprocess_obs(obs_dict)
-        current_force = obs["finger_tactile_force"].float().reshape(
+        force = obs[self.force_key]
+        if isinstance(self.obs_encoder.tactile_encoder, XHandPatchEncoder):
+            # Patch descriptors use a zero reference; the guide uses absolute normalized force.
+            force = force + self.normalizer[self.force_key].offset
+        current_force = force.float().reshape(
             -1, self.n_obs_steps, self.force_dim,
         )
-        features = self.obs_encoder(obs)
+        # Shared frame encoders return [B*N,D]; concatenate each sample's oldest-to-newest history.
+        features = tuple(
+            feature.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
+            for feature in self.obs_encoder(obs)
+        )
         force_condition = torch.cat(features[:2], dim=-1).unsqueeze(1)
         return features, current_force, force_condition
 
@@ -193,7 +204,7 @@ class AdapTac(Policy):
         features, current_force, force_condition = self._encode_force_inputs(batch["obs"])
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
             force_condition,
-            self.normalizer["finger_tactile_force"].normalize(batch["future_force"]).flatten(-2),
+            self.normalizer[self.force_key].normalize(batch["future_force"]).flatten(start_dim=2),
             batch["future_force_valid"],
         )
         # The action objective also trains the force predictor through this prediction.

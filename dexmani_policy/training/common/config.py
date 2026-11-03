@@ -47,6 +47,14 @@ def assemble_policy_config(cfg):
         if action_key not in ("action", "action_ee"):
             raise ValueError("action_key must be action or action_ee")
         method = cfg.policy_name
+        # InterAct-Dex consumes aggregate force; dense tactile presets belong to AdapTac.
+        if method == "interact-dex" and OmegaConf.select(cfg, "agent.tactile_encoder._target_") != (
+            "dexmani_policy.agents.obs_encoder.xhand_tactile.XHandForceEncoder"
+        ):
+            raise ValueError(
+                "InterAct-Dex only supports aggregate force; use tactile=force. "
+                "AdapTac supports tactile=force, tactile=taxel and tactile=patch."
+            )
         auxiliary = method == "r3d" and cfg.use_aux_ee
         if auxiliary and action_key != "action":
             raise ValueError("R3D auxiliary targets require joint action")
@@ -123,6 +131,15 @@ def validate_normalization(cfg):
 
 
 def validate_config(cfg):
+    if cfg.policy_name in {"adaptac", "interact-dex"}:
+        fields = TACTILE_FEATURE_SHAPES.keys() & set(cfg.dataset.sensor_modalities)
+        normalized = TACTILE_FEATURE_SHAPES.keys() & set(cfg.normalization)
+        encoder = hydra.utils.get_class(cfg.agent.tactile_encoder._target_)
+        if fields != {encoder.input_key} or normalized != fields:
+            raise ValueError(
+                f"{cfg.policy_name} requires one tactile source matching encoder input_key={encoder.input_key!r}; "
+                f"dataset={sorted(fields)}, normalization={sorted(normalized)}"
+            )
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
