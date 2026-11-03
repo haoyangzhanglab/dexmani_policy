@@ -16,15 +16,14 @@ def candidate_score(candidate):
 
 def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_steps=None,
                  selection_episodes=25, test_episodes=100, seed=1024, device="cuda:0",
-                 video=True, output_dir=None, run_dir=None):
+                 video=True, output_dir=None):
     checkpoints = [Path(path).expanduser().resolve(strict=True) for path in checkpoints]
     if not checkpoints or len(set(checkpoints)) != len(checkpoints):
         raise ValueError("Candidates must be a nonempty list of distinct checkpoint files")
     for checkpoint in checkpoints:
         if not checkpoint.is_file():
             raise ValueError(f"Checkpoint must be a file: {checkpoint}")
-    root = checkpoints[0].parent.parent if run_dir is None else Path(run_dir).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    root = checkpoints[0].parent.parent
     cfg = load_checkpoint(checkpoints[0]).effective_config
     weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
     if weights not in {"raw", "ema"}:
@@ -57,8 +56,5 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
         seeds=test, seed=seed, device=device, video=video, output_dir=directory / "test")
     record.update(ckpt_relpath=winner["checkpoint"], global_step=winner["global_step"],
                   test_result=os.path.relpath(result_path, directory))
-    write_json(path, record, overwrite=False)
-    write_json(root / "best_ckpt.json", dict(
-        ckpt_relpath=os.path.relpath(checkpoint, root), inference=record["inference"],
-    ))
+    write_json(path, record)
     return path

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pull one stopped/completed run, updating its best pointer last.
+# Pull one stopped/completed run.
 set -euo pipefail
 
 HOST=""
@@ -30,16 +30,8 @@ fi
 printf 'Remote: %s\nLocal: %s\n' "$REMOTE_PATH" "$LOCAL_PATH"
 
 # Keep rsync's default temporary-file transfer for each updated file.
-echo "--- Pass 1/2: run files ---"
-
 rsync "${RSYNC_OPTS[@]}" --progress \
-    --exclude='.dexmani-publish-*' --exclude='best_ckpt.json' \
-    "$REMOTE_PATH" "$LOCAL_PATH"
-
-# Update best only after the other run files have synced successfully.
-echo "--- Pass 2/2: best pointer (--ignore-times) ---"
-rsync "${RSYNC_OPTS[@]}" --ignore-times \
-    --include='*/' --include='best_ckpt.json' --exclude='*' \
+    --exclude='.dexmani-publish-*' \
     "$REMOTE_PATH" "$LOCAL_PATH"
 
 if [[ ${#DRY_RUN[@]} -eq 0 ]]; then

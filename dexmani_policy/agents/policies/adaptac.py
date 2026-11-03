@@ -53,10 +53,6 @@ class AdapTacEncoder(nn.Module):
         self.state_encoder = StateEncoder(19, state_out_dim)
 
     @property
-    def consumed_observation_fields(self):
-        return ("joint_state", "point_cloud", *self.tactile_encoder.consumed_observation_fields)
-
-    @property
     def effective_config(self) -> dict:
         return {
             "tactile_encoder": self.tactile_encoder.effective_config,
@@ -167,10 +163,6 @@ class AdapTac(Policy):
         )
         self.tactile_source = tactile_source
         self.force_loss_weight = force_loss_weight
-
-    @property
-    def consumed_observation_fields(self):
-        return tuple(dict.fromkeys((*self.obs_encoder.consumed_observation_fields, "finger_tactile_force")))
 
     def _encode_force_inputs(
         self, obs_dict: dict,

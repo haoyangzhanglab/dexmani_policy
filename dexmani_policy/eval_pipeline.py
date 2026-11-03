@@ -17,7 +17,6 @@ def main(argv=None):
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir")
-    parser.add_argument("--run-dir", help="Best publication directory and default results anchor")
     args = parser.parse_args(argv)
     run_pipeline(**vars(args))
 

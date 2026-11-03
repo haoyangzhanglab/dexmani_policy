@@ -15,7 +15,6 @@ from dexmani_policy.agents.policies.base import Policy, module_parameter_group
 
 
 class CordViPEncoder(nn.Module):
-    consumed_observation_fields = ("hand_pointcloud", "object_pointcloud", "joint_state")
 
     def __init__(self, n_obs_steps):
         super().__init__()

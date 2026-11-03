@@ -76,15 +76,15 @@ bash scripts/remote/sync_down.sh --host "$HOST" \
   --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01
 ```
 
-只同步已停止或完成的指定 run，远端是本次下载的来源，用户通过 `--local-run` 指定本地目标。共执行两次 rsync：第一次同步除 `best_ckpt.json` 和临时 `.dexmani-publish-*` 文件外的正常文件，按 rsync 默认的大小与修改时间判断增量更新；`config.yaml` 与其他普通文件一样同步，已有文件可以更新。symlink 原样保留，不解引用复制外部目标，也不删除本地独有文件。
+只同步已停止或完成的指定 run，远端是本次下载的来源，用户通过 `--local-run` 指定本地目标。一次普通 rsync 排除临时 `.dexmani-publish-*` 文件，按默认的大小与修改时间判断增量更新；`config.yaml` 与其他普通文件一样同步，已有文件可以更新。symlink 原样保留，不解引用复制外部目标，也不删除本地独有文件。
 
-第一次成功后，第二次只用 `--ignore-times` 强制更新 `best_ckpt.json`。任一阶段失败立即退出，第一次失败不进入第二次；两次都保留 rsync 默认的临时文件传输方式。`--dry-run` 仅预览，不修改本地目标。这两次同步不构成整个目录的事务快照；运行中查看日志用 tail。
+保留 rsync 默认的临时文件传输方式，失败直接退出。`--dry-run` 仅预览，不修改本地目标。全部传输成功后再使用下载的 run，不支持同步期间读取完整快照；运行中查看日志用 tail。
 
 `sync_down.sh` 只同步指定 run，外部 checkpoint 和结果目录不会自动下载；需自行同步并维护相对路径，文件搬迁后更新相应指针。
 
 本地同步回归无需 SSH 服务器，运行 `python -m dexmani_policy.test_tools.remote_checks`（需要本地 rsync）。
 
-评测在独立测试及完整结果保存后发布 best。外部候选布局可显式指定 `--run-dir`。下载后直接评测或显式选模：
+选模保存 `selection_result.json`，记录胜者文件与实际 weights、NFE、执行长度，不自动发布 best 指针。部署默认 latest；使用胜者时显式给出文件及记录的推理参数，Real 的执行长度在其运行配置设置。下载后直接评测或显式选模：
 
 ```bash
 python -m dexmani_policy.evaluate --checkpoint <run>/checkpoints/latest.pt \

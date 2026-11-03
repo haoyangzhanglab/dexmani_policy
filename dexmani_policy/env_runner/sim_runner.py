@@ -122,7 +122,7 @@ class SimRunner:
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
         self.environment = {}
         source = require_tactile_source(
-            agent.consumed_observation_fields, getattr(agent, "tactile_source", None),
+            self.sensor_modalities, getattr(agent, "tactile_source", None),
         )
         if source == "real":
             raise ValueError("Sim rollout requires sim-source tactile observations")

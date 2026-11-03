@@ -15,7 +15,6 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DP3Encoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "point_cloud")
 
     def __init__(
         self,

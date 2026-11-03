@@ -81,10 +81,6 @@ class Policy(nn.Module):
     def future_steps(self) -> int:
         return self.horizon - self.action_start_index
 
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return self.obs_encoder.consumed_observation_fields
-
     def configure_normalizer(self, feature_dims, feature_shapes) -> None:
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
@@ -102,8 +98,6 @@ class Policy(nn.Module):
     def _preprocess_obs(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
-            if key not in self.consumed_observation_fields:
-                continue
             if key in POINT_CLOUD_FIELDS:
                 value = value[..., : self.normalization_dims[key]]
             if key in self.normalizer.fields:

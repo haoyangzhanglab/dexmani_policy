@@ -17,9 +17,6 @@ from .rgb.build import build_rgb_encoder
 
 
 class SpatialObservationEncoder(nn.Module):
-    consumed_observation_fields = (
-        "joint_state", "point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic",
-    )
     out_dim = 256
 
     def __init__(
