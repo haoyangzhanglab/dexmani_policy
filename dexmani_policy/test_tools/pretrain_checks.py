@@ -172,6 +172,8 @@ def check_training(root, method, device=torch.device("cpu")):
     logged_lrs = [row["train/lr"] for row in full_records if "train/lr" in row]
     assert logged_lrs == used_lrs[:updates] and len(set(logged_lrs)) > 1
     directory = root / method / "resumed"
+    with (directory / "metrics.jsonl").open("ab") as stream:
+        stream.write(b'{"step":')
     cfg = OmegaConf.create(torch.load(
         directory / "resume.pt", map_location="cpu", weights_only=False,
     )["effective_config"])

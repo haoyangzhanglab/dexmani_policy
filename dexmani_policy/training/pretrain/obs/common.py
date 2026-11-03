@@ -41,7 +41,7 @@ def load_run(method, argv=None):
         source = Path(args.resume_from).expanduser().resolve(strict=True)
         if source.is_dir():
             source = source / "resume.pt"
-        checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(source, map_location="cpu", weights_only=False, mmap=True)
         cfg = OmegaConf.create(checkpoint["effective_config"])
         cfg.workspace.output_dir = str(source.parent)
     else:

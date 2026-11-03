@@ -310,6 +310,7 @@ class PolicyTrainer:
         initial_step = self.global_step
         self.stop_requested = False
         self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
         with training_signal_handlers(self.signal_handler), tqdm(
             initial=self.global_step,
             total=self.total_train_steps,
@@ -326,7 +327,6 @@ class PolicyTrainer:
                         self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
                     )
                     self.train_loader.batch_sampler.set_epoch(epoch, start_batch)
-                    self.optimizer.zero_grad(set_to_none=True)
 
                     num_batches = self.batches_per_epoch
                     iterator = iter(self.train_loader)

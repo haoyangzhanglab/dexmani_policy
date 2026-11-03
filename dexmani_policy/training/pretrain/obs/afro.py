@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from timm.models.vision_transformer import Mlp
 
 from dexmani_policy.agents.action_decoders.backbones.modules import (
-    DiTTimestepEmbedding, approximate_gelu, initialize_linear, modulate,
+    DiTTimestepEmbedding, approximate_gelu, initialize_linear,
 )
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
@@ -49,10 +49,9 @@ class DynamicsBlock(nn.Module):
 
     def forward(self, x, c):
         shift_value, scale_value, gate_value, shift_mlp, scale_mlp, gate_mlp = self.adaln_modulation(c).chunk(6, dim=1)
-        # FDM has one token, so its attention softmax is always one.
-        value = self.value_proj(modulate(self.norm1(x), shift_value, scale_value))
-        x = x + gate_value.unsqueeze(1) * self.output_proj(value)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        value = self.value_proj(self.norm1(x) * (1 + scale_value) + shift_value)
+        x = x + gate_value * self.output_proj(value)
+        x = x + gate_mlp * self.mlp(self.norm2(x) * (1 + scale_mlp) + shift_mlp)
         return x
 
 
@@ -69,7 +68,7 @@ class ForwardDynamics(nn.Module):
         self.noise_proj = nn.Linear(input_dim, hidden_size)
         self.vis_proj = nn.Linear(input_dim, hidden_size)
         self.act_proj = nn.Linear(16, hidden_size)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.pos_embed = nn.Parameter(torch.zeros(1, hidden_size))
         self.t_embedder = DiTTimestepEmbedding(hidden_size, frequency_embedding_size=timestep_embed_dim)
         self.ca_proj = nn.Sequential(
             nn.Linear(hidden_size * 3, hidden_size, bias=True),
@@ -94,7 +93,7 @@ class ForwardDynamics(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, z, t, vis, act):
-        x = self.noise_proj(z).unsqueeze(1) + self.pos_embed
+        x = self.noise_proj(z) + self.pos_embed
 
         t_emb = self.t_embedder(t)
         v = self.vis_proj(vis)
@@ -104,7 +103,7 @@ class ForwardDynamics(nn.Module):
         for block in self.blocks:
             x = block(x, c)
 
-        return self.output_layer(x[:, 0, :])
+        return self.output_layer(x)
 
 
 class AFRO(nn.Module):

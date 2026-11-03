@@ -21,10 +21,21 @@ class ExperimentLogger:
             path = self.output_dir / "metrics.jsonl"
             if path.exists():
                 with path.open("rb+") as stream:
-                    if stream.seek(0, os.SEEK_END):
+                    end = stream.seek(0, os.SEEK_END)
+                    if end:
                         stream.seek(-1, os.SEEK_END)
                         if stream.read(1) != b"\n":
-                            stream.write(b"\n")
+                            # Only newline-terminated records survive an interrupted write.
+                            position = end
+                            while position:
+                                size = min(position, 8192)
+                                position -= size
+                                stream.seek(position)
+                                newline = stream.read(size).rfind(b"\n")
+                                if newline >= 0:
+                                    position += newline + 1
+                                    break
+                            stream.truncate(position)
 
         self.metrics_file = (self.output_dir / "metrics.jsonl").open(
             "a", buffering=1, encoding="utf-8"

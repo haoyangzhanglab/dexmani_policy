@@ -404,22 +404,25 @@ def check_policy_roundtrips(device):
 
 
 def check_resume_logging(root):
-    for index, history in enumerate((b'{"step": 99}\n', b'broken\n{"step": 99}\n', b'broken', b'')):
+    complete = b'{"step": 98}\n{"step": 99}\n'
+    partial = b'{"loss": "' + b'x' * 9000
+    for index, (history, prefix) in enumerate((
+        (b'', b''), (complete, complete), (complete + partial, complete), (partial, b''),
+    )):
         directory = root / f"logging-{index}"
         directory.mkdir()
         path = directory / "metrics.jsonl"
         path.write_bytes(history)
         logger = ExperimentLogger(directory, resume=True, wandb_enabled=False)
         try:
+            assert path.read_bytes() == prefix
             logger.log({"loss": 1.}, step=2)
             logger.log({"loss": 0.5}, step=2)
         finally:
             logger.close()
-        boundary = b"\n" if history and not history.endswith(b"\n") else b""
-        prefix = history + boundary
         assert path.read_bytes().startswith(prefix)
-        records = [json.loads(line) for line in path.read_bytes()[len(prefix):].splitlines()]
-        assert [record["step"] for record in records] == [2, 2]
+        records = [json.loads(line) for line in path.read_bytes().splitlines()]
+        assert [record["step"] for record in records] == ([98, 99] if prefix else []) + [2, 2]
         assert list(directory.iterdir()) == [path]
     for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
         directory = root / f"fresh-{name}"
@@ -742,6 +745,8 @@ def check_training_resume(device):
             trainer.optimizer.register_step_pre_hook(record_lr)
             assert run_trainer(trainer, max_updates=4) == 4
             original = load_checkpoint(split / "checkpoints/latest.pt")
+            with (split / "metrics.jsonl").open("ab") as stream:
+                stream.write(b'{"step":')
             source.attrs.update(dt=0.1, pointcloud_config={"num_points": 123})
             with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
                 trainer = prepare_resume(split, device=str(device))
@@ -752,7 +757,11 @@ def check_training_resume(device):
             assert all(p.dtype == torch.float32 for p in trainer.ema_model.parameters())
             assert trainer.ema_updater.optimization_step == 4
             position = epoch_position(6, trainer.batches_per_epoch, trainer.gradient_accumulation_steps)
-            assert position[0] > 0, "Fixture must cross an epoch and its tail accumulation group"
+            assert position[0] > 0, "Fixture must cross an epoch"
+            assert trainer.batches_per_epoch % trainer.gradient_accumulation_steps, "Fixture must include a tail group"
+            # Every train() call must discard gradients left by earlier work.
+            parameter = trainer.trainable_parameters[0]
+            parameter.grad = torch.ones_like(parameter)
             assert run_trainer(trainer, max_updates=2) == 6
             continuous = load_checkpoint(full / "checkpoints/latest.pt")
             resumed = load_checkpoint(split / "checkpoints/latest.pt")

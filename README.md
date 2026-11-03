@@ -52,7 +52,7 @@ python -m dexmani_policy.eval_pipeline \
   --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
-续训直接使用 Checkpoint 中的有效配方与完整训练状态，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续。只有 fresh 装配配方、访问初始化来源和拟合统计；恢复不重写保存的部署事实或训练总预算，`--max-updates` 只限制本次调用。恢复要求同数据、同配方、同训练布局，不保证 worker 增强或编译计算逐位重放。日志直接追加，允许重复或较小 step，历史损坏行保留；训练进度只取 checkpoint。
+续训直接使用 Checkpoint 中的有效配方与完整训练状态，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续。只有 fresh 装配配方、访问初始化来源和拟合统计；恢复不重写保存的部署事实或训练总预算，`--max-updates` 只限制本次调用。恢复要求同数据、同配方、同训练布局，不保证 worker 增强或编译计算逐位重放。日志追加前丢弃末尾未以换行结束的残段，完整历史行保持原样，允许重复或较小 step；训练进度只取 checkpoint。
 
 fresh 与 resume 均使用 FP32 master parameters 和同设备 FP32 EMA；`training.use_bfloat16=true` 仅启用 BF16 autocast，不维护旧低精度 master parameters 的原精度训练轨迹。普通配方 `eval.use_ema` 默认跟随 `training.use_ema`，显式请求缺失 EMA 仍失败；ManiFlow 的 loss 继续要求 EMA。正式部署、仿真评测及 warmup 严格加载后使用 FP32，并合并 RGB LoRA；预测入口显式关闭 autocast，训练 checkpoint 保留适配器。
 
