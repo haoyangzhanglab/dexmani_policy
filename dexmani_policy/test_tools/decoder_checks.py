@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, CoupledDiTX, DiTX
+from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, DiTX
 from dexmani_policy.agents.action_decoders.backbones.one_way_transformer import OneWayTransformer
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalResidualBlock1D, ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
@@ -150,21 +150,7 @@ def check_decoder_precision(device):
 
 
 def check_token_decoders(device):
-    coupled = CoupledDiTX(
-        horizon=8, action_dim=19, n_obs_steps=2, obs_token_dim=16,
-        hidden_dim=32, n_head=4, n_layers=2, p_drop_attn=0, interaction_horizon=3,
-    ).to(device).eval()
-    # Zero-initialized gates and readout would hide a broken attention mask.
-    for block in coupled.ditx_blocks:
-        torch.nn.init.normal_(block.adaln_modulation[-1].weight, std=0.1)
-    torch.nn.init.normal_(coupled.final_layer.ffn_final.fc2.weight, std=0.1)
-    actions = torch.randn(2, 8, 19, device=device)
-    context = torch.randn(2, 18, 16, device=device)
     timestep = torch.rand(2, device=device)
-    outside = actions.clone()
-    outside[:, [0, 4, 5, 6, 7]] += 3
-    changed_body = context.clone()
-    changed_body.unflatten(1, (2, 9))[:, -1, :6] += 2
     auxiliary = OneWayTransformer(
         horizon=8, action_dim=28, n_obs_steps=2, obs_token_dim=48, pc_pe_dim=32,
         embedding_dim=32, depth=2, num_heads=4, mlp_dim=64,
@@ -176,18 +162,8 @@ def check_token_decoders(device):
     observations = torch.randn(2, 8, 48, device=device)
     for bf16 in (False, True):
         with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
-            velocity, features = coupled(actions, timestep, context, return_features=True)
-            perturbed, perturbed_features = coupled(outside, timestep, context, return_features=True)
-            cached_kv = coupled.prepare_context_kv(context)
-            cached = coupled(actions, timestep, context, context_kv=cached_kv, return_features=True)
-            dynamic = coupled(actions, timestep, changed_body, context_kv=cached_kv, return_features=True)
             prediction = auxiliary(joint_ee, timestep, observations)
             perturbed_ee = auxiliary(changed_ee, timestep, observations)
-        torch.testing.assert_close(velocity[:, 1:4], perturbed[:, 1:4], rtol=0, atol=0)
-        torch.testing.assert_close(features[:, 8:], perturbed_features[:, 8:], rtol=0, atol=0)
-        assert (velocity[:, 4:] - perturbed[:, 4:]).abs().sum() > 0
-        torch.testing.assert_close(cached, (velocity, features), rtol=0, atol=0)
-        assert (dynamic[1][:, 8:] - features[:, 8:]).abs().sum() > 0
         torch.testing.assert_close(prediction[..., :19], perturbed_ee[..., :19], rtol=0, atol=0)
         assert (prediction[..., 19:] - perturbed_ee[..., 19:]).abs().sum() > 0
 

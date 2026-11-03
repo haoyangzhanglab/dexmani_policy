@@ -71,13 +71,15 @@ def assemble_policy_config(cfg):
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         if method == "interact-dex":
-            cfg.agent.interaction_horizon = cfg.interaction_horizon
+            if any("interaction_horizon" in section for section in (cfg, cfg.agent, cfg.dataset)):
+                raise ValueError("interaction_horizon is obsolete; use future_force_horizons")
+            cfg.agent.future_force_horizons = cfg.future_force_horizons
             if float(cfg.agent.get("future_force_loss_weight", 0.0)) == 0:
                 cfg.dataset._target_ = "dexmani_policy.datasets.demonstration.DemonstrationDataset"
-                cfg.dataset.pop("interaction_horizon", None)
+                cfg.dataset.pop("future_force_horizons", None)
             else:
                 cfg.dataset._target_ = "dexmani_policy.datasets.variants.tactile.InterActDexDataset"
-                cfg.dataset.interaction_horizon = cfg.interaction_horizon
+                cfg.dataset.future_force_horizons = cfg.future_force_horizons
         cfg.env_runner.task_name = cfg.task_name
         cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
     return cfg

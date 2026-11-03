@@ -1,6 +1,6 @@
 # InterAct-Dex：观测表征重构、调参与验证任务书
 
-> 状态：**待实施**。本文件是实现规格与实验计划，不代表代码已经修改或训练结果已经取得。  
+> 状态：**T1–T5 已实现，关键检查与真实数据有限 smoke 已通过；长训练、调参与闭环待实验**。第1节保留固定基线事实，实际实施记录见第16节。
 > 编写日期：2026-11-04（Asia/Shanghai）。  
 > 仓库：`haoyangzhanglab/dexmani_policy`，审查分支：`main`。  
 > 审查代码基线：[`79cd54f6bbd095b87fa78c56925d30c65104042b`](https://github.com/haoyangzhanglab/dexmani_policy/tree/79cd54f6bbd095b87fa78c56925d30c65104042b)，提交说明：`Fix CordViP pretraining coverage and clarify tactile compatibility`。  
@@ -246,7 +246,7 @@ FiLM 显式力通道提供直接使用数值强度的路径，但不保证 laten
 
 Flow 保持 `t_sample_mode="uniform"`、`time_shift_alpha=1.0`，arm/hand 两组动作损失权重继续各 0.5。
 
-删除 InterAct 对 `return_features=True` 的使用：普通 DiTX 不接受该参数，不返回交互特征。保留 RectifiedFlow 的通用接口，不顺带重写公共 decoder。普通 DiTX 已支持按帧组织不同数量的 context token，也有推理 context K/V 缓存，不新增缓存层。
+删除 InterAct 对 `return_features=True` 的使用：普通 DiTX 不接受该参数，不返回交互特征。保留 RectifiedFlow 的训练配方与 `(loss, metrics)` 返回接口；确认无消费者后删除仅服务旧主干的 `return_features` 分支。普通 DiTX 已支持按帧组织不同数量的 context token，也有推理 context K/V 缓存，不新增缓存层。
 
 再次 `rg` 确认 CoupledDiTX 没有其他真实消费者后，可删除其类定义及只服务旧结构的 decoder 检查；保留通用 DiTX、Flow 和其他策略检查。
 
@@ -663,18 +663,18 @@ prefix 因果 mask 只保证信息使用顺序，不提供反事实因果识别�
 
 ## 14. 完成清单与 Codex 最终回复要求
 
-- [ ] 已核对当前 HEAD、AGENTS 和真实消费者；无覆盖无关改动。
-- [ ] SceneTokenizer/scene mean 路径已移除，输出默认 `[B,24,192]`。
-- [ ] local surface 与历史编码保留，null 只在现有 SDPA 内实现。
-- [ ] 五指 FiLM 一一对应；腕部无额外人工触觉条件。
-- [ ] 普通 DiTX 正常运行；观测只编码一次；future head 为共享小 MLP。
-- [ ] 新 horizons、prefix、target、valid mask、FP32 loss 正确。
-- [ ] 最新显式 field API 和单一 aggregate 来源约束保留。
-- [ ] lambda=0 无未来标签路径、optimizer 分组、policy EMA 正确。
-- [ ] 新结构 strict 保存/恢复、推理与有限续训已验证或明确未执行原因。
-- [ ] README、项目架构、数据格式与相关 checks 已同步。
-- [ ] 参数和形状清点来自实际实现；性能结论仅来自实际测量。
-- [ ] 调参候选、预算、selection/test 边界与后续命令清楚，未自动启动无预算长训。
+- [x] 已核对当前 HEAD、AGENTS 和真实消费者；无覆盖无关改动。
+- [x] SceneTokenizer/scene mean 路径已移除，输出默认 `[B,24,192]`。
+- [x] local surface 与历史编码保留，null 只在现有 SDPA 内实现。
+- [x] 五指 FiLM 一一对应；腕部无额外人工触觉条件。
+- [x] 普通 DiTX 正常运行；观测只编码一次；future head 为共享小 MLP。
+- [x] 新 horizons、prefix、target、valid mask、FP32 loss 正确。
+- [x] 最新显式 field API 和单一 aggregate 来源约束保留。
+- [x] lambda=0 无未来标签路径、optimizer 分组、policy EMA 正确。
+- [x] 新结构 strict 保存/恢复、推理与有限续训已验证或明确未执行原因。
+- [x] README、项目架构、数据格式与相关 checks 已同步。
+- [x] 参数和形状清点来自实际实现；性能结论仅来自实际测量。
+- [x] 调参候选、预算、selection/test 边界与后续命令清楚，未自动启动无预算长训。
 
 最终用中文报告：实际改了什么、为什么、关键文件、运行过的完整命令与结果、未验证项、仍存风险、默认超参与下一阶段调参顺序。已运行、未运行、建议执行三类信息明确区分。不要只返回实施计划或声称“应该通过”。
 
@@ -699,3 +699,157 @@ prefix 因果 mask 只保证信息使用顺序，不提供反事实因果识别�
 - [Spark-0 项目](https://xsparkai.com/Spark-0/)与[触觉条件实现](https://github.com/XsparkAI/Spark-0/blob/e76cdfbc0b93f28cea07beadbdd957936d481317/third_party/starVLA/starVLA/model/modules/tactile/action_fusion.py)：参考触觉作为训练监督与在线条件的职责区分；不迁移其全手高密度触觉、teacher 或大模型双流结构。
 
 以上文献用于界定先例与设计依据；默认配置、代码接口和数据语义以本任务固定审查的仓库版本为依据。设计的有效性由上述控制实验检验。
+
+
+## 16. 本次实施与验证记录（2026-11-04）
+
+实施起点 HEAD 为 `9a5ae11a549dff67fa383df4e51d1119b24be0b0`，相对审查基线仅新增本任务书；开始时工作区干净。本次修改保留在工作区，未创建新 commit。删除无其他生产消费者的 SceneTokenizer、专用 seed sampler 和 CoupledDiTX；直接修改现有类，没有新增预测框架、迁移器或配置分支。
+
+### 实际参数及形状
+
+默认 YAML 实例（lambda=0.1）参数总数 **123,037,305**：obs encoder **3,675,491**、普通 DiTX **119,326,483**、future head **35,331**。local surface **8,672**、FiLM+身体 LayerNorm **26,496**、null logits **3**，后三项已包含在 encoder 中。真实 checkpoint raw/EMA 均核对得到 condition `[1,24,192]`、future prediction `[1,3,5,3]`、future actions `[1,13,19]`；前缀80D，头输入272D。
+
+### 已运行命令与结果
+
+以下使用 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`，PyTorch 2.4.1+cu124、RTX 4090。CUDA 和 DataLoader multiprocessing 检查在用户授权的 sandbox 外运行。全部通过；配置检查73项。首次新增训练 fixture 因 pc_dim=6 与3通道样本不符失败，修正为 pc_dim=3 后通过。sandbox 内基线 dataset 检查曾因本地 socket 权限阻塞，停止该进程并在 sandbox 外重跑通过，未改写数据加载行为。
+
+```bash
+POLICY_PYTHON=/home/zhanghaoyang/miniconda3/envs/policy/bin/python
+"$POLICY_PYTHON" -m dexmani_policy.test_tools.observation_checks --device cuda:0
+"$POLICY_PYTHON" -m dexmani_policy.test_tools.decoder_checks --device cuda:0
+"$POLICY_PYTHON" -m dexmani_policy.test_tools.dataset_checks
+"$POLICY_PYTHON" -m pytest dexmani_policy/test_tools/config_checks.py -q
+"$POLICY_PYTHON" -m dexmani_policy.test_tools.training_checks --device cuda:0
+"$POLICY_PYTHON" -m dexmani_policy.test_tools.tactile_normalization_checks --device cuda:0
+```
+
+初次实施补充 lambda=0 strict raw/EMA 和全无效多跨度检查后，曾单独重跑实际 Python 函数（没有新增 CLI）：
+
+```bash
+"$POLICY_PYTHON" - <<'PYTHON'
+import torch
+from dexmani_policy.test_tools.training_checks import check_interact_representation
+torch.set_num_threads(4)
+torch.manual_seed(7)
+check_interact_representation(torch.device('cuda:0'))
+print('PASS extended InterAct checks')
+PYTHON
+```
+
+真实 Zarr：150 episodes、27,365源帧、26,015窗口。默认模型、FP32、batch=2，完成 fresh=4、resume 后 global_step=6，保存总配方仍为100000；这不是长训练或闭环验证。
+
+```bash
+"$POLICY_PYTHON" -m dexmani_policy.test_tools.smoke_test interact_dex \
+  --device cuda:0 --max-updates 4 --resume-updates 2 \
+  --output-dir experiments/smoke/interact_dex_repr \
+  --override tactile=force \
+  --override zarr_path=robot_data/pick_apple_messy.zarr \
+  --override task_name=pick_apple_messy \
+  --override dataloader.batch_size=2 --override dataloader.num_workers=0 \
+  --override training.use_compile=false --override training.use_bfloat16=false
+```
+
+该目录现已有产物；复跑须使用新空目录。`step_00000004.pt` 和 `step_00000006.pt` 保留，latest 指向第6步。合成检查验证 raw/EMA 同配方续训与连续训练对齐；初次实施的 lambda=0 检查仅验证无标签 loss、strict raw/EMA 加载及加载后优化器更新，后续已由第17节的实际 Trainer 续训检查替代。默认真实 checkpoint 另用以下命令核验逐 tensor strict 恢复、离线未来力与 sync/RTC/Runtime 推理（均通过）：
+
+```bash
+"$POLICY_PYTHON" - <<'PYTHON'
+import gc
+from pathlib import Path
+from unittest.mock import patch
+import hydra
+import torch
+from omegaconf import OmegaConf
+from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
+from dexmani_policy.deployment import inspect_policy
+from dexmani_policy.deployment.runtime import PolicyRuntime
+
+torch.set_num_threads(4)
+path = Path('experiments/smoke/interact_dex_repr/checkpoints/latest.pt')
+saved = load_checkpoint(path)
+cfg = OmegaConf.create(saved.effective_config)
+assert saved.global_step == 6 and cfg.training.loop.total_train_steps == 100000
+assert cfg.agent.future_force_horizons == cfg.dataset.future_force_horizons == [1, 2, 4]
+assert 'interaction_horizon' not in cfg
+cfg.dataset.augmentation_cfg = None
+dataset = hydra.utils.instantiate(cfg.dataset, _convert_='all')
+sample = dataset[0]
+batch = {k: ({name: value[None].cuda() for name, value in v.items()} if k == 'obs' else v[None].cuda()) for k,v in sample.items()}
+for ema in (False, True):
+    model = restore_policy(path, use_ema=ema, device='cuda:0')
+    state = saved.ema_model_state if ema else saved.model_state
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value.cpu(), state[name], rtol=0, atol=0)
+    count = lambda module: sum(p.numel() for p in module.parameters())
+    print('EMA',ema,'total',count(model),'obs',count(model.obs_encoder),'DiTX',count(model.action_decoder.model),'future',count(model.future_force_head))
+    fusion = model.obs_encoder.hand_scene
+    print('local',count(fusion.surface_mlp)+count(fusion.geometry_projection),'FiLM+LN',count(fusion.force_affine)+count(fusion.query_norm),'null',fusion.context.null_logits.numel())
+    with torch.no_grad():
+        condition = model._encode_obs(batch['obs'])
+        prediction = model._predict_future_force(condition,batch)
+        loss,_ = model._compute_future_force_loss(prediction,batch)
+    assert condition.shape == (1,24,192) and prediction.shape == (1,3,5,3)
+    assert torch.isfinite(loss)
+    with patch.object(model.future_force_head,'forward',side_effect=AssertionError('online future head')):
+        with torch.inference_mode():
+            actions = model.predict_action(batch['obs'])['future_actions']
+            guided = model.predict_action(batch['obs'],rtc_prefix=actions[:,:3],delay_steps=1,rtc_guidance_cap=2)['future_actions']
+        info = inspect_policy(path.parent.parent, weights='ema' if ema else 'raw')
+        runtime = PolicyRuntime(model,info,seed=7)
+        output = runtime.predict({name:value.numpy() for name,value in sample['obs'].items()})
+    assert actions.shape == guided.shape == (1,13,19)
+    assert output.shape == (13,19) and torch.isfinite(actions).all() and torch.isfinite(guided).all()
+    print('PASS strict, eval future, sync/RTC/runtime',tuple(condition.shape),tuple(prediction.shape),tuple(actions.shape),'force loss',loss.item())
+    runtime.close()
+    del model, runtime
+    gc.collect()
+    torch.cuda.empty_cache()
+PYTHON
+```
+
+### 尚未运行与后续命令
+
+未运行长训练、调参网格、selection/test 闭环、冻结迁移、完整性能测量或真实机器人部署；这些需要另行确定实验预算。GPU/数据现可用，不再作为未执行原因。有限 smoke 不能证明速度、成功率或泛化提升；单个训练窗口的力误差不作为质量指标。
+
+默认超参与候选次序仍采用第11节：lambda=0 与0.1先各20k，最多四个lambda候选、两个晋级40k；必要时再至多两个obs_lr候选。总cosine预算始终100k，最终方法和论文对照均需同等完整预算。后续候选示例（尚未执行，lambda=0另建目录）：
+
+```bash
+"$POLICY_PYTHON" -m dexmani_policy.train --config-name interact_dex \
+  tactile=force zarr_path=robot_data/pick_apple_messy.zarr task_name=pick_apple_messy \
+  'future_force_horizons=[1,2,4]' agent.future_force_loss_weight=0.1 \
+  training.seed=42 dataset.seed=42 optimizer.obs_lr=1e-4 \
+  training.loop.total_train_steps=100000 +max_updates=20000 \
+  hydra.run.dir=experiments/train/interact-dex/pick_apple_messy/repr_lambda01_seed42
+"$POLICY_PYTHON" -m dexmani_policy.training.common.resume \
+  --run experiments/train/interact-dex/pick_apple_messy/repr_lambda01_seed42 --max-updates 20000
+```
+
+调参仅用第12.4节的selection seeds，方案锁定前不运行独立test。正式batch能否适配4090尚未测试；若OOM按第11.2节保持名义batch128调整microbatch/accumulation，全部对照使用同一设置。
+
+
+## 17. 全链路清理记录
+
+- 移除 RectifiedFlow 中已无消费者的特征返回参数、三元返回类型及分支。DiTXBlock 删除仅供旧动态交互 mask 使用的参数，DiTX 内联仅剩单一调用点的 `_run_blocks`，删除旧子类专用的 hidden_dim 实例状态。context K/V 缓存、普通及 consistency Flow 配方和参数键保持不变。
+- horizons 接口统一接受 `Sequence[int]` 并在边界转为 tuple；保留正整数、递增、最大动作跨度和单一 aggregate 来源约束。未来力预测入口明确要求辅助头已启用，解决定向类型检查发现的可选模块访问问题。
+- 删除重复的观测测试 forward，以及 lambda=0 人工复用同一 raw/EMA 权重、新建优化器的简化恢复测试。复用 tactile normalization 的实际 Trainer 流程，验证 lambda=0 的普通 Dataset、不读取未来标签、无辅助指标、raw/EMA 恢复、优化器/调度器续接和连续训练对齐。补齐非默认 horizons 配置传播和跨度越界检查。
+- 检查了脚本、部署、评测、配置、数据 reader、优化器及 checkpoint 调用链；没有相关 SHA-256/哈希校验或迁移框架需要删除。保留旧配置显式拒绝，避免 Hydra 的显式新增旧键被静默忽略；这不提供旧格式适配或回退。
+
+本轮重新运行第16节六个检查入口，均通过，完整配置测试更新为75项。lambda=0 的实际 Trainer 检查在临时合成 Zarr 上完成2步保存+1步恢复，并与连续3步的 raw/EMA 权重比较；不将该结果视作真实数据长训练。另复用第16节真实第6步 checkpoint 检查 strict raw/EMA、离线未来预测及 sync/RTC/Runtime 推理，未追加训练或改写原产物。
+
+静态检查及构建命令（解释器同第16节）：
+
+```bash
+"$POLICY_PYTHON" -m mypy --follow-imports=skip --ignore-missing-imports \
+  dexmani_policy/agents/policies/interact_dex.py \
+  dexmani_policy/agents/obs_encoder/interaction/hand_interaction.py \
+  dexmani_policy/agents/action_decoders/flow.py \
+  dexmani_policy/agents/action_decoders/backbones/ditx.py \
+  dexmani_policy/common/config.py \
+  dexmani_policy/datasets/variants/tactile.py \
+  dexmani_policy/training/common/config.py
+"$POLICY_PYTHON" -m compileall -q dexmani_policy
+"$POLICY_PYTHON" -m pip wheel . --no-deps --no-build-isolation --no-cache-dir \
+  --wheel-dir /tmp/dexmani-interact-review-dist
+git diff --check
+```
+
+定向 mypy 的7个生产文件通过；未声称检查第三方依赖或全仓库类型。compileall 与 wheel 构建通过。当前环境不提供可运行的 `python -m build` 前端，因此使用 pip wheel 调用既有构建后端，未安装新依赖。长训练、正式 batch128、独立 test、闭环和真实部署仍未执行，参数与默认配方不变。

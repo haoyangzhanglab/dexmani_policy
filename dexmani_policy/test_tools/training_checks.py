@@ -511,7 +511,7 @@ def check_policy_roundtrips(device):
         optimizer = build_optimizer(policy, **cfg.optimizer)
         batch = dict(obs=obs, action=torch.randn(2, cfg.horizon, cfg.action_dim, device=device))
         if method in ("adaptac", "interact_dex"):
-            count = 1 if method == "interact_dex" else policy.future_steps
+            count = len(policy.future_force_horizons) if method == "interact_dex" else policy.future_steps
             valid = torch.ones(2, count, dtype=torch.bool, device=device)
             valid[1, -1] = False
             batch.update(future_force=torch.randn(2, count, 5, 3, device=device), future_force_valid=valid)
@@ -877,10 +877,10 @@ def check_configs(_device):
             assert encoder.input_key in cfg.dataset.sensor_modalities
             assert (encoder.num_tokens, encoder.out_dim) == (5, 64)
             if method == "interact_dex":
-                assert cfg.agent.interaction_horizon == cfg.dataset.interaction_horizon == 4
+                assert cfg.agent.future_force_horizons == cfg.dataset.future_force_horizons == [1, 2, 4]
                 no_force = load_policy_config(method, [*overrides, "agent.future_force_loss_weight=0"])
-                assert "interaction_horizon" not in no_force.dataset
-                assert no_force.agent.interaction_horizon == 4
+                assert "future_force_horizons" not in no_force.dataset
+                assert no_force.agent.future_force_horizons == [1, 2, 4]
         disabled = load_policy_config(method, [*overrides, "training.use_ema=false"])
         assert not disabled.eval.use_ema
     validate_normalization(load_policy_config("dp3", ["normalization.action=gaussian",
@@ -1077,13 +1077,87 @@ def check_training_lifecycle(device):
         print(f"PASS DQ-RISE fresh/save/inference/resume and saved budget ({device})", flush=True)
 
 
+def check_interact_representation(device):
+    cfg = load_policy_config("interact_dex", [
+        "agent.pc_dim=3", "agent.num_points=32", "agent.pc_encoder_config.channels=24",
+        "agent.pc_encoder_config.num_patches=12", "agent.pc_encoder_config.group_size=8",
+        "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4",
+        "agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=4",
+        "agent.fps_random_config.use_random=false", "agent.num_inference_steps=2",
+    ])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all").to(device).eval()
+    dims = dict(action=19, joint_state=19, point_cloud=3, eef_pose=9, fingertip_xyz=3, finger_tactile_force=3)
+    model.configure_normalizer(dims, dict(action=(19,), joint_state=(19,), finger_tactile_force=(5, 3)))
+    model.to(device)
+    model.normalizer["action"].scale.fill_(2)
+    model.normalizer["action"].offset.fill_(7)
+    model.normalizer["joint_state"].offset.fill_(-9)
+    obs = dict(joint_state=torch.randn(2, 4, 19, device=device),
+               point_cloud=torch.randn(2, 4, 32, 3, device=device) * .03,
+               eef_pose=torch.zeros(2, 4, 9, device=device),
+               fingertip_xyz=torch.randn(2, 4, 5, 3, device=device) * .02,
+               finger_tactile_force=torch.randn(2, 4, 5, 3, device=device))
+    obs["eef_pose"][..., 3] = 1
+    obs["eef_pose"][..., 7] = 1
+    batch = dict(obs=obs, action=torch.randn(2, 16, 19, device=device),
+                 future_force=torch.randn(2, 3, 5, 3, device=device),
+                 future_force_valid=torch.tensor([[True, True, False], [True, False, False]], device=device))
+    condition = model._encode_obs(obs)
+    assert condition.shape == (2, 24, 192)
+    assert sum(p.numel() for p in model.future_force_head.parameters()) == 35331
+    assert torch.count_nonzero(model._predict_future_force(condition, batch)) == 0
+    with torch.no_grad():
+        model.future_force_head[-1].weight.normal_(std=.1)
+    seen = []
+    hook = model.future_force_head.register_forward_pre_hook(lambda m, a: seen.append(a[0]))
+    prediction = model._predict_future_force(condition, batch)
+    hook.remove()
+    assert prediction.shape == (2, 3, 5, 3)
+    expected = (batch["action"][:, 3:7] - obs["joint_state"][:, -1, None]) * 2
+    torch.testing.assert_close(seen[0][:, 2, 0, 192:268], expected.flatten(1))
+    torch.testing.assert_close(seen[0][0, :, 0, -4:], torch.tensor([[1,0,0,0],[1,1,0,0],[1,1,1,1]], device=device).float())
+    for index, h in enumerate((1, 2, 4)):
+        changed = {**batch, "action": batch["action"].clone()}
+        changed["action"][:, 3+h:] += 10
+        torch.testing.assert_close(model._predict_future_force(condition, changed)[:, index], prediction[:, index])
+        changed["action"][:, 3] += 1
+        assert not torch.allclose(model._predict_future_force(condition, changed)[:, index], prediction[:, index])
+    changed_labels = {**batch, "future_force": torch.full_like(batch["future_force"], float("nan")),
+                      "future_force_valid": torch.zeros_like(batch["future_force_valid"])}
+    torch.testing.assert_close(model._predict_future_force(condition, changed_labels), prediction)
+    zero, _ = model._compute_future_force_loss(prediction, changed_labels)
+    zero_grad, = torch.autograd.grad(zero, prediction, retain_graph=True)
+    assert zero == 0 and torch.count_nonzero(zero_grad) == 0
+    loss, _ = model._compute_future_force_loss(prediction, batch)
+    loss.backward()
+    assert model.obs_encoder.hand_history.temporal_ffn[-1].weight.grad.abs().sum() > 0
+    with patch.object(model, "_encode_obs", wraps=model._encode_obs) as encode:
+        model.compute_loss(batch)
+        assert encode.call_count == 1
+    with patch.object(model.future_force_head, "forward", side_effect=AssertionError("online future head")):
+        assert model.predict_action(obs)["future_actions"].shape == (2, 13, 19)
+    # Unequal horizon counts must not weight the densely supervised horizon more heavily.
+    probe = torch.zeros(2, 3, 5, 3, device=device, requires_grad=True)
+    with torch.no_grad():
+        probe[:, 1] = 2
+    target_batch = {**batch, "future_force": obs["finger_tactile_force"][:, -1:].expand(-1, 3, -1, -1)}
+    value, _ = model._compute_future_force_loss(probe, target_batch)
+    torch.testing.assert_close(value, value.new_tensor(.75))
+    optimizer = build_optimizer(model, **cfg.optimizer)
+    names = [name for group in optimizer.param_groups for name in group["param_names"]]
+    assert len(names) == len(set(names))
+    for group in optimizer.param_groups:
+        if any(name.endswith("null_logits") for name in group["param_names"]):
+            assert group["weight_decay"] == 0 and group["lr"] == cfg.optimizer.obs_lr
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_evaluation, check_sim_construction, check_flow_recipes, check_policy_roundtrips, check_configs, check_training_resume, check_nonfinite_group, check_training_lifecycle,):
+    for check in (check_interact_representation, check_evaluation, check_sim_construction, check_flow_recipes, check_policy_roundtrips, check_configs, check_training_resume, check_nonfinite_group, check_training_lifecycle,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

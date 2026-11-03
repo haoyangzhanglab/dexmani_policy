@@ -1,4 +1,5 @@
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -38,3 +39,10 @@ def validate_action_window(horizon: int, n_obs_steps: int, n_action_steps: int) 
             f"n_action_steps ({n_action_steps}) exceeds future_steps ({future_steps}) "
             "for the configured horizon and n_obs_steps"
         )
+
+
+def validate_future_force_horizons(values: Sequence[int]) -> tuple[int, ...]:
+    horizons = tuple(positive_int(value, "future_force_horizons entry") for value in values)
+    if not horizons or any(a >= b for a, b in zip(horizons, horizons[1:])):
+        raise ValueError("future_force_horizons must be nonempty and strictly increasing")
+    return horizons

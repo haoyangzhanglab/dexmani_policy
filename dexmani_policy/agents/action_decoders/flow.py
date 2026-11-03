@@ -71,16 +71,9 @@ class RectifiedFlow(nn.Module):
         *,
         dim_groups: dict[str, tuple[int, int, float]] | None = None,
         log_metrics: bool = True,
-        return_features: bool = False,
-    ) -> (
-        tuple[torch.Tensor, dict[str, torch.Tensor]]
-        | tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]
-    ):
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         xt, t, target_v = self.sample_training_pair(actions)
-        if return_features:
-            pred_v, features = self.model(x=xt, timestep=t, context=cond, return_features=True)
-        else:
-            pred_v = self.model(x=xt, timestep=t, context=cond)
+        pred_v = self.model(x=xt, timestep=t, context=cond)
         pred_v_fp32 = pred_v.float()
         target_v_fp32 = target_v.float()
         metrics = {}
@@ -104,8 +97,6 @@ class RectifiedFlow(nn.Module):
                     "target_v_magnitude": torch.sqrt(torch.mean(target_v_fp32**2)),
                     "t_mean": t.mean(),
                 })
-        if return_features:
-            return loss, metrics, features
         return loss, metrics
 
     @torch.no_grad()

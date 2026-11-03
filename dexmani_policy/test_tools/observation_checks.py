@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from dexmani_policy.agents.obs_encoder.interaction.future_tactile import ForceDiffusion, ForceGuidedFusion, ForceTransformer, VisuoTactileAttention
-from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import HandHistoryEncoder, HandSceneFusion, SceneTokenizer, _sample_region_seeds
+from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import HandHistoryEncoder, HandSceneFusion, SpatialCrossAttention
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder, XHandPatchEncoder
 from dexmani_policy.agents.policies.base import Policy
@@ -83,35 +83,54 @@ def check_tactile(device):
             raise AssertionError("SimRunner accepted dense tactile")
 
 
-def check_interaction(device):
-    scene = SceneTokenizer(24).to(device)
-    for patch_count in (12, 24):
-        points = torch.zeros(2, patch_count, 3, device=device)
-        seeds = _sample_region_seeds(points, 12)
-        assert all(row.unique().numel() == 12 for row in seeds)
-        tokens = torch.randn(2, patch_count, 24, device=device, requires_grad=True)
-        for bf16 in (False, True):
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
-                output = scene(tokens, points)
-            assert output.shape == (2, 12, 24) and torch.isfinite(output).all()
-            grad, = torch.autograd.grad((output * torch.randn_like(output)).sum(), tokens)
-            assert torch.isfinite(grad).all() and grad.abs().sum() > 0
+def check_null(device):
+    model = SpatialCrossAttention(24).to(device)
+    query = torch.randn(2, 6, 192, device=device)
+    memory = torch.randn(2, 12, 24, device=device)
+    xyz = torch.randn(2, 18, 3, device=device) * .1
+    sdpa = F.scaled_dot_product_attention
+    with patch.object(F, "scaled_dot_product_attention", wraps=sdpa) as call:
+        output = model(query, memory, xyz[:, :6], xyz[:, 6:])
+    assert call.call_count == 1 and model.out.bias is None
+    q, k, v = call.call_args.args
+    bias = call.call_args.kwargs["attn_mask"]
+    assert k.shape[-2] == 13 and torch.count_nonzero(k[:, :, -1]) == 0
+    assert torch.count_nonzero(v[:, :, -1]) == 0
+    assert torch.isneginf(bias[:, :, 0, -1]).all() and torch.isneginf(bias[:, -1, :, -1]).all()
+    assert torch.isfinite(bias[:, :3, 1:, -1]).all()
+    ordinary = sdpa(q, k[:, :, :-1], v[:, :, :-1], attn_mask=bias[..., :-1])
+    actual = sdpa(q, k, v, attn_mask=bias)
+    torch.testing.assert_close(actual[:, -1], ordinary[:, -1], atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(actual[:, :, 0], ordinary[:, :, 0], atol=1e-6, rtol=1e-5)
+    assert (actual[:, :3, 1:].norm(dim=-1) < ordinary[:, :3, 1:].norm(dim=-1)).all()
+    (output * torch.randn_like(output)).sum().backward()
+    assert model.null_logits.grad is not None and (model.null_logits.grad.abs() > 0).all()
 
+
+def check_interaction(device):
     model = HandSceneFusion(24, XHandForceEncoder()).to(device).eval()
     points = torch.randn(2, 64, 3, device=device) * 0.03
     anchors = torch.randn(2, 6, 3, device=device) * 0.02
     patches = dict(tokens=torch.randn(2, 12, 24, device=device), xyz=points[:, :12])
     hand = torch.randn(2, 6, 192, device=device)
     rotation = torch.eye(3, device=device).expand(2, -1, -1)
-    context = torch.randn(2, 192, device=device)
     tactile = torch.randn(2, 5, 3, device=device)
-    kwargs = dict(rotation_world_from_eef=rotation, query_context=context, tactile=tactile)
+    kwargs = dict(rotation_world_from_eef=rotation, tactile=tactile)
+    geometry, messages = [], []
+    hooks = [model.geometry_projection.register_forward_hook(lambda m, a, o: geometry.append(o)),
+             model.context.register_forward_hook(lambda m, a, o: messages.append(o))]
+    identity = model(points, patches, anchors, hand, **kwargs)
+    for hook in hooks:
+        hook.remove()
+    torch.testing.assert_close(identity, hand + (geometry[0].float() + messages[0].float()), rtol=0, atol=0)
+    with torch.no_grad():
+        model.force_affine.weight.normal_(std=0.01)
     output = model(points, patches, anchors, hand, **kwargs)
     changed = tactile.clone()
     changed[:, 2] += 2
     finger_output = model(points, patches, anchors, hand, **{**kwargs, "tactile": changed})
-    torch.testing.assert_close(output[:, [1, 2, 4, 5]], finger_output[:, [1, 2, 4, 5]])
-    assert (output[:, [0, 3]] - finger_output[:, [0, 3]]).abs().sum() > 0
+    torch.testing.assert_close(output[:, [0, 1, 2, 4, 5]], finger_output[:, [0, 1, 2, 4, 5]])
+    assert (output[:, 3] - finger_output[:, 3]).abs().sum() > 0
 
     rotation = torch.tensor([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]], device=device)
     shift = torch.tensor([0.2, -0.1, 0.3], device=device)
@@ -851,7 +870,7 @@ def main():
         torch.backends.cudnn.benchmark = False
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_fps, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_adaptac_history, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
+    for check in (check_fps, check_null, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_adaptac_history, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

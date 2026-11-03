@@ -247,14 +247,14 @@ def check_method_targets(root):
     source["data/finger_tactile_force"][:] = force_data
     kwargs = dict(sensor_modalities=["joint_state", "finger_tactile_force"],
                   horizon=5, obs_horizon=2, pad_before=1, pad_after=3)
-    for cls, extra in ((AdapTacDataset, {}), (InterActDexDataset, {"interaction_horizon": 3})):
+    for cls, extra in ((AdapTacDataset, {}), (InterActDexDataset, {"future_force_horizons": [1, 2, 4]})):
         dataset = cls(str(path), **kwargs, **extra)
         episode_ends = dataset.episode_store.episode_ends
         for index in range(len(dataset)):
             rows = dataset.sampler.sample_source_rows(index)
             query = rows[dataset.action_start_index]
             end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
-            sample_offsets = np.arange(1, 5) if cls is AdapTacDataset else np.array([3])
+            sample_offsets = np.arange(1, 5) if cls is AdapTacDataset else np.array([1, 2, 4])
             target = query + sample_offsets
             sample = dataset[index]
             np.testing.assert_array_equal(sample["future_force_valid"], target < end)
@@ -289,7 +289,7 @@ def check_method_targets(root):
         assert force.dtype == np.float32 and valid.dtype == bool
     source["data/finger_tactile_force"][:] = 0
     for dataset in (AdapTacDataset(str(path), **kwargs),
-                    InterActDexDataset(str(path), **kwargs, interaction_horizon=1)):
+                    InterActDexDataset(str(path), **kwargs, future_force_horizons=[1])):
         zero_force = dataset[0]
         assert zero_force["future_force_valid"].any() and not zero_force["future_force"].any()
     r3d_dataset = R3DDataset(str(path), sensor_modalities=["joint_state"], obs_horizon=2,

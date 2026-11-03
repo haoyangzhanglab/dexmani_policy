@@ -19,6 +19,7 @@ from dexmani_policy.common.normalizer import normalizer_shapes_from_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.deployment import inspect_policy, load_policy
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
+from dexmani_policy.datasets.variants.tactile import read_future_force
 from dexmani_policy.test_tools.dataset_checks import make_source
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import fit_normalizer
@@ -154,7 +155,7 @@ def check_force_targets(model, obs):
             assert loss == 0 and not mask.any() and torch.count_nonzero(prediction.grad) == 0
 
 
-def config(method, source, output, mode="limits", kind="force", device="cpu"):
+def config(method, source, output, mode="limits", kind="force", device="cpu", *, future_force_loss_weight=0.1):
     overrides = [f"zarr_path={source}", f"workspace.output_dir={output}", "workspace.wandb_cfg=null",
                  f"training.device={device}", "training.use_compile=false", "training.lr_warmup_steps=0",
                  "training.loop.total_train_steps=4", "training.loop.log_interval_steps=10",
@@ -172,7 +173,8 @@ def config(method, source, output, mode="limits", kind="force", device="cpu"):
     else:
         overrides += ["horizon=4", "n_action_steps=2", "agent.num_inference_steps=2",
                       f"normalization.finger_tactile_force={mode}", "n_obs_steps=2",
-                      "interaction_horizon=1", "agent.n_layers=1",
+                      "future_force_horizons=[1]", f"agent.future_force_loss_weight={future_force_loss_weight}",
+                      "agent.n_layers=1",
                       "agent.hidden_dim=32", "agent.n_head=4", "agent.timestep_embed_dim=32"]
     return load_policy_config(method, overrides)
 
@@ -234,13 +236,15 @@ def check_training(root, device="cpu"):
         for key, values in originals.items():
             group[f"data/{key}"][:] = values
     torch.testing.assert_close(states[0], states[1], rtol=0, atol=0)
-    cases = [(method, kind, mode)
+    cases = [(method, kind, mode, 0.1)
              for method, kind in (("interact_dex", "force"), ("adaptac", "force"), ("adaptac", "taxel"), ("adaptac", "patch"))
              for mode in ("limits", "rms", "max_abs")]
-    for method, kind, mode in cases:
+    cases.append(("interact_dex", "force", "limits", 0.0))
+    for method, kind, mode, weight in cases:
+        case = f"{method}-{kind}-{mode}-{weight}"
         key = "finger_tactile_force" if kind == "force" else "taxel_tactile_force"
         unused = "taxel_tactile_force" if kind == "force" else "finger_tactile_force"
-        selected_source = root / f"source-{method}-{kind}-{mode}.zarr"
+        selected_source = root / f"source-{case}.zarr"
         shutil.copytree(source, selected_source)
         selected_group = zarr.open_group(str(selected_source), mode="a")
         if mode != "rms":
@@ -252,8 +256,10 @@ def check_training(root, device="cpu"):
                 raise AssertionError(f"Read unselected tactile field {unused}")
             return read_array(array, selection, *args, **kwargs)
 
-        with patch.object(zarr.Array, "__getitem__", selected_read):
-            cfg = config(method, selected_source, root / f"{method}-{kind}-{mode}", mode, kind, device)
+        with patch.object(zarr.Array, "__getitem__", selected_read), \
+             patch("dexmani_policy.datasets.variants.tactile.read_future_force", wraps=read_future_force) as future_read:
+            cfg = config(method, selected_source, root / case, mode, kind, device,
+                         future_force_loss_weight=weight)
             trainer = build_trainer(cfg)
             initial_rng = get_rng_state(device)
             model = trainer.model
@@ -272,7 +278,15 @@ def check_training(root, device="cpu"):
                     z = field.normalize(torch.tensor(force, dtype=torch.float32, device=device))
                     torch.testing.assert_close(z.amin((0, 1)), -torch.ones(3, device=device))
                     torch.testing.assert_close(z.amax((0, 1)), torch.ones(3, device=device))
-                check_force_targets(model, obs)
+                if weight > 0:
+                    check_force_targets(model, obs)
+                else:
+                    assert model.future_force_head is None
+                    assert type(trainer.train_loader.dataset) is DemonstrationDataset
+                    batch = dict_apply(next(iter(trainer.train_loader)), lambda x: x.to(device))
+                    assert "future_force" not in batch and "future_force_valid" not in batch
+                    _, metrics = model.compute_loss(batch)
+                    assert not any("future_force" in name for name in metrics)
             else:
                 encoder = model.obs_encoder.tactile_encoder
                 for value in ((0., 2.) if kind == "patch" else ()):
@@ -323,7 +337,8 @@ def check_training(root, device="cpu"):
             with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
                 resumed = prepare_resume(cfg.workspace.output_dir, device=str(device))
             assert run_reproducible_training(resumed, max_updates=1) == 3
-            continuous_cfg = config(method, selected_source, root / f"continuous-{method}-{kind}-{mode}", mode, kind, device)
+            continuous_cfg = config(method, selected_source, root / f"continuous-{case}", mode, kind, device,
+                                    future_force_loss_weight=weight)
             continuous = build_trainer(continuous_cfg)
             assert run_reproducible_training(continuous, max_updates=3) == 3
             for expected, actual in ((continuous.model, resumed.model), (continuous.ema_model, resumed.ema_model)):
@@ -341,7 +356,10 @@ def check_training(root, device="cpu"):
                     raise AssertionError(f"Restored policy without required {key} affine")
             if method == "adaptac":
                 check_unshared_affine_restore(saved, root / f"unshared-{kind}-{mode}", device)
-            print(f"PASS tactile train/save/raw/EMA/resume: {method} {kind} {mode}", flush=True)
+            if method == "interact_dex" and weight == 0:
+                future_read.assert_not_called()
+                assert not any("future_force_head" in name for name in saved.model_state)
+            print(f"PASS tactile train/save/raw/EMA/resume: {case}", flush=True)
 
 
 if __name__ == "__main__":

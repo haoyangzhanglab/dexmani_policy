@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, positive_int
+from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, validate_future_force_horizons
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 
 
@@ -50,8 +50,8 @@ class AdapTacDataset(DemonstrationDataset):
 
 
 class InterActDexDataset(DemonstrationDataset):
-    def __init__(self, *args, interaction_horizon, sensor_modalities, **kwargs):
-        self.interaction_horizon = positive_int(interaction_horizon, "interaction_horizon")
+    def __init__(self, *args, future_force_horizons, sensor_modalities, **kwargs):
+        self.future_force_horizons = validate_future_force_horizons(future_force_horizons)
         if TACTILE_FEATURE_SHAPES.keys() & set(sensor_modalities) != {"finger_tactile_force"}:
             raise ValueError("InterAct-Dex requires finger_tactile_force as its only tactile field")
         super().__init__(*args, sensor_modalities=sensor_modalities, **kwargs)
@@ -60,7 +60,7 @@ class InterActDexDataset(DemonstrationDataset):
         data = super().__getitem__(idx)
         query = self.sampler.sample_source_rows(idx)[self.action_start_index]
         force, valid = read_future_force(
-            self.episode_store, query, (self.interaction_horizon,), field="finger_tactile_force",
+            self.episode_store, query, self.future_force_horizons, field="finger_tactile_force",
         )
         data["future_force"] = torch.from_numpy(force)
         data["future_force_valid"] = torch.from_numpy(valid)

@@ -109,30 +109,13 @@ bash scripts/training/train.sh sat 'task_name=<task>' \
 
 下载参数 `sat`、`dqrise`、`dp` 仅准备默认 DINOv2-small，`r3d` 仅准备 Uni3D，`dinov3` 仅准备可选 DINOv3-S，`siglip` 仅准备可选 SigLIP Base；无参数或 `all` 准备 Uni3D、DINOv2-small、DexLatent。DQ-RISE 码本仍需通过原有预训练流程获得。小型检查使用随机视觉模型，不代表闭环性能。数据流、B0–B4 配置覆盖与恢复约定见 [观测编码](docs/项目架构.md#观测编码)；初始权重的本地路径见 [数据目录说明](data/README.md)。
 
-## InterAct-Dex 动作耦合交互状态预测
+## InterAct-Dex 身体表征与未来力监督
 
-`interact_dex` 使用手—场景—当前触觉表示及历史编码，在 `CoupledDiTX` 中让 wrist＋五指的六个交互 token 与动作共享计算，生成 19D joint actions。默认使用 `tactile=force`，直接归一化生产端原始 aggregate 触觉，不根据来源旋转。当前仿真训练和仿真评测均使用世界系接触合力。
+InterAct-Dex 保留 Sparse3D、HandStateEncoder、原始点级局部几何及空间/因果历史编码，每帧输出六个身体 token，默认 condition `[B,24,192]`。一次几何 cross-attention 中，只有五指前三个 head 可读取零 K/V null；五指通过共享 `Linear(67,384)` 残差 FiLM 融合已归一化的 aggregate force，腕部由后续空间注意力接收全手信息。
 
-```bash
-bash scripts/training/train.sh interact_dex tactile=force 'zarr_path=<sim_zarr>'
-python -m dexmani_policy.test_tools.smoke_test interact_dex \
-  --override tactile=force --override 'zarr_path=<real_zarr>'
-```
+普通 DiTX 保持768D、8层、8 heads和10步 Euler，输出 `future_actions[B,13,19]`。共享 `272→128→3` future head 从同一次观测编码的最新五指表征及有序动作前缀预测 h={1,2,4} 的力增量。前缀用原始 action 减当前 joint_state 后只乘 action scale；力目标只对原始力差乘 force scale。两种 mask 分离，不旋转力、不重复归一化。默认 lambda=0.1 尚未经闭环调优；lambda=0 不构造头、不读取未来标签，未来误差为 N.A.。在线推理不执行未来头，eval 模式仍支持离线受力评测。
 
-InterAct-Dex 包含以下四部分：
-
-1. **动作耦合的力残差监督**：标量 `interaction_horizon=4` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为13。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
-2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
-3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistoryEncoder 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
-4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandSceneFusion 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。
-
-力目标使用原始 batch：`target = (F_future - F_current) * scale`，仿真中即世界系未来力增量。只乘已有触觉 normalizer 的 scale，不加 offset、不旋转、不裁剪；端点之间的归一化增量可以达到 ±2，不另拟合统计。共享 `768→128→3` 力 head 的末层零初始化。
-
-标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。权重为0时使用普通 Dataset，无需未来标签，但六个交互 token 仍参与动作生成。训练只编码一次观测并执行一次 Flow forward；推理跳过力 head，每次 velocity evaluation 重建交互状态，仅积分 FP32 动作。保持768维、8层、8 heads、10步 Euler，以及 `future_actions[B,13,19]` 输出。
-
-完整 checkpoint 保存配置、optimizer、EMA 和归一化统计，按当前模型结构严格加载。权重和 affine 必须来自相同的原始触觉约定；使用 EEF 触觉输入训练的模型须重新训练。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-动作耦合交互状态预测)。
-
-interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.py` 组织。InterAct-Dex 固定使用场景聚合与因果历史编码；AdapTac 的力引导融合使用 cross-attention＋FFN。
+本结构作为新实验配方，使用整策略 EMA 和 strict 保存/恢复，与旧 scene/Coupled checkpoint 不兼容。模型、数据契约见[项目架构](docs/项目架构.md#handscenefusion-触觉融合与历史)；实际参数、检查命令、真实数据4+2步 smoke 及后续预算见[实施记录](docs/interact_dex_implementation_task.md#16-本次实施与验证记录2026-11-04)。有限验证不代表速度、成功率或泛化提升。
 
 ## AdapTac 触觉实验
 

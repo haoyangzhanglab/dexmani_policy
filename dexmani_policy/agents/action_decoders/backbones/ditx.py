@@ -111,7 +111,7 @@ class DiTXBlock(nn.Module):
             nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True)
         )
 
-    def forward(self, x, time_c, context_c, *, context_kv=None, attn_mask=None):
+    def forward(self, x, time_c, context_c, *, context_kv=None):
         (
             shift_msa,
             scale_msa,
@@ -126,7 +126,7 @@ class DiTXBlock(nn.Module):
 
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
         self_attn_output = self.self_attn(
-            normed_x, normed_x, normed_x, attn_mask=attn_mask, need_weights=False,
+            normed_x, normed_x, normed_x, need_weights=False,
         )[0]
         x = x + gate_msa.unsqueeze(1) * self_attn_output
 
@@ -183,7 +183,6 @@ class DiTX(nn.Module):
         self.action_dim = action_dim
         self.n_obs_steps = n_obs_steps
         self.obs_token_dim = obs_token_dim
-        self.hidden_dim = hidden_dim
 
         self.action_io = action_io
         if self.action_io is None:
@@ -240,15 +239,6 @@ class DiTX(nn.Module):
         context_c = self.embed_context(context)
         return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
 
-    def _run_blocks(self, x, time_c, context_c, *, context_kv=None, attn_mask=None):
-        for index, block in enumerate(self.ditx_blocks):
-            x = block(
-                x, time_c, context_c,
-                context_kv=None if context_kv is None else context_kv[index],
-                attn_mask=attn_mask,
-            )
-        return x
-
     def forward(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
     ) -> torch.Tensor:
@@ -265,55 +255,14 @@ class DiTX(nn.Module):
             x = x + self.input_pos_embed.to(dtype=x.dtype)
         else:
             x = self.action_io.encode(x)
-        x = self._run_blocks(x, time_c, context_c, context_kv=context_kv)
+        for index, block in enumerate(self.ditx_blocks):
+            x = block(
+                x, time_c, context_c,
+                context_kv=None if context_kv is None else context_kv[index],
+            )
         if self.action_io is None:
             return self.final_layer(x)
         return self.action_io.decode_velocity(x)
-
-
-class CoupledDiTX(DiTX):
-    def __init__(self, *, interaction_horizon: int, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.future_body_embedding = nn.Parameter(torch.empty(1, 6, self.hidden_dim))
-        nn.init.normal_(self.future_body_embedding, std=WEIGHT_INIT_STD)
-
-        start = self.n_obs_steps - 1
-        core = torch.zeros(self.horizon + 6, dtype=torch.bool)
-        core[start:start + interaction_horizon] = True
-        core[self.horizon:] = True
-        self.register_buffer(
-            "interaction_mask", core[:, None] & ~core[None, :], persistent=False,
-        )
-
-    def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
-        return_features: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if x.ndim != 3 or x.shape[1] != self.horizon:
-            raise ValueError("actions must have shape [B, horizon, action_dim]")
-        if context.shape[0] != x.shape[0]:
-            raise ValueError("actions and context must have the same batch size")
-        context_c = self.embed_context(context) if context_kv is None else None
-        timestep = batch_timesteps(timestep, x, dtype=torch.float32)
-        time_c = self.timestep_embedder(timestep)
-
-        # Rebuild dynamic states on every velocity evaluation, including cached inference.
-        body = context.unflatten(1, (self.n_obs_steps, -1))[:, -1, :6]
-        interaction = self.context_embedder(body)
-        # Remove singleton batch axes so cat gradients match parameter strides for fused AdamW at B=1.
-        interaction = interaction + self.future_body_embedding.squeeze(0).to(interaction.dtype)
-
-        actions = self.input_embedder(x)
-        actions = actions + self.input_pos_embed.squeeze(0).to(actions.dtype)
-        hidden = torch.cat((actions, interaction), dim=1)
-        hidden = self._run_blocks(
-            hidden, time_c, context_c,
-            context_kv=context_kv, attn_mask=self.interaction_mask,
-        )
-
-        features = self.final_layer.norm_final(hidden)
-        velocity = self.final_layer.ffn_final(features[:, :self.horizon])
-        return (velocity, features) if return_features else velocity
 
 
 class ConsistencyDiTX(nn.Module):

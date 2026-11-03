@@ -176,7 +176,8 @@ def test_randomization_inheritance(method, disabled):
     )
 
 
-@pytest.mark.parametrize("overrides", [[], ["tactile=force"], ["agent.future_force_loss_weight=0"]])
+@pytest.mark.parametrize("overrides", [[], ["tactile=force"], ["agent.future_force_loss_weight=0"],
+                                       ["future_force_horizons=[1,3]"]])
 def test_interact_force_config(overrides):
     cfg = load_policy_config("interact_dex", overrides)
     assert cfg.agent.tactile_encoder._target_.endswith(".XHandForceEncoder")
@@ -184,7 +185,13 @@ def test_interact_force_config(overrides):
         "joint_state", "point_cloud", "eef_pose", "fingertip_xyz", "finger_tactile_force",
     ]
     assert cfg.normalization.eef_pose == cfg.normalization.fingertip_xyz == "identity"
-    assert cfg.agent.interaction_horizon == 4
+    assert cfg.agent.future_force_horizons == cfg.future_force_horizons
+    if cfg.agent.future_force_loss_weight == 0:
+        assert cfg.dataset._target_.endswith(".DemonstrationDataset")
+        assert "future_force_horizons" not in cfg.dataset
+    else:
+        assert cfg.dataset._target_.endswith(".InterActDexDataset")
+        assert cfg.dataset.future_force_horizons == cfg.future_force_horizons
 
 
 @pytest.mark.parametrize("overrides", [
@@ -260,7 +267,7 @@ def test_interact_mixed_fields_rejected():
         validate_config(cfg)
     with pytest.raises(ValueError, match="only tactile field"):
         InterActDexDataset("missing.zarr", sensor_modalities=cfg.dataset.sensor_modalities,
-                           interaction_horizon=1)
+                           future_force_horizons=[1])
 
 
 @pytest.mark.parametrize("benchmark", [None, False, True])
@@ -296,3 +303,23 @@ def test_cudnn_benchmark_fresh_and_resume(tmp_path, benchmark, resume_benchmark)
         assert run_trainer(resumed, max_updates=1) == 2
         saved = load_checkpoint(output / "checkpoints/latest.pt")
         assert saved.effective_config["training"].get("cudnn_benchmark", True) == expected
+
+
+@pytest.mark.parametrize("values", [[], [0], [-1], [True], [1.5], [2, 1], [1, 1]])
+def test_interact_horizons_invalid(values):
+    from dexmani_policy.common.config import validate_future_force_horizons
+    with pytest.raises(ValueError):
+        validate_future_force_horizons(values)
+
+
+def test_interact_legacy_horizon_rejected():
+    with pytest.raises(ValueError, match="obsolete"):
+        load_policy_config("interact_dex", ["+interaction_horizon=4"])
+
+
+def test_interact_horizon_exceeds_action_window():
+    from dexmani_policy.agents.policies.interact_dex import InterActDex
+    from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder
+
+    with pytest.raises(ValueError, match="available future actions"):
+        InterActDex(16, 4, 4, 19, XHandForceEncoder(), future_force_horizons=[14])
