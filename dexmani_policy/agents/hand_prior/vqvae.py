@@ -183,7 +183,6 @@ class HandVQVAE(nn.Module):
         num_groups: int = 2,
         codebook_size: int = 4,
         num_layers: int = 6,
-        act_scale: float = 1.0,
         vq_decay: float = 0.8,
         threshold_ema_dead_code: float = 0,
         kmeans_init: bool = False,
@@ -192,8 +191,6 @@ class HandVQVAE(nn.Module):
         super().__init__()
         if len(loss_weight) != hand_dim:
             raise ValueError("loss_weight must contain one weight per hand joint")
-        if not 0 < act_scale < float("inf"):
-            raise ValueError("act_scale must be positive and finite")
 
         self.hand_dim = hand_dim
         self.latent_dim = latent_dim
@@ -202,7 +199,6 @@ class HandVQVAE(nn.Module):
         self.codebook_size = codebook_size
         self.num_layers = num_layers
         self.kmeans_init = kmeans_init
-        self.register_buffer("act_scale", torch.tensor(float(act_scale)))
         self.register_buffer("loss_weight", torch.tensor(loss_weight, dtype=torch.float32))
         self.encoder = HandStateMLP(hand_dim, latent_dim, hidden_dim, num_layers)
         self.decoder = HandStateMLP(latent_dim, hand_dim, hidden_dim, num_layers)
@@ -223,7 +219,6 @@ class HandVQVAE(nn.Module):
             "hand_dim": self.hand_dim, "latent_dim": self.latent_dim,
             "hidden_dim": self.hidden_dim, "num_groups": self.num_groups,
             "codebook_size": self.codebook_size, "num_layers": self.num_layers,
-            "act_scale": float(self.act_scale.detach().cpu()),
             "loss_weight": self.loss_weight.detach().cpu().tolist(),
             "vq_decay": layer.decay,
             "threshold_ema_dead_code": layer.threshold_ema_dead_code,
@@ -231,16 +226,12 @@ class HandVQVAE(nn.Module):
         }
 
     def forward(self, hand: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        target = hand / self.act_scale
-        quantized, losses = self.quantizer(self.encoder(target))
+        quantized, losses = self.quantizer(self.encoder(hand))
         reconstruction = self.decoder(quantized)
-        reconstruction_loss = ((target - reconstruction).abs() * self.loss_weight).mean()
+        reconstruction_loss = ((hand - reconstruction).abs() * self.loss_weight).mean()
         with torch.no_grad():
-            mse = F.mse_loss(target, reconstruction)
+            mse = F.mse_loss(hand, reconstruction)
         return reconstruction_loss, losses.sum(), mse
-
-    def decode(self, latent: Tensor) -> Tensor:
-        return self.decoder(latent) * self.act_scale
 
     @property
     def codebooks(self) -> Tensor:

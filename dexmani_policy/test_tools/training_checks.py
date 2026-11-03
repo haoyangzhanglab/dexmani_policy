@@ -664,7 +664,8 @@ def check_configs(_device):
     methods = ("dp", "dp3", "r3d", "afro", "cordvip", "maniflow", "sat", "dqrise",
                "dexlatent", "adaptac", "interact_dex")
     cases: list[tuple[str, list[str]]] = [(method, []) for method in methods]
-    cases += [("adaptac", [f"tactile={kind}", "tactile_source=real"]) for kind in ("taxel", "patch")]
+    cases += [("adaptac", [f"tactile={kind}", "tactile_source=real"]) for kind in ("force", "taxel", "patch")]
+    cases += [("interact_dex", ["tactile=force", "tactile_source=real"])]
     for method, overrides in cases:
         cfg = load_policy_config(method, overrides)
         validate_config(cfg)
@@ -672,8 +673,19 @@ def check_configs(_device):
         assert cfg.dataset.max_train_episodes is None
         if method == "adaptac":
             assert "finger_tactile_force" in cfg.dataset.sensor_modalities
-            if overrides:
+            if any(value in overrides for value in ("tactile=taxel", "tactile=patch")):
                 assert "taxel_tactile_force" in cfg.dataset.sensor_modalities
+        if method in ("adaptac", "interact_dex"):
+            assert cfg.agent.tactile_source == cfg.tactile_source
+            assert "tactile_source" not in cfg.dataset
+            encoder = hydra.utils.instantiate(cfg.agent.tactile_encoder)
+            assert encoder.input_key in cfg.dataset.sensor_modalities
+            assert (encoder.num_tokens, encoder.out_dim) == (5, 64)
+            if method == "interact_dex":
+                assert cfg.agent.interaction_horizon == cfg.dataset.interaction_horizon == 4
+                no_force = load_policy_config(method, [*overrides, "agent.future_force_loss_weight=0"])
+                assert "interaction_horizon" not in no_force.dataset
+                assert no_force.agent.interaction_horizon == 4
         disabled = load_policy_config(method, [*overrides, "training.use_ema=false"])
         assert not disabled.eval.use_ema
     validate_normalization(load_policy_config("dp3", ["normalization.action=gaussian",

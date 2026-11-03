@@ -31,10 +31,9 @@ from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prot
 logger = logging.getLogger(__name__)
 
 
-def codebook_chunk_size(num_codes: int, requested: int) -> int:
+def codebook_chunk_size(num_codes: int) -> int:
     """Budget 16 MiB for an FP32 distance matrix, always allowing at least one row."""
-    positive_int(requested, "chunk_size")
-    return min(requested, max(1, (16 * 1024 * 1024) // (num_codes * 4)))
+    return min(4096, max(1, (16 * 1024 * 1024) // (num_codes * 4)))
 
 
 def load_hand_array(buffer, episode_mask):
@@ -116,20 +115,18 @@ def train(cfg):
     cfg.vq_vae.output_dir = str(output_dir)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
-    if len(train_ds) < recipe.batch_size:
-        raise ValueError("VQ training requires a full batch; reduce vq_vae.batch_size")
     train_loader = DataLoader(
         train_ds,
         batch_size=recipe.batch_size,
         shuffle=True,
-        drop_last=True,
+        drop_last=False,
         pin_memory=device.type == "cuda",
     )
     val_loader = None
     if val_norm is not None:
         val_loader = DataLoader(
             TensorDataset(torch.from_numpy(val_norm)),
-            batch_size=codebook_chunk_size(recipe.codebook_size ** recipe.num_groups, 4096),
+            batch_size=codebook_chunk_size(recipe.codebook_size ** recipe.num_groups),
             pin_memory=device.type == "cuda",
             generator=torch.Generator().manual_seed(recipe.seed),
         )
@@ -140,7 +137,6 @@ def train(cfg):
         num_groups=recipe.num_groups,
         codebook_size=recipe.codebook_size,
         num_layers=recipe.num_layers,
-        act_scale=recipe.act_scale,
         loss_weight=recipe.loss_weight,
         vq_decay=recipe.vq_decay,
         threshold_ema_dead_code=recipe.threshold_ema_dead_code,

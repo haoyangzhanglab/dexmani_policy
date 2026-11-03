@@ -16,7 +16,6 @@ vq_vae:
   num_groups: 2  # 码本总大小为 codebook_size ** num_groups。
   codebook_size: 4
   num_layers: 6
-  act_scale: 1.0  # 训练输入已归一化到 [-1, 1]。
   vq_decay: 0.8
   threshold_ema_dead_code: 0
   kmeans_init: false

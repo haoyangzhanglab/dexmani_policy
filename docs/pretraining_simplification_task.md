@@ -1,6 +1,6 @@
 # 预训练精简与优化任务书
 
-状态：待实现。本文是最近两轮审查的合并决策与实施要求，不表示代码已经修改或验收通过。
+状态：T1–T8 已完成（2026-11-03）。CPU/CUDA 合成短训、恢复和产物检查通过；实际执行范围与未验证项见第 9 节。
 
 审查基线：[`b2fde5c54c6f5fbb0a770bad38b156fd38c67eb2`](https://github.com/haoyangzhanglab/dexmani_policy/commit/b2fde5c54c6f5fbb0a770bad38b156fd38c67eb2)，2026-11-03。实施前核对当前代码；已解决的问题不重复修改，行号变化以函数及调用关系为准。
 
@@ -215,12 +215,12 @@ python -m dexmani_policy.test_tools.contact_map_checks
 
 提交前核对：
 
-- [ ] T1–T8 已完成；当前 HEAD 已解决的项目注明而不重复实现。
-- [ ] 正常训练、短训、验证、导出和当前版本恢复链路成立。
-- [ ] 无旧格式迁移/容错分支、无新增研究无关配置、无 evidence/contract/source 框架。
-- [ ] 删除和接口变化同步到真实调用方、测试、文档；未留下旧参数示例。
-- [ ] 等价修改与 VQ 尾批这类配方变化分别说明，未把研究假设变化混入重构。
-- [ ] 结果仅报告实际运行的命令与结果；未测性能不写提升比例。
+- [x] T1–T8 已完成；当前 HEAD 已解决的项目注明而不重复实现。
+- [x] 正常训练、短训、验证、导出和当前版本恢复链路成立。
+- [x] 无旧格式迁移/容错分支、无新增研究无关配置、无 evidence/contract/source 框架。
+- [x] 删除和接口变化同步到真实调用方、测试、文档；未留下旧参数示例。
+- [x] 等价修改与 VQ 尾批这类配方变化分别说明，未把研究假设变化混入重构。
+- [x] 结果仅报告实际运行的命令与结果；未测性能不写提升比例。
 
 ## 7. 本轮明确不实施的研究与扩展项
 
@@ -236,3 +236,49 @@ python -m dexmani_policy.test_tools.contact_map_checks
 ## 8. 完成后的交付说明
 
 实施者最终用中文简要报告：实际删除/修改了什么；哪些算法与数据语义保留；VQ 尾批带来的配方变化；运行过的验证及未验证项；GPU 测量结果（若实际执行）。有具体冲突时解释依据和最小调整，不用一份新审查报告替代已授权的实施工作。
+
+
+## 9. 实施结果与验证记录
+
+实施起点为 `e84afac`，工作区原先无未提交改动。T1–T8 均已落地：
+
+- T1：W&B 只接受显式关闭覆盖，fresh/resume 保留 false 或缺省；LR 日志取 optimizer 本次 update 的值。
+- T2：AFRO teacher 前向提前；独立初始化、双向目标、RNG 顺序、teacher 更新时机均保留。
+- T3/T4/T6：删除 act_scale 及 HandVQVAE.decode 包装；固定保留 VQ 尾批；直接导出 FP32 poses/affine，返回数量；chunk helper 只接收 num_codes。
+- T5：权重在构造处检查，零权重 head/目标/loss 不执行，指标省略该项。Dataset 仍要求 contact_map。
+- T7：触觉配置并入 training_checks，接触生成迁至 contact_map_checks；核心预训练使用直接写入的合成 Zarr，删除机械调用次数及历史元数据断言。
+- T8：同步使用文档、导出调用方和测试入口，压缩生命周期等实施说明。
+
+当前代码已具备的样本加权、EMA 初始化修正、direct FP32 距离、initialized 缓存/hook、严格加载及归一化继承未重复改写。空 VQ 输入继续由已有数据/normalizer 边界明确失败，单样本 limits 已可用，无需另加校验层。迁移触觉检查时，将原测试中“存在 overrides 就要求 taxel”的判断收窄到 taxel/patch，以覆盖新增的 force+real 组合；生产配置行为未改变。
+
+训练配方变化仅为 VQ 尾批：每 epoch ceil(N/B) 次更新，尾批使用原 EMA decay。其余修改保留默认数学语义；未实施第 7 节研究项，未增加旧格式兼容或新管理框架。
+
+实际验证使用现有 Conda policy 环境（Torch 2.4.1+cu124），CUDA 测试在 sandbox 外执行：
+
+| 检查 | 结果 |
+| --- | --- |
+| `python -m dexmani_policy.test_tools.hand_prior_checks --device cpu` 及 `--device cuda:0` | 通过；含默认缩放等价、EMA、N=1/6/8 且 B=4 的样本覆盖/指标/调度、best/last、独立导出、PCA、overwrite、DQ-RISE 加载/恢复 |
+| `python -m dexmani_policy.test_tools.pretrain_checks --device cpu` 及 `--device cuda:0` | 通过；含 W&B fresh/resume、warmup/decay 实际 LR、AFRO 梯度/RNG、CordViP 分支/AdamW、两种方法短训/完成预算/验证/续训/导出 |
+| 将 `sys.modules['open3d']=None` 后通过 runpy 执行完整 CPU pretrain_checks | 通过；核心检查没有 Open3D 导入依赖 |
+| `OMP_NUM_THREADS=1 python -m dexmani_policy.test_tools.contact_map_checks` | 通过；公式、串行/spawn、可选 action、对齐及失败清理 |
+| 直接调用 `training_checks.check_configs(cpu)` | 通过；包括迁移后的触觉组合 |
+| 临时目录中调用 `check_inherited_policy`（AFRO/CordViP）及 `check_codebook_training`，CPU | 通过；下游 affine/identity 继承、短训、推理、无原始产物恢复 |
+| 最终 diff、旧引用搜索及 `git diff --check` | 通过；未改启动脚本、未删除已有实验文件 |
+
+本会话还在内存中仅交换 AFRO 两个前向块进行 CUDA 对照：同一模型、输入及 RNG 下，loss、79 个训练参数梯度和 RNG 精确一致，teacher 无梯度。性能实验为 RTX 4090、FP32、TF32 matmul=false，batch=128、frames=17、points=1024；每组预热 3 次、测量 10 次，两轮交换测量顺序，测前/测后同步、测前重置峰值。完整 forward/backward（不含 optimizer 和 teacher EMA）的结果：
+
+| 顺序 | 峰值 allocated memory | 两轮平均耗时 |
+| --- | --- | --- |
+| online 优先 | 12133.0 MiB | 193.3 / 190.4 ms |
+| teacher 优先 | 12129.8 MiB | 190.1 / 179.2 ms |
+
+此配置的完整计算峰值基本不变，不能宣称明显显存节省或固定加速比例。未进行真实数据长训、机器人/仿真闭环效果评估、W&B 在线服务联调或其它设备/形状的性能测量；合成回归不代表任务学习效果。独立 VQ 仍不提供完整训练续训，旧 VQ 配置/checkpoint 需重新生成。
+
+
+### 后续链路审查与清理
+
+已复查数据采样/归一化、训练与恢复、NPZ/encoder 导出、PolicyTrainer 初始化、运行时加载、配置和脚本引用。本轮进一步将 NPZ 排序收为一次 Tensor→NumPy 转换；AFRO/CordViP 只在 main 中导入训练入口，解除模型模块对共享训练循环的顶层依赖。未发现需删除的 SHA、版本分派或旧格式回退；必要的 shape、finite、affine、strict 状态及优化器顺序检查保留。
+
+VQ 测试移除旧缩放的乘除 1 表达及导出调用参数 mock，改为直接验证当前加权目标、best 指标/last epoch 和实际 NPZ 原型；多层非均匀 learned weights 贯通导出、PCA、lookup MSE 与 DQ-RISE 加载。README 补齐独立接触检查入口。本轮没有新增训练配方变化。
+
+本轮实际复验：hand_prior_checks 和 pretrain_checks 的 CPU/CUDA 均通过；6 个预训练实现文件的 mypy（`--check-untyped-defs --follow-imports=skip --ignore-missing-imports`）通过，不代表全仓或第三方类型检查；5 个预训练/导出 module 的 `--help` 与三个 shell 入口的 `bash -n` 通过。在临时源码副本中使用 `pip wheel --no-deps --no-build-isolation --no-index` 构建成功，并检查 wheel 包含新增接触检查及三份预训练 YAML。最终旧引用搜索和 `git diff --check` 通过。真实数据长训与闭环效果仍未验证；本轮未重测性能。

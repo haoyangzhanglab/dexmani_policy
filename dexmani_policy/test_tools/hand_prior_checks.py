@@ -2,7 +2,9 @@
 
 import argparse
 import copy
+import json
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -18,8 +20,9 @@ from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
 from dexmani_policy.agents.policies.dqrise import DQRISE
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.common.pytorch_util import get_rng_state
+from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.training.common.config import load_policy_config
-from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
+from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
 from dexmani_policy.training.pretrain.hand_prior import vqvae as vq_training
 
@@ -80,6 +83,73 @@ def check_vq(device):
     assert all(torch.isfinite(p).all() for p in loaded.parameters())
 
 
+def check_vq_objective(device):
+    model = HandVQVAE(12, [1] * 8 + [0.5] * 4, latent_dim=8, hidden_dim=16, num_layers=1).to(device)
+    with torch.no_grad():
+        model.quantizer.layer_weights.copy_(torch.tensor([-1., 2.], device=device))
+    reference = copy.deepcopy(model)
+    hand = torch.randn(5, 12, device=device)
+    actual = model(hand)
+    latent, commitments = reference.quantizer(reference.encoder(hand))
+    decoded = reference.decoder(latent)
+    expected = (
+        ((hand - decoded).abs() * reference.loss_weight).mean(),
+        commitments.sum(), F.mse_loss(hand, decoded),
+    )
+    torch.testing.assert_close(actual, expected)
+    (3 * actual[0] + 5 * actual[1]).backward()
+    (3 * expected[0] + 5 * expected[1]).backward()
+    for p, q in zip(model.parameters(), reference.parameters()):
+        torch.testing.assert_close(p.grad, q.grad)
+    weights = model.quantizer.layer_weights.softmax(0)
+    latents = torch.stack([weights[0] * a + weights[1] * b for a in model.codebooks[0] for b in model.codebooks[1]])
+    torch.testing.assert_close(build_hand_prototypes(model), model.decoder(latents).float().clamp(-1, 1))
+
+
+def check_vq_tail_batches(device):
+    for count in (1, 6, 8):
+        with tempfile.TemporaryDirectory(prefix="dexmani-vq-tail-") as directory:
+            root = Path(directory)
+            group = zarr.open_group(str(root / "data.zarr"), mode="w")
+            group.create_dataset("meta/episode_ends", data=np.array([count]))
+            group.create_dataset("data/action", data=np.arange(count * 19, dtype=np.float32).reshape(count, 19))
+            cfg = load_policy_config("pretrain/hand_prior/vqvae", [
+                f"zarr_path={root / 'data.zarr'}", f"vq_vae.output_dir={root / 'run'}",
+                "vq_vae.num_epochs=2", "vq_vae.batch_size=4", "vq_vae.save_epochs=1",
+                "vq_vae.latent_dim=8", "vq_vae.hidden_dim=16", "vq_vae.num_layers=1",
+                "vq_vae.num_groups=1", "vq_vae.codebook_size=1", "vq_vae.warmup_steps=1",
+                f"vq_vae.device={device}",
+            ])
+            expected_rows, _, _ = vq_training.prepare_hand_data(cfg)
+            seen = []
+            observed = []
+            forward = HandVQVAE.forward
+            def record(model, hand):
+                seen.append(hand.detach().cpu().numpy())
+                values = forward(model, hand)
+                observed.append((len(hand), [float(v.detach()) for v in values]))
+                return values
+            with (
+                patch.object(HandVQVAE, "forward", record),
+                patch.object(vq_training, "evaluate_vq", side_effect=AssertionError("No validation requested")),
+                patch.object(vq_training, "build_scheduler", wraps=vq_training.build_scheduler) as scheduler,
+            ):
+                vq_training.train(cfg)
+            updates = (count + 3) // 4
+            assert scheduler.call_args.kwargs["num_training_steps"] == 2 * updates
+            assert len(observed) == 2 * updates
+            records = [json.loads(line) for line in (root / "run/metrics.jsonl").read_text().splitlines()]
+            for epoch, record in enumerate(records):
+                batches = observed[epoch * updates:(epoch + 1) * updates]
+                assert sum(n for n, _ in batches) == count
+                actual_rows = np.concatenate(seen[epoch * updates:(epoch + 1) * updates])
+                np.testing.assert_array_equal(actual_rows[np.argsort(actual_rows[:, 0])], expected_rows)
+                expected = np.sum([np.array(v) * n for n, v in batches], axis=0) / count
+                np.testing.assert_allclose([record[k] for k in ("train_enc", "train_vq", "train_mse")], expected)
+            table, _ = load_codebook(root / "run/codebook.npz")
+            assert table.num_codes == 1
+
+
 def check_codebook(device):
     for size in (256, 512):
         table = HandStateCodebook(12, num_codes=size).to(device)
@@ -134,38 +204,50 @@ def check_vq_training(device):
                 "vq_vae.num_groups=1", "vq_vae.codebook_size=3", "vq_vae.warmup_steps=0",
                 f"vq_vae.device={device}",
             ])
-            with patch.object(vq_training, "load_hand_array", wraps=vq_training.load_hand_array) as read:
-                _, val, _ = vq_training.prepare_hand_data(cfg)
-                assert read.call_count == 1 + val_episodes
-                assert (val is None) == (val_episodes == 0)
-            evaluation = ({"wraps": evaluate_vq} if val_episodes else
-                          {"side_effect": AssertionError("V=0 must not evaluate training data")})
-            with patch.object(vq_training, "evaluate_vq", **evaluation) as evaluate, \
-                 patch.object(vq_training, "DataLoader", wraps=DataLoader) as loaders, \
-                 patch.object(vq_training, "export_codebook", wraps=export_codebook) as export:
+            normalized, val, normalizer = vq_training.prepare_hand_data(cfg)
+            train_mask, val_mask = split_episodes(4, seed=cfg.dataset.seed, max_train_episodes=2, val_episodes=val_episodes)
+            rows = np.repeat(train_mask, np.diff(np.r_[0, ends]))
+            np.testing.assert_allclose(normalized, normalizer["hand"].normalize(action[rows, 7:19]).numpy())
+            assert (val is None) == (val_episodes == 0)
+            if val is not None:
+                rows = np.repeat(val_mask, np.diff(np.r_[0, ends]))
+                np.testing.assert_allclose(val, normalizer["hand"].normalize(action[rows, 7:19]).numpy())
+            evaluation = nullcontext() if val_episodes else patch.object(
+                vq_training, "evaluate_vq", side_effect=AssertionError("V=0 must not evaluate training data"),
+            )
+            with evaluation:
                 vq_training.train(cfg)
-                assert evaluate.call_count == 2 * val_episodes
-                assert loaders.call_count == 1 + val_episodes
-                selected = "best" if val_episodes else "last"
-                assert export.call_args.args[0] == output / f"vqvae_hand_{selected}.pt"
+            selected = "best" if val_episodes else "last"
+            checkpoint = torch.load(output / f"vqvae_hand_{selected}.pt", weights_only=True)
+            if val_episodes:
+                records = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+                assert checkpoint["metrics"]["val_lookup_mse"] == min(row["val_lookup_mse"] for row in records)
+            else:
+                assert checkpoint["epoch"] == cfg.vq_vae.num_epochs
+            selected_model = HandVQVAE.from_checkpoint(checkpoint).eval()
+            expected = build_hand_prototypes(selected_model).numpy()
+            exported, _ = load_codebook(output / "codebook.npz")
+            actual = exported.sorted_hand_poses.numpy()
+            np.testing.assert_allclose(actual[np.lexsort(actual.T)], expected[np.lexsort(expected.T)])
             assert (output / "vqvae_hand_last.pt").exists()
             assert not (output / "vqvae_hand_epoch=0002.pt").exists()
             assert (output / "vqvae_hand_best.pt").exists() == bool(val_episodes)
             periodic = torch.load(output / "vqvae_hand_epoch=0001.pt", weights_only=True)
-            assert "split_metadata" not in periodic
             assert ("val_lookup_mse" in periodic["metrics"]) == bool(val_episodes)
             # Export needs neither selection information nor the training epoch.
             for key in ("metrics", "epoch"):
                 del periodic[key]
             minimal = output / "minimal.pt"
             torch.save(periodic, minimal)
-            table = export_codebook(minimal, output / "reexported.npz")
-            assert table.num_codes == 3
+            assert export_codebook(minimal, output / "reexported.npz") == 3
+            assert load_codebook(output / "reexported.npz")[0].num_codes == 3
 
 
 def check_codebook_pipeline(device):
     model = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=1,
-                      num_groups=1, codebook_size=3).to(device)
+                      num_groups=2, codebook_size=3).to(device)
+    with torch.no_grad():
+        model.quantizer.layer_weights.copy_(torch.tensor([-1., 2.], device=device))
     rows = torch.randn(19, 12).clamp(-1, 1)
     loader = DataLoader(TensorDataset(rows), batch_size=7)
     before = {key: value.clone() for key, value in model.state_dict().items()}
@@ -181,15 +263,26 @@ def check_codebook_pipeline(device):
             model_config=model.model_config, model_state_dict=model.state_dict(),
             normalizer_state_dict={"fields.hand.scale": hand_scale, "fields.hand.offset": hand_offset},
         ), vq_checkpoint)
-        table = export_codebook(vq_checkpoint, artifact)
+        assert export_codebook(vq_checkpoint, artifact) == 9
         with np.load(artifact) as payload:
             assert set(payload.files) == {"sorted_hand_poses", "hand_normalizer_scale", "hand_normalizer_offset"}
+        original_bytes = artifact.read_bytes()
+        try:
+            export_codebook(vq_checkpoint, artifact)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("Export overwrote an existing file")
+        assert artifact.read_bytes() == original_bytes
+        assert export_codebook(vq_checkpoint, artifact, overwrite=True) == 9
         loaded_table, affine = load_codebook(artifact)
         torch.testing.assert_close(affine["scale"], hand_scale)
         torch.testing.assert_close(affine["offset"], hand_offset)
-        for name, value in table.state_dict().items():
-            torch.testing.assert_close(value, loaded_table.state_dict()[name], rtol=0, atol=0)
-        lookup_mse = (rows[:, None] - table.sorted_hand_poses).square().sum(-1).amin(-1).mean() / model.hand_dim
+        from sklearn.decomposition import PCA
+        poses = build_hand_prototypes(model).cpu().numpy()
+        order = np.argsort(PCA(n_components=1).fit_transform(poses)[:, 0])
+        np.testing.assert_allclose(loaded_table.sorted_hand_poses.numpy(), poses[order], rtol=1e-5, atol=1e-6)
+        lookup_mse = (rows[:, None] - loaded_table.sorted_hand_poses).square().sum(-1).amin(-1).mean() / model.hand_dim
         torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
                                    lookup_mse, rtol=1e-5, atol=1e-7)
         policy_config: dict[str, Any] = dict(
@@ -291,7 +384,7 @@ def main():
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_vq, check_codebook, check_vq_training, check_codebook_pipeline,):
+    for check in (check_vq, check_vq_objective, check_vq_tail_batches, check_codebook, check_vq_training, check_codebook_pipeline,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

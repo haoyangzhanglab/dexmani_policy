@@ -178,6 +178,8 @@ python -m dexmani_policy.test_tools.hand_prior_checks --device cpu
 python -m dexmani_policy.test_tools.training_checks --device cpu
 python -m dexmani_policy.test_tools.dataset_checks
 python -m dexmani_policy.test_tools.pretrain_checks --device cpu
+# 可选：安装 [preprocess] 后检查接触标签生成
+OMP_NUM_THREADS=1 python -m dexmani_policy.test_tools.contact_map_checks
 python -m dexmani_policy.test_tools.remote_checks
 ```
 

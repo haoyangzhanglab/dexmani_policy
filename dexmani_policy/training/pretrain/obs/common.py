@@ -48,8 +48,9 @@ def load_run(method, argv=None):
         cfg = load_policy_config(args.config or f"pretrain/obs/{method}", args.overrides)
         if args.output_dir is not None:
             cfg.workspace.output_dir = args.output_dir
-    with open_dict(cfg):
-        cfg.workspace.wandb_enabled = not args.no_wandb
+    if args.no_wandb:
+        with open_dict(cfg):
+            cfg.workspace.wandb_enabled = False
     if args.device is not None:
         cfg.training.device = args.device
     if args.num_workers is not None:
@@ -245,6 +246,7 @@ def train(method, argv=None):
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
                         model.update_teacher(current_epoch)
+                    lr = optimizer.param_groups[0]["lr"]
                     optimizer.step()
                     scheduler.step()
                     step += 1
@@ -255,7 +257,7 @@ def train(method, argv=None):
                             to_log_scalars(
                                 {"train/" + key: value / group_size for key, value in totals.items()}
                                 | {
-                                    "train/lr": scheduler.get_last_lr()[0],
+                                    "train/lr": lr,
                                     "train/epoch": current_epoch,
                                 }
                             ),

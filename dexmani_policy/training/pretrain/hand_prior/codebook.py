@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.io_util import atomic_path
 
@@ -27,14 +26,14 @@ def build_hand_prototypes(model: HandVQVAE) -> torch.Tensor:
     latent = embeddings.new_zeros(len(combinations), model.latent_dim)
     for group, weight in enumerate(weights):
         latent = latent + weight * embeddings[group, combinations[:, group]]
-    decoded = model.decode(latent).float()
+    decoded = model.decoder(latent).float()
     if not torch.isfinite(decoded).all():
         raise ValueError("VQ decoder produced non-finite hand states")
     return decoded.clamp(-1, 1)
 
 
 @torch.no_grad()
-def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=False) -> HandStateCodebook:
+def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=False) -> int:
     """Decode and order a complete VQ checkpoint, then publish its runtime table."""
     output = Path(output_path)
     if output.suffix != ".npz":
@@ -46,26 +45,24 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
-    poses = build_hand_prototypes(model).cpu()
-    codebook = HandStateCodebook(model.hand_dim, len(poses))
+    poses = build_hand_prototypes(model).cpu().numpy()
     if len(poses) > 1:
-        projection = PCA(n_components=1).fit_transform(poses.numpy())[:, 0]
-        poses = poses[torch.from_numpy(np.argsort(projection))]
+        projection = PCA(n_components=1).fit_transform(poses)[:, 0]
+        poses = poses[np.argsort(projection)]
     state = checkpoint["normalizer_state_dict"]
     scale = state["fields.hand.scale"].detach().float().cpu()
     offset = state["fields.hand.offset"].detach().float().cpu()
-    codebook.set_prototypes(poses)
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output) as temporary:
         payload = {
-            "sorted_hand_poses": codebook.sorted_hand_poses.detach().cpu().numpy(),
+            "sorted_hand_poses": poses,
             "hand_normalizer_scale": scale.numpy(),
             "hand_normalizer_offset": offset.numpy(),
         }
         # An open file prevents NumPy from silently appending a second suffix.
         with open(temporary, "wb") as file:
             np.savez(file, **payload)
-    return codebook
+    return len(poses)
 
 
 def main():
@@ -75,8 +72,8 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    codebook = export_codebook(args.checkpoint, args.output, device=args.device, overwrite=args.overwrite)
-    print(f"Exported {codebook.num_codes} hand states to {args.output}")
+    count = export_codebook(args.checkpoint, args.output, device=args.device, overwrite=args.overwrite)
+    print(f"Exported {count} hand states to {args.output}")
 
 
 if __name__ == "__main__":

@@ -16,35 +16,84 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.policies.afro import AFROEncoder
 from dexmani_policy.agents.policies.cordvip import CordViPEncoder
 from dexmani_policy.common.pytorch_util import get_rng_state
-from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 from dexmani_policy.datasets.pretrain.afro import AFROPretrainDataset
 from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
-from dexmani_policy.datasets.preprocess.contact_map import compute_contact_map, generate
-from dexmani_policy.training.common.config import load_policy_config, validate_config
+from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.pretrain.obs import common
 from dexmani_policy.training.pretrain.obs.afro import AFRO, vicreg_loss
 
 
-def check_tactile_configs():
-    cases = (
-        ("adaptac", "force", "sim"), ("adaptac", "force", "real"),
-        ("adaptac", "taxel", "real"), ("adaptac", "patch", "real"),
-        ("interact_dex", "force", "sim"), ("interact_dex", "force", "real"),
+def check_run_config(root):
+    for value in (None, True, False):
+        for disabled in (False, True):
+            overrides = [] if value is None else [f"+workspace.wandb_enabled={str(value).lower()}"]
+            flags = ["--no-wandb"] if disabled else []
+            cfg, _, _ = common.load_run("afro", [*flags, *overrides])
+            expected = False if disabled else value
+            assert cfg.workspace.get("wandb_enabled") == expected
+            path = root / "config_resume.pt"
+            base, _, _ = common.load_run("afro", overrides)
+            torch.save({"effective_config": OmegaConf.to_container(base, resolve=True)}, path)
+            restored, _, _ = common.load_run("afro", ["--resume-from", str(path), *flags])
+            assert restored.workspace.get("wandb_enabled") == expected
+
+
+def check_cordvip_branches(device):
+    from dexmani_policy.training.pretrain.obs.cordvip import CordViP
+    modes = dict(hand_pointcloud="identity", object_pointcloud="identity", joint_state="identity")
+    model = CordViP(modes, n_obs_steps=2).to(device)
+    batch = {"obs": {"hand_pointcloud": torch.randn(2, 2, 8, 3, device=device),
+                     "object_pointcloud": torch.randn(2, 2, 1024, 3, device=device),
+                     "joint_state": torch.randn(2, 2, 19, device=device)},
+             "contact_map": torch.rand(2, 2, 1024, device=device)}
+    loss, metrics = model(batch)
+    loss.backward()
+    gradients = {name: p.grad.clone() for name, p in model.named_parameters()}
+    model.zero_grad(set_to_none=True)
+    robot, objects, hand, arm = model.encoder(batch["obs"])
+    contact_loss = torch.nn.functional.mse_loss(model.contact_head(torch.cat((robot, objects), -1)), batch["contact_map"])
+    arm_loss = torch.nn.functional.mse_loss(
+        model.arm_head(torch.cat((robot.flatten(1), objects.flatten(1), hand.flatten(1)), 1)),
+        batch["obs"]["joint_state"][:, 1, :7],
     )
-    for method, tactile, source in cases:
-        cfg = load_policy_config(method, [f"tactile={tactile}", f"tactile_source={source}"])
-        validate_config(cfg)
-        assert cfg.agent.tactile_source == source
-        assert "tactile_source" not in cfg.dataset
-        if method == "interact_dex":
-            assert cfg.agent.interaction_horizon == cfg.dataset.interaction_horizon == 4
-            disabled = load_policy_config(method, ["agent.future_force_loss_weight=0"])
-            assert "interaction_horizon" not in disabled.dataset
-            assert disabled.agent.interaction_horizon == 4
-        encoder = hydra.utils.instantiate(cfg.agent.tactile_encoder)
-        assert encoder.input_key in cfg.dataset.sensor_modalities
-        assert (encoder.num_tokens, encoder.out_dim) == (5, 64)
+    hand_loss = torch.nn.functional.mse_loss(
+        model.hand_head(torch.cat((robot.flatten(1), objects.flatten(1), arm.flatten(1)), 1)),
+        batch["obs"]["joint_state"][:, 1, 7:],
+    )
+    expected = arm_loss + hand_loss + contact_loss
+    expected.backward()
+    torch.testing.assert_close(loss, expected)
+    for name, p in model.named_parameters():
+        torch.testing.assert_close(p.grad, gradients[name])
+    del gradients, loss, expected, robot, objects, hand, arm, contact_loss, arm_loss, hand_loss
+    for branch in ("contact", "arm", "hand"):
+        setattr(model, f"{branch}_loss_weight", 0.0)
+        head = getattr(model, f"{branch}_head")
+        saved = {name: p.detach().clone() for name, p in head.named_parameters()}
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.1)
+        optimizer.zero_grad(set_to_none=True)
+        inputs = {"obs": batch["obs"]} if branch == "contact" else batch
+        with patch.object(head, "forward", side_effect=AssertionError("Disabled head executed")):
+            loss, metrics = model(inputs)
+            if branch == "contact":
+                bad = {**inputs, "contact_map": torch.full_like(batch["contact_map"], float("nan"))}
+                torch.testing.assert_close(model(bad)[0], loss)
+        assert branch not in metrics and torch.isfinite(loss)
+        loss.backward()
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.encoder.parameters())
+        assert all(p.grad is None for p in head.parameters())
+        optimizer.step()
+        for name, p in head.named_parameters():
+            torch.testing.assert_close(p, saved[name], rtol=0, atol=0)
+        setattr(model, f"{branch}_loss_weight", 1.0)
+    for weights in ((0, 0, 0), (-1, 1, 1), (1, float("nan"), 1), (1, 1, float("inf"))):
+        try:
+            CordViP(modes, contact_loss_weight=weights[0], arm_loss_weight=weights[1], hand_loss_weight=weights[2])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid weights accepted")
 
 
 def check_afro_directions(device=torch.device("cpu")):
@@ -57,6 +106,7 @@ def check_afro_directions(device=torch.device("cpu")):
     torch.manual_seed(17)
     loss, _ = model({"obs": {"point_cloud": points}})
     loss.backward()
+    assert all(p.grad is None for p in model.teacher.parameters())
     rng = get_rng_state(device)
 
     torch.manual_seed(17)
@@ -87,101 +137,12 @@ def check_afro_directions(device=torch.device("cpu")):
     torch.testing.assert_close(model.teacher.state_dict(), reference.teacher.state_dict(), rtol=0, atol=0)
 
 
-def check_contact_data(root):
-    source = zarr.open_group(str(root / "source.zarr"), mode="w")
-    source.create_dataset("meta/episode_ends", data=np.array([8, 16, 24]))
-    source.attrs.update(dt=0.02, hand_pointcloud_config={"num_points": 8},
-                        source_id="unused", format="unused", task_name="unused")
-    rng = np.random.default_rng(7)
-    for key, shape in (
-        ("point_cloud", (24, 8, 3)), ("hand_pointcloud", (24, 8, 6)),
-        ("object_pointcloud", (24, 1024, 6)), ("joint_state", (24, 19)),
-        ("action", (24, 19)),
-    ):
-        array = source.create_dataset(f"data/{key}", data=rng.normal(size=shape))
-        array.attrs["unused"] = True
-    original = {key: source["data"][key][:] for key in source["data"]}
-    # Warm Open3D before starting workers to catch unsafe fork-based execution.
-    generate(root / "source.zarr", root / "serial.zarr", num_workers=1)
-    generate(root / "source.zarr", root / "parallel.zarr", num_workers=2)
-    serial = zarr.open_group(str(root / "serial.zarr"), mode="r")
-    parallel = zarr.open_group(str(root / "parallel.zarr"), mode="r")
-    for key, values in original.items():
-        np.testing.assert_array_equal(source["data"][key][:], values)
-    assert dict(serial.attrs) == {"dt": 0.02, "hand_pointcloud_config": {"num_points": 8}}
-    assert set(serial["data"]) == {"hand_pointcloud", "object_pointcloud", "joint_state", "action", "contact_map"}
-    for key in serial["data"]:
-        actual = serial["data"][key][:]
-        assert actual.dtype == np.float32 and not dict(serial["data"][key].attrs)
-        np.testing.assert_allclose(actual, parallel["data"][key][:], rtol=1e-6, atol=1e-7)
-        if key != "contact_map":
-            values = source["data"][key][:]
-            if "pointcloud" in key:
-                assert actual.shape[-1] == 3 and values.shape[-1] == 6
-                values = values[..., :3]
-            np.testing.assert_array_equal(values.astype(np.float32), actual)
-    np.testing.assert_array_equal(source["meta/episode_ends"][:], parallel["meta/episode_ends"][:])
-    labels = parallel["data/contact_map"][:]
-    assert labels.dtype == np.float32 and np.isfinite(labels).all()
-    assert (labels >= 0).all() and (labels <= 1).all()
-    policy_data = DemonstrationDataset(
-        root / "serial.zarr", sensor_modalities=list(CordViPPretrainDataset.sensor_modalities),
-        horizon=12, obs_horizon=4, pad_before=3, pad_after=5, pc_dim=3,
-    )
-    rows = policy_data.sampler.sample_source_rows(0)
-    np.testing.assert_array_equal(policy_data[0]["action"], original["action"][rows].astype(np.float32))
-    original_action = source["data/action"][:]
-    del source["data/action"]
-    generate(root / "source.zarr", root / "without_action.zarr")
-    assert "action" not in zarr.open_group(str(root / "without_action.zarr"), mode="r")["data"]
-    assert len(CordViPPretrainDataset(root / "without_action.zarr")) > 0
-    try:
-        DemonstrationDataset(root / "without_action.zarr", sensor_modalities=["joint_state"], obs_horizon=1)
-    except KeyError:
-        pass
-    else:
-        raise AssertionError("Policy dataset accepted missing action")
-    source.create_dataset("data/action", data=original_action)
-    try:
-        generate(root / "source.zarr", root / "serial.zarr")
-    except FileExistsError:
-        pass
-    else:
-        raise AssertionError("Existing output was overwritten")
-    source["data/hand_pointcloud"][0, 0, 0] = np.nan
-    try:
-        generate(root / "source.zarr", root / "invalid.zarr")
-    except ValueError as error:
-        assert "Nonfinite data" in str(error)
-    else:
-        raise AssertionError("Nonfinite geometry was accepted")
-    assert not (root / "invalid.zarr").exists() and not list(root.glob(".contact-*"))
-
-
-def check_contact_formula():
-    rng = np.random.default_rng(23)
-    objects, hand = rng.normal(size=(17, 3)), rng.normal(size=(9, 3))
-    normals = rng.normal(size=(17, 3))
-    normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
-    expected = []
-    for point, normal in zip(objects, normals):
-        difference = hand - point
-        distance = np.linalg.norm(difference, axis=-1)
-        alignment = np.abs(difference @ normal) / (distance + 1e-8)
-        minimum: np.float64 = np.min(distance * np.exp(1 - alignment))
-        expected.append(1 - 2 * (1 / (1 + np.exp(-10 * minimum)) - 0.5))
-    for block in (1, 7, 128):
-        for sign in (1, -1):
-            actual = compute_contact_map(objects, sign * normals, hand, point_chunk_size=block)
-            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
-
-
 def check_training(root, method, device=torch.device("cpu")):
-    source = root / ("source.zarr" if method == "afro" else "parallel.zarr")
+    source = root / ("source.zarr" if method == "afro" else "cordvip.zarr")
     overrides = [
         f"zarr_path={source}", "dataset.horizon=3", "dataset.pad_before=0", "dataset.pad_after=0",
         "dataset.val_episodes=1", "dataloader.batch_size=4", "dataloader.num_workers=0",
-        "dataloader.pin_memory=false", f"training.device={device}", "training.lr_warmup_steps=0",
+        "dataloader.pin_memory=false", f"training.device={device}", "training.lr_warmup_steps=2",
         "training.val_every_epochs=1", "training.loop.log_interval_steps=1",
     ]
     if method == "afro":
@@ -191,9 +152,18 @@ def check_training(root, method, device=torch.device("cpu")):
         overrides += ["n_obs_steps=2", "training.loop.total_train_steps=4",
                       "training.save_every_updates=1", "training.loop.gradient_accumulation_steps=2"]
         updates = 3
+    used_lrs = []
+    original_step = torch.optim.AdamW.step
+    def recording_step(optimizer, *args, **kwargs):
+        used_lrs.append(optimizer.param_groups[0]["lr"])
+        return original_step(optimizer, *args, **kwargs)
     for name, count in (("full", updates), ("resumed", 1)):
-        common.train(method, argv=["--output-dir", str(root / method / name),
-                                   "--max-updates", str(count), "--no-wandb", *overrides])
+        with patch.object(torch.optim.AdamW, "step", recording_step):
+            common.train(method, argv=["--output-dir", str(root / method / name),
+                                       "--max-updates", str(count), "+workspace.wandb_enabled=false", *overrides])
+    full_records = [json.loads(line) for line in (root / method / "full/metrics.jsonl").read_text().splitlines()]
+    logged_lrs = [row["train/lr"] for row in full_records if "train/lr" in row]
+    assert logged_lrs == used_lrs[:updates] and len(set(logged_lrs)) > 1
     directory = root / method / "resumed"
     cfg = OmegaConf.create(torch.load(
         directory / "resume.pt", map_location="cpu", weights_only=False,
@@ -207,7 +177,7 @@ def check_training(root, method, device=torch.device("cpu")):
     with patch.object(common, "fit_normalizer", side_effect=AssertionError("Refit on resume")), \
          patch.object(common.ExperimentLogger, "save_config", initialize_logging):
         common.train(method, argv=["--resume-from", str(directory),
-                                   "--max-updates", str(updates - 1), "--no-wandb"])
+                                   "--max-updates", str(updates - 1)])
     full = torch.load(root / method / "full/resume.pt", map_location="cpu", weights_only=False)
     resumed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
     for key in ("model_state", "scheduler_state", "global_step"):
@@ -217,8 +187,10 @@ def check_training(root, method, device=torch.device("cpu")):
     for key in ("torch", "torch_cuda"):
         torch.testing.assert_close(full["rng_state"][key], resumed["rng_state"][key], rtol=0, atol=0)
     assert full["global_step"] == updates
+    assert resumed["effective_config"]["workspace"]["wandb_enabled"] is False
     records = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
     assert any("val/loss" in record for record in records)
+    assert [row["train/lr"] for row in records if "train/lr" in row] == logged_lrs
     common.export_encoder(resumed["model_state"], cfg.normalization, root / "export.pt")
     package = torch.load(root / "export.pt", weights_only=True)
     assert package["normalization"] == dict(cfg.normalization)
@@ -316,7 +288,7 @@ def check_training(root, method, device=torch.device("cpu")):
 
 
 def check_train_only(root, method, device=torch.device("cpu")):
-    source = root / ("source.zarr" if method == "afro" else "parallel.zarr")
+    source = root / ("source.zarr" if method == "afro" else "cordvip.zarr")
     overrides = [
         f"zarr_path={source}", "dataset.horizon=3", "dataset.pad_before=0", "dataset.pad_after=0",
         "dataloader.batch_size=4", "dataloader.num_workers=0", "dataloader.pin_memory=false",
@@ -403,7 +375,7 @@ def check_pretrain_samples(root):
         raise AssertionError("Explicit val without windows was accepted")
 
     cordvip_dataset = CordViPPretrainDataset(
-        root / "parallel.zarr", horizon=5, obs_horizon=2, pad_before=0, pad_after=0, val_episodes=1,
+        root / "cordvip.zarr", horizon=5, obs_horizon=2, pad_before=0, pad_after=0, val_episodes=1,
     )
     sample = cordvip_dataset[0]
     rows = cordvip_dataset.sampler.sample_source_rows(0)[:2]
@@ -433,16 +405,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu", type=torch.device)
     args = parser.parse_args()
-    check_contact_formula()
     torch.set_num_threads(2)
-    check_tactile_configs()
     check_afro_directions(args.device)
+    check_cordvip_branches(args.device)
     check_validation_weighting(args.device)
-    print("PASS tactile configs and AFRO bidirectional loss/gradients", flush=True)
+    print("PASS AFRO loss/gradients, CordViP branches and validation weighting", flush=True)
     with tempfile.TemporaryDirectory(prefix="dexmani-pretrain-checks-") as directory:
         root = Path(directory)
-        check_contact_data(root)
-        print("PASS serial/spawn preprocessing and failure cleanup", flush=True)
+        check_run_config(root)
+        rng = np.random.default_rng(7)
+        for name in ("source.zarr", "cordvip.zarr"):
+            group = zarr.open_group(str(root / name), mode="w")
+            group.create_dataset("meta/episode_ends", data=np.array([8, 16, 24]))
+            for key, shape in (("point_cloud", (24, 8, 3)), ("hand_pointcloud", (24, 8, 3)),
+                               ("object_pointcloud", (24, 1024, 3)), ("joint_state", (24, 19))):
+                group.create_dataset(f"data/{key}", data=rng.normal(size=shape).astype(np.float32))
+            labels = np.arange(24 * 1024, dtype=np.float32).reshape(24, 1024) / (24 * 1024)
+            group.create_dataset("data/contact_map", data=labels)
         check_pretrain_samples(root)
         print("PASS AFRO stride and CordViP source-row/contact alignment", flush=True)
         for method in ("afro", "cordvip"):

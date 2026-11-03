@@ -10,7 +10,6 @@ from dexmani_policy.agents.action_decoders.backbones.modules import DiTTimestepE
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.training.pretrain.obs.common import train
 
 
 def vicreg_loss(prediction, target):
@@ -100,9 +99,9 @@ class AFRO(nn.Module):
             points = self.normalizer["point_cloud"].normalize(points)
         batch_size, frames = points.shape[:2]
         points = points.flatten(0, 1)
-        online = self.encoder(points).reshape(batch_size, frames, 64)
         with torch.no_grad():
             teacher = self.teacher(points).reshape(batch_size, frames, 64)
+        online = self.encoder(points).reshape(batch_size, frames, 64)
 
         current = torch.cat((online[:, :-1], online[:, 1:])).reshape(-1, 64)
         following = torch.cat((online[:, 1:], online[:, :-1])).reshape(-1, 64)
@@ -138,6 +137,8 @@ class AFRO(nn.Module):
 
 
 def main():
+    from dexmani_policy.training.pretrain.obs.common import train
+
     train("afro")
 
 
