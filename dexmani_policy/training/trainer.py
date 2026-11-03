@@ -236,7 +236,7 @@ class PolicyTrainer:
         (raw_loss / loss_divisor).backward()
         return raw_loss.detach(), log_dict
 
-    def save_checkpoint(self, tag_suffix: str):
+    def save_checkpoint(self, reason: str):
         global_step = self.global_step
         if self.last_checkpoint_step == global_step:
             return
@@ -251,12 +251,12 @@ class PolicyTrainer:
             effective_config=cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True)),
             rng_state=get_rng_state(self.device),
         )
-        tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
-        checkpoint_path = save_checkpoint(self.checkpoint_dir / f"{tag}.pt", checkpoint)
+        checkpoint_path = save_checkpoint(self.checkpoint_dir / f"step_{global_step:08d}.pt", checkpoint)
         with atomic_path(self.checkpoint_dir / "latest.pt") as temporary:
             temporary.unlink()
             temporary.symlink_to(checkpoint_path.name)
         self.last_checkpoint_step = global_step
+        print(f"Saved {checkpoint_path} ({reason})")
 
     def signal_handler(self, signum, frame):
         if self.stop_requested:

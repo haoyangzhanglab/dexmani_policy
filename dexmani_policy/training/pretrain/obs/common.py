@@ -37,13 +37,16 @@ def load_run(method, argv=None):
     checkpoint = None
     if args.resume_from is not None:
         if args.config is not None or args.output_dir is not None or args.overrides:
-            parser.error("Resume reads the saved recipe in its original run; --config, --output-dir and overrides are fresh-only")
+            parser.error("Resume reads the saved recipe from the specified run; --config, --output-dir and overrides are fresh-only")
         source = Path(args.resume_from).expanduser().resolve(strict=True)
         if source.is_dir():
-            source = source / "resume.pt"
+            directory = source
+            source = directory / "checkpoints/latest.pt"
+        else:
+            directory = source.parent.parent
         checkpoint = torch.load(source, map_location="cpu", weights_only=False, mmap=True)
         cfg = OmegaConf.create(checkpoint["effective_config"])
-        cfg.workspace.output_dir = str(source.parent)
+        cfg.workspace.output_dir = str(directory)
     else:
         cfg = load_policy_config(args.config or f"pretrain/obs/{method}", args.overrides)
         if args.output_dir is not None:
@@ -90,7 +93,9 @@ def save_run(model, optimizer, scheduler, cfg, step):
         "scheduler_state": scheduler.state_dict(), "global_step": step,
         "rng_state": get_rng_state(cfg.training.device), "effective_config": config,
     }
-    with atomic_path(output / "resume.pt") as temporary:
+    checkpoint_dir = output / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    with atomic_path(checkpoint_dir / "latest.pt") as temporary:
         torch.save(checkpoint, temporary)
 
 
@@ -134,7 +139,7 @@ def train(method, argv=None):
         print(f"Pretraining already completed at step {checkpoint['global_step']}")
         return
     if not resuming:
-        for name in ("config.yaml", "metrics.jsonl", "encoder.pt", "resume.pt"):
+        for name in ("config.yaml", "metrics.jsonl", "encoder.pt", "checkpoints"):
             path = Path(cfg.workspace.output_dir) / name
             if path.exists():
                 raise FileExistsError(f"Pretraining output already exists: {path}")
@@ -288,7 +293,7 @@ def train(method, argv=None):
                     save_run(model, optimizer, scheduler, cfg, step)
             save_run(model, optimizer, scheduler, cfg, step)
             export_encoder(model.state_dict(), cfg.normalization, Path(cfg.workspace.output_dir) / "encoder.pt")
-            print(f"[{type(model).__name__}] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
+            print(f"[{type(model).__name__}] Saved raw encoder.pt and checkpoints/latest.pt at epoch={epoch}, step={step}/{total}")
     finally:
         close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 

@@ -38,7 +38,7 @@ bash scripts/training/train.sh dp3 'task_name=<task>'
 
 # 从同一实验目录的 latest.pt 恢复完整状态
 python -m dexmani_policy.training.common.resume \
-  --run experiments/dp3/<task>/<run> --device cuda:0 --num-workers 4
+  --run experiments/train/dp3/<task>/<run> --device cuda:0 --num-workers 4
 
 # 单个 Checkpoint 评测
 python -m dexmani_policy.evaluate \
@@ -49,7 +49,7 @@ python -m dexmani_policy.evaluate \
 python -m dexmani_policy.eval_pipeline \
   --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
   --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
-  --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
+  --seed 1024 --output-dir <run>/eval/<new-evaluation>
 ```
 
 续训直接使用 Checkpoint 中的有效配方与完整训练状态，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续。只有 fresh 装配配方、访问初始化来源和拟合统计；恢复不重写保存的部署事实或训练总预算，`--max-updates` 只限制本次调用。恢复要求同数据、同配方、同训练布局，不保证 worker 增强或编译计算逐位重放。日志追加前丢弃末尾未以换行结束的残段，完整历史行保持原样，允许重复或较小 step；训练进度只取 checkpoint。
@@ -164,7 +164,7 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
   --override 'task_name=<task>' adaptac
 
 # 正式续训由 checkpoint 拥有配方，不再次传 tactile 或 normalization override
-python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>/<run>
+python -m dexmani_policy.training.common.resume --run experiments/train/adaptac/<task>/<run>
 ```
 
 `test_tools/smoke_test.py` 每次接收一个配置，调用正式训练与原目录恢复路径。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，不在 smoke 中建立第二套配置或扫描流程。
@@ -185,7 +185,7 @@ python -m dexmani_policy.test_tools.remote_checks
 
 默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 指定保留产物的目录，空目录可用，已有训练产物由正式 fresh 入口拒绝覆盖；未指定时使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用保存配置、affine 与 strict load，不读取外部 config.yaml。inspect 默认 latest，也接受明确文件路径，相对文件名以实验 checkpoints 目录解析；不支持 best 或百分比 selector。Runtime 返回完整未来动作窗口，调用方设置实际执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用保存配置、affine 与 strict load，不读取外部 config.yaml。experiment 使用相对仓库根目录或绝对路径指定完整 run；inspect 默认 latest，也接受明确 checkpoint 文件路径，相对文件名以该 run 的 checkpoints 目录解析。Runtime 返回完整未来动作窗口，调用方设置实际执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。
 
 fresh 按数据事实和配方输入保存控制周期、点云配方、depth 尺度及指尖名称，resume 原样保留，由公开 `PolicyInfo` 提供给 Real。inspect 和纯策略推理允许缺少硬件事实；设备入口按需检查。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 
@@ -199,15 +199,25 @@ future 标签从 query+1 的下一观测行开始，真实后继有效，重复�
 
 ## 实验产物
 
-配置、Checkpoint、日志与评测结果默认保存在：
+默认布局如下，所有训练输出通过 `workspace.output_dir` 消费；保留现有 Hydra、预训练 CLI 和显式目录覆盖方式。
 
-```text
-experiments/<policy_name>/<task_name>/<run>/
-```
+| 内容 | 默认路径 |
+| --- | --- |
+| 外部权重 | `data/pretrained/<model>/` |
+| 示教／加工数据 | `robot_data/<dataset>.zarr`／`robot_data/<dataset>.cordvip.zarr` |
+| AFRO／CordViP／VQ 预训练 | `experiments/pretrain/<afro或cordvip或vqvae>/<task>/<run>/` |
+| 主策略 | `experiments/train/<policy>/<task>/<run>/` |
+| 单 run 评测 | `<run>/eval/<evaluation>/` |
+
+run 使用固定的 `run_id`，例如 `2026-11-03_14-30-00_seed42`；同次运行重复解析不更新时间，Hydra 批量运行保留 job 编号。分组使用 `task_name`，跨任务预训练可指定集合名称并显式提供数据路径。消融名称通过输出目录表达。
+
+每个 run 根目录保留 `config.yaml`、`metrics.jsonl` 和启用时的 `wandb/`。观测预训练滚动保存 `checkpoints/latest.pt`，在线 `encoder.pt` 留在根目录；VQ 保存 `checkpoints/epoch_0100.pt`、`checkpoints/last.pt` 和有验证集时的 `checkpoints/best.pt`，根目录保留 `codebook.npz`。主训练只保存 `checkpoints/step_00020000.pt` 这样的 update 文件名，`checkpoints/latest.pt` 是指向最近保存文件的相对链接。
+
+下游直接指定 `initialization.encoder=experiments/pretrain/afro/<task>/<run>/encoder.pt` 或 `initialization.codebook=experiments/pretrain/vqvae/<task>/<run>/codebook.npz`；正式实验优先使用已停止或完成的预训练 run。跨 run 比较显式指定 `--output-dir experiments/eval/<comparison>/`。
 
 设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验保留配置、Checkpoint 和对应源码；数据加工版本、模板等笔记按实验需要记录，不要求 source_id/commit/template 手工清单作为使用条件。
 
-选模完成独立测试后保存 `selection_result.json`，不自动发布 best 指针。结果路径相对结果目录，`--output-dir` 可指定任意空目录。使用胜者时显式指定 checkpoint、weights、NFE 与执行长度；Real 的执行长度在其运行配置设置。历史 `best_ckpt.json` 保留但不再读取，详见[仿真评测机制](docs/仿真评测机制.md)。
+选模完成独立测试后保存 `selection_result.json`，不自动发布 best 指针。`selection_result.json` 内的路径相对结果目录，`--output-dir` 可指定任意空目录。使用胜者时显式指定 checkpoint、weights、NFE 与执行长度；Real 的执行长度在其运行配置设置。详见[仿真评测机制](docs/仿真评测机制.md)。
 
 每个 run 使用单写者，fresh 在昂贵初始化前检查输出冲突。保存采用同目录临时文件加 `os.replace`，不提供并发排他、强制 fsync 或多文件事务。远程下载用一次普通 rsync，同步已停止/完成的 run，全部成功后再使用。时间采样接口仅保留 uniform、beta、discrete；旧额外分布实验使用原源码版本。
 

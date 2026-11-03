@@ -30,6 +30,6 @@ rsync -azs --progress "${DRY_RUN[@]}" \
     --exclude='/.aws/' --exclude='/.env*' \
     --exclude='/.ruff_cache/' --exclude='/.mypy_cache/' --exclude='/.DS_Store' \
     --exclude='/data' --exclude='/robot_data' --exclude='/experiments' \
-    --exclude='/pretrained_models' --exclude='/wandb' --exclude='/_wandb' \
+    --exclude='/wandb' --exclude='/_wandb' \
     --exclude='/outputs' --exclude='/logs' --exclude='/results' --exclude='/bin' \
     -- "$PROJECT_ROOT/" "$HOST:${DEST%/}/"

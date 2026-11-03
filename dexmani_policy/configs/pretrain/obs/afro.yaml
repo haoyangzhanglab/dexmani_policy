@@ -34,5 +34,5 @@ training:
     gradient_accumulation_steps: 1
     log_interval_steps: 100
 workspace:
-  output_dir: experiments/pretrain/obs/afro/${task_name}/${run_id:}_seed${training.seed}
+  output_dir: experiments/pretrain/afro/${task_name}/${run_id:}_seed${training.seed}
   wandb_cfg: null

@@ -134,4 +134,3 @@ experiments/
 # .claude/
 .ruff_cache/
 .vscode/
-pretrained_models/

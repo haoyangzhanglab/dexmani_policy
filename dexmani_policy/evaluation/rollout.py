@@ -51,7 +51,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
             raise ValueError("Evaluation seeds must be nonempty")
         validate_evaluation_seed(seed)
     options = dict(cfg["env_runner"])
-    directory = create_run_directory(checkpoint.parent.parent / "eval_dexsim", output_dir)
+    directory = create_run_directory(checkpoint.parent.parent / "eval", output_dir)
     path = directory / "result_details.json"
     render_mode = (options.get("env_kwargs") or {}).get("render_mode")
     if render_mode == "human" and not os.environ.get("DISPLAY"):

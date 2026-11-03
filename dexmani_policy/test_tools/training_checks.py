@@ -4,6 +4,9 @@ import argparse
 import copy
 import io
 import json
+import os
+import shutil
+import signal
 import tempfile
 from contextlib import redirect_stderr
 from dataclasses import dataclass
@@ -34,7 +37,7 @@ from dexmani_policy.training.common.resume import prepare_resume
 
 def check_evaluation(_device):
     from dexmani_policy.common.io_util import write_json
-    from dexmani_policy.deployment import inspect_policy
+    from dexmani_policy.deployment import metadata
     from dexmani_policy.env_runner.sim_runner import SimRunner
     from dexmani_policy.evaluation import rollout, selection
     from dexmani_policy.evaluation.seeds import split_evaluation_seeds
@@ -56,6 +59,7 @@ def check_evaluation(_device):
     )
     with tempfile.TemporaryDirectory(prefix="dexmani-evaluation-check-") as temporary:
         root = Path(temporary)
+        config["workspace"] = dict(output_dir=str(root / "original-run"))
         checkpoints = [save_checkpoint(root / folder / "model.pt", Checkpoint(
             step, {}, {}, {}, {}, {}, config)) for step, folder in ((1, "external-a"), (2, "external-b"))]
         run = root / "run"
@@ -64,6 +68,8 @@ def check_evaluation(_device):
         link.symlink_to(checkpoints[1])
         for explicit in (checkpoints[1], link, "link.pt"):
             assert inspect_policy(run, checkpoint=explicit).checkpoint_path == checkpoints[1]
+        with patch.object(metadata, "PROJECT_ROOT", root):
+            assert inspect_policy("run", checkpoint="link.pt").checkpoint_path == checkpoints[1]
         directory = root / "selection"
         calls = []
 
@@ -71,7 +77,7 @@ def check_evaluation(_device):
             calls.append(options)
             assert options["weights"] == "ema"
             assert options["inference_steps"] == options["action_steps"] == 2
-            result = dict(global_step=2 if Path(checkpoint).resolve() == checkpoints[1] else 1,
+            result = dict(global_step=load_checkpoint(checkpoint).global_step,
                           statistics=dict(success_rate=0.8, avg_steps=10))
             output = rollout.create_run_directory(None, options["output_dir"])
             path = output / "result_details.json"
@@ -88,20 +94,27 @@ def check_evaluation(_device):
         assert (path.parent / record["ckpt_relpath"]).resolve() == checkpoints[1]
         assert (path.parent / record["test_result"]).is_file()
         assert record["inference"] == dict(use_ema=True, inference_steps=2, action_steps=2)
-        assert not (checkpoints[0].parent.parent / "best_ckpt.json").exists()
+        internal = [save_checkpoint(run / "checkpoints" / f"step_{i:08d}.pt",
+                                    load_checkpoint(checkpoint))
+                    for i, checkpoint in enumerate(checkpoints, 1)]
+        with patch.object(selection, "evaluate_policy", side_effect=evaluate), \
+             patch.object(selection, "load_seed_pool", return_value=pool):
+            default_result = selection.run_pipeline(internal, selection_episodes=2, test_episodes=3, device="cpu")
+        assert default_result.parent.parent == run / "eval"
+        moved = root / "moved"
+        shutil.copytree(run, moved, symlinks=True)
+        moved_result = moved / default_result.relative_to(run)
+        moved_record = json.loads(moved_result.read_text())
+        moved_winner = (moved_result.parent / moved_record["ckpt_relpath"]).resolve()
+        assert moved_winner == moved / "checkpoints/step_00000002.pt"
+        assert load_checkpoint(moved_winner).global_step == moved_record["global_step"] == 2
+        assert (moved_result.parent / moved_record["test_result"]).is_file()
+        assert not (run / "checkpoints/best.pt").exists()
         # The same saved file has the same defaults via latest or an explicit path.
         (run / "checkpoints/latest.pt").symlink_to(checkpoints[1])
         latest = inspect_policy(run)
         explicit_info = inspect_policy(run, checkpoint=checkpoints[1])
         assert latest == explicit_info
-        for removed in ("best", "20pct"):
-            try:
-                inspect_policy(run, checkpoint=removed)
-            except FileNotFoundError:
-                pass
-            else:
-                raise AssertionError(f"Removed selector accepted: {removed}")
-
         @dataclass
         class Randomization:
             randomize_model_id: bool = True
@@ -206,6 +219,9 @@ def check_evaluation(_device):
                         control_dt_s=6 / 240, frame_skip=6, action_cnt_limit=3, success_hold_steps=2,
                         randomization=dict(randomize_model_id=True, table_height_range=(-0.01, 0.02)),
                         stability=dict(stable_check_steps=240, max_stability_retries=0))
+                    moved_checkpoint = moved / internal[0].relative_to(run)
+                    _, relocated_result = rollout.evaluate_policy(moved_checkpoint, seeds=[8], device="cpu", video=False)
+                    assert relocated_result.parent.parent == moved / "eval"
                     runner = runners[0]
                     runner.env_kwargs = {"frame_skip": 12}
                     list(runner.run(agent, seeds=[8], inference_steps=2, action_steps=agent.n_action_steps))
@@ -672,6 +688,23 @@ def check_codebook_training(root, device=torch.device("cpu")):
 
 
 def check_configs(_device):
+    from dexmani_policy.training.common.config import LAUNCH_ID, CONFIG_ROOT, register_resolvers
+
+    for method in ("afro", "cordvip", "vqvae"):
+        config = f"pretrain/hand_prior/{method}" if method == "vqvae" else f"pretrain/obs/{method}"
+        cfg = load_policy_config(config, ["task_name=collection", "zarr_path=/tmp/explicit.zarr"])
+        expected = f"experiments/pretrain/{method}/collection/{LAUNCH_ID}_seed42"
+        assert cfg.workspace.output_dir == expected
+        OmegaConf.resolve(cfg)
+        assert cfg.workspace.output_dir == expected
+        assert load_policy_config(config, ["task_name=collection"]).workspace.output_dir == expected
+        assert load_policy_config(config, ["workspace.output_dir=/tmp/custom"]).workspace.output_dir == "/tmp/custom"
+    register_resolvers()
+    with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+        cfg = hydra.compose(config_name="dp3", return_hydra_config=True)
+    assert cfg.hydra.run.dir == f"experiments/train/dp3/pick_apple_messy/{LAUNCH_ID}_seed42"
+    assert cfg.hydra.sweep.dir == cfg.hydra.run.dir
+    assert OmegaConf.to_container(cfg.hydra.sweep)["subdir"] == "${hydra.job.num}"
     methods = ("dp", "dp3", "r3d", "afro", "cordvip", "maniflow", "sat", "dqrise",
                "dexlatent", "adaptac", "interact_dex")
     cases: list[tuple[str, list[str]]] = [(method, []) for method in methods]
@@ -753,8 +786,34 @@ def check_training_resume(device):
             cfg.training.loop.log_interval_steps = 1
             trainer = build_trainer(cfg)
             trainer.optimizer.register_step_pre_hook(record_lr)
-            assert run_trainer(trainer, max_updates=4) == 4
+            optimizer_step = trainer.optimizer_step
+
+            def interrupt_at_milestone():
+                optimizer_step()
+                if trainer.global_step + 1 == 4:
+                    trainer.signal_handler(signal.SIGINT, None)
+
+            with patch.object(trainer, "optimizer_step", side_effect=interrupt_at_milestone), \
+                 patch("dexmani_policy.training.trainer.save_checkpoint", wraps=save_checkpoint) as save:
+                assert run_trainer(trainer, max_updates=4) == 4
+            assert trainer.stop_requested
+            assert save.call_count == 2
+            try:
+                build_trainer(cfg)
+            except FileExistsError:
+                pass
+            else:
+                raise AssertionError("Fresh policy overwrote an existing run")
+            assert sorted(p.name for p in (split / "checkpoints").glob("step_*.pt")) == [
+                "step_00000002.pt", "step_00000004.pt"]
             original = load_checkpoint(split / "checkpoints/latest.pt")
+            original_split = split
+            split = root / f"moved-{bfloat16}"
+            shutil.copytree(original_split, split, symlinks=True)
+            old_metrics = (original_split / "metrics.jsonl").read_bytes()
+            latest = split / "checkpoints/latest.pt"
+            assert latest.is_symlink() and not Path(os.readlink(latest)).is_absolute()
+            assert latest.resolve().name == "step_00000004.pt"
             with (split / "metrics.jsonl").open("ab") as stream:
                 stream.write(b'{"step":')
             source.attrs.update(dt=0.1, pointcloud_config={"num_points": 123})
@@ -773,6 +832,9 @@ def check_training_resume(device):
             parameter = trainer.trainable_parameters[0]
             parameter.grad = torch.ones_like(parameter)
             assert run_trainer(trainer, max_updates=2) == 6
+            assert Path(trainer.cfg.workspace.output_dir) == split
+            assert (original_split / "metrics.jsonl").read_bytes() == old_metrics
+            assert not (original_split / "checkpoints/step_00000006.pt").exists()
             continuous = load_checkpoint(full / "checkpoints/latest.pt")
             resumed = load_checkpoint(split / "checkpoints/latest.pt")
             for key in ("model_state", "ema_model_state", "scheduler_state"):

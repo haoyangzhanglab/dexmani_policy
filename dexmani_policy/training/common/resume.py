@@ -1,4 +1,4 @@
-"""Resume latest.pt in its original run using only explicit execution settings."""
+"""Resume latest.pt in the specified run using only explicit execution settings."""
 
 import argparse
 from pathlib import Path

@@ -128,7 +128,7 @@ def check_vq_tail_batches(device):
             group.create_dataset("meta/episode_ends", data=np.array([count]))
             group.create_dataset("data/action", data=np.arange(count * 19, dtype=np.float32).reshape(count, 19))
             cfg = load_policy_config("pretrain/hand_prior/vqvae", [
-                f"zarr_path={root / 'data.zarr'}", f"vq_vae.output_dir={root / 'run'}",
+                f"zarr_path={root / 'data.zarr'}", f"workspace.output_dir={root / 'run'}",
                 "vq_vae.num_epochs=2", "vq_vae.batch_size=4", "vq_vae.save_epochs=1",
                 "vq_vae.latent_dim=8", "vq_vae.hidden_dim=16", "vq_vae.num_layers=1",
                 "vq_vae.num_groups=1", "vq_vae.codebook_size=1", "vq_vae.warmup_steps=1",
@@ -285,7 +285,7 @@ def check_vq_training(device):
             output = Path(directory) / f"val{val_episodes}"
             cfg = load_policy_config("pretrain/hand_prior/vqvae", [
                 f"dataset.zarr_path={source}", "dataset.max_train_episodes=2",
-                f"dataset.val_episodes={val_episodes}", f"vq_vae.output_dir={output}",
+                f"dataset.val_episodes={val_episodes}", f"workspace.output_dir={output}",
                 "vq_vae.num_epochs=2", "vq_vae.batch_size=4", "vq_vae.save_epochs=1",
                 "vq_vae.latent_dim=8", "vq_vae.hidden_dim=16", "vq_vae.num_layers=1",
                 "vq_vae.num_groups=1", "vq_vae.codebook_size=3", "vq_vae.warmup_steps=0",
@@ -304,8 +304,14 @@ def check_vq_training(device):
             )
             with evaluation:
                 vq_training.train(cfg)
+            try:
+                vq_training.train(cfg)
+            except FileExistsError:
+                pass
+            else:
+                raise AssertionError("Fresh VQ overwrote an existing run")
             selected = "best" if val_episodes else "last"
-            checkpoint = torch.load(output / f"vqvae_hand_{selected}.pt", weights_only=True)
+            checkpoint = torch.load(output / f"checkpoints/{selected}.pt", weights_only=True)
             if val_episodes:
                 records = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
                 assert checkpoint["metrics"]["val_lookup_mse"] == min(row["val_lookup_mse"] for row in records)
@@ -316,10 +322,10 @@ def check_vq_training(device):
             exported, _ = load_codebook(output / "codebook.npz")
             actual = exported.sorted_hand_poses.numpy()
             np.testing.assert_allclose(actual[np.lexsort(actual.T)], expected[np.lexsort(expected.T)])
-            assert (output / "vqvae_hand_last.pt").exists()
-            assert not (output / "vqvae_hand_epoch=0002.pt").exists()
-            assert (output / "vqvae_hand_best.pt").exists() == bool(val_episodes)
-            periodic = torch.load(output / "vqvae_hand_epoch=0001.pt", weights_only=True)
+            assert (output / "checkpoints/last.pt").exists()
+            assert not (output / "checkpoints/epoch_0002.pt").exists()
+            assert (output / "checkpoints/best.pt").exists() == bool(val_episodes)
+            periodic = torch.load(output / "checkpoints/epoch_0001.pt", weights_only=True)
             assert ("val_lookup_mse" in periodic["metrics"]) == bool(val_episodes)
             # Export needs neither selection information nor the training epoch.
             for key in ("metrics", "epoch"):

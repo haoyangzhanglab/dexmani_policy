@@ -8,7 +8,7 @@
 HOST=dexserver
 REPO=/home/user/dexmani_policy
 DATA_ROOT=/data/project
-RUN=/data/project/experiments/dp3/pick_apple/run01
+RUN=/data/project/experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42
 PYTHON=/home/user/miniconda3/envs/policy/bin/python
 
 ssh "$HOST" 'mkdir -p /data/project/robot_data /data/project/data'
@@ -22,7 +22,7 @@ bash scripts/remote/sync_data.sh --host "$HOST" \
 
 每次同步一个明确目录，默认上传；`--pull` 反转方向，`--checksum` 改用内容比较，`--dry-run` 预览。同步不删除目标独有文件。训练使用的数据版本不就地修改；重新导出或修改加工配方时使用新路径。
 
-Uni3D 初始权重随 `data/pretrained/uni3d/` 上传；HF 初始模型缓存须在远端单独准备，来源设置见 [数据说明](../data/README.md)。从完整 checkpoint 续训或推理不需要初始来源文件。
+外部初始权重和必要配套文件随 `data/pretrained/<model>/` 上传，包括 HF 模型的配置与权重；使用这些本地目录时无需另行准备全局 HF 缓存，来源设置见 [数据说明](../data/README.md)。从完整 checkpoint 续训或推理不需要初始来源文件。
 
 ## 启动与原目录续训
 
@@ -39,11 +39,11 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
   --num-workers 4 --max-updates 100
 ```
 
-每次启动保留一个新的 `$REPO/outputs/remote_sources/<session>/` 源码副本，代码同步不覆盖已有副本。副本中的 `robot_data/`、`data/`、`pretrained_models/` 指向显式 `DATA_ROOT`，run 单独由绝对路径指定。预训练 encoder 等其他初始来源使用对应远端绝对路径。
+每次启动保留一个新的 `$REPO/outputs/remote_sources/<session>/` 源码副本，代码同步不覆盖已有副本。副本中的 `robot_data/`、`data/` 指向显式 `DATA_ROOT`，run 单独由绝对路径指定。自产初始化文件使用明确的远端绝对路径，例如 `initialization.encoder=/data/project/experiments/pretrain/afro/pick_apple/2026-11-03_14-30-00_seed42/encoder.pt` 或 `initialization.codebook=/data/project/experiments/pretrain/vqvae/pick_apple/2026-11-03_14-30-00_seed42/codebook.npz`。这些文件须已在远端准备好，launcher 不自动上传或改写路径。
 
 `--gpu` 指定一个物理 GPU，通过 `CUDA_VISIBLE_DEVICES` 映射为进程内 `cuda:0`；脚本不查询或自动选择设备。默认后台 `tmux -L dexmani_policy`，输出 Host、Source、Run、Session 和 Log；`--fg` 前台执行。`--dry-run` 只打印已构造命令，不连接远端、不复制源码。训练返回错误可在控制台或 Log 中查看，不以 session 消失推断 checkpoint 完整。
 
-fresh 的方法名和 Hydra overrides 放在 `--` 后；resume 只接受正式恢复 CLI 的运行参数，不再指定方法配方或新输出目录。参数含空格、引号或特殊字符时整体引用。源码和实验产物不自动删除。
+fresh 的方法名和 Hydra overrides 放在 `--` 后；`--run` 同时绑定 `hydra.run.dir` 和 `workspace.output_dir`，覆盖参数中的其他输出目录。resume 只接受正式恢复 CLI 的运行参数。参数含空格、引号或特殊字符时整体引用。源码和实验产物不自动删除。
 
 需要单独上传代码时，为明确的新空目录执行：
 
@@ -71,16 +71,16 @@ ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 
 ```bash
 bash scripts/remote/sync_down.sh --host "$HOST" \
-  --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01 --dry-run
+  --remote-run "$RUN" --local-run experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42 --dry-run
 bash scripts/remote/sync_down.sh --host "$HOST" \
-  --remote-run "$RUN" --local-run experiments/dp3/pick_apple/run01
+  --remote-run "$RUN" --local-run experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42
 ```
 
 只同步已停止或完成的指定 run，远端是本次下载的来源，用户通过 `--local-run` 指定本地目标。一次普通 rsync 排除临时 `.dexmani-publish-*` 文件，按默认的大小与修改时间判断增量更新；`config.yaml` 与其他普通文件一样同步，已有文件可以更新。symlink 原样保留，不解引用复制外部目标，也不删除本地独有文件。
 
 保留 rsync 默认的临时文件传输方式，失败直接退出。`--dry-run` 仅预览，不修改本地目标。全部传输成功后再使用下载的 run，不支持同步期间读取完整快照；运行中查看日志用 tail。
 
-`sync_down.sh` 只同步指定 run，外部 checkpoint 和结果目录不会自动下载；需自行同步并维护相对路径，文件搬迁后更新相应指针。
+`sync_down.sh` 只同步指定 run。run 内的相对 latest 链接和选模路径随完整目录搬迁保持有效；外部 checkpoint、链接目标和结果目录需自行同步并维护相对位置。
 
 本地同步回归无需 SSH 服务器，运行 `python -m dexmani_policy.test_tools.remote_checks`（需要本地 rsync）。
 
@@ -92,12 +92,12 @@ python -m dexmani_policy.evaluate --checkpoint <run>/checkpoints/latest.pt \
 python -m dexmani_policy.eval_pipeline \
   --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
   --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
-  --output-dir <run>/eval_ckpt_selector/<new-evaluation>
+  --output-dir <run>/eval/<new-evaluation>
 ```
 
 训练默认使用 offline W&B，实验下载默认不拉取 W&B；需要 offline run 时给 `sync_down.sh` 加 `--with-wandb`。在本地安装 W&B 的 `policy` 环境中直接同步所需 run，上传凭据与网络由该环境提供：
 
 ```bash
 conda activate policy
-wandb sync "experiments/dp3/pick_apple/run01/wandb/<offline-run目录>"
+wandb sync "experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42/wandb/<offline-run目录>"
 ```

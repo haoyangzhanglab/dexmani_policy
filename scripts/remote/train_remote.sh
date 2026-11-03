@@ -39,7 +39,7 @@ else
     shift
     run_value="${RUN//\\/\\\\}"
     run_value="${run_value//\"/\\\"}"
-    COMMAND=(-u -m dexmani_policy.train "--config-name=$CONFIG" "$@" "hydra.run.dir=\"$run_value\"" training.device=cuda:0)
+    COMMAND=(-u -m dexmani_policy.train "--config-name=$CONFIG" "$@" "hydra.run.dir=\"$run_value\"" "workspace.output_dir=\"$run_value\"" training.device=cuda:0)
 fi
 printf 'Host: %s\nSource: %s\nRun: %s\nSession: %s\n' "$HOST" "$SOURCE" "$RUN" "$SESSION"
 if $DRY_RUN; then
@@ -58,7 +58,7 @@ ssh "$HOST" "bash -s -- $launch_args" <<'BASH'
 set -euo pipefail
 source_dir="$1"; data_root="$2"; repo="$3"; interpreter="$4"; gpu="$5"; session="$6"; foreground="$7"
 shift 7
-for name in robot_data data pretrained_models; do
+for name in robot_data data; do
     ln -s -- "$data_root/$name" "$source_dir/$name"
 done
 cd "$source_dir"

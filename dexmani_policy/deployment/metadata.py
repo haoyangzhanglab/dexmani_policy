@@ -7,10 +7,7 @@ from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
 
 def _resolve_checkpoint(experiment, selector):
-    directory = PROJECT_ROOT / Path(experiment).expanduser()
-    if not directory.is_dir():
-        directory = PROJECT_ROOT / "experiments" / experiment
-    directory = directory.resolve(strict=True)
+    directory = (PROJECT_ROOT / Path(experiment).expanduser()).resolve(strict=True)
     selector = str(selector)
     if selector == "latest":
         path = directory / "checkpoints/latest.pt"

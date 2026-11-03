@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -32,7 +33,8 @@ def check_run_config(root):
             cfg, _, _ = common.load_run("afro", [*flags, *overrides])
             expected = False if disabled else value
             assert cfg.workspace.get("wandb_enabled") == expected
-            path = root / "config_resume.pt"
+            path = root / "config_run/checkpoints/latest.pt"
+            path.parent.mkdir(parents=True, exist_ok=True)
             base, _, _ = common.load_run("afro", overrides)
             torch.save({"effective_config": OmegaConf.to_container(base, resolve=True)}, path)
             restored, _, _ = common.load_run("afro", ["--resume-from", str(path), *flags])
@@ -164,18 +166,42 @@ def check_training(root, method, device=torch.device("cpu")):
     def recording_step(optimizer, *args, **kwargs):
         used_lrs.append(optimizer.param_groups[0]["lr"])
         return original_step(optimizer, *args, **kwargs)
-    for name, count in (("full", updates), ("resumed", 1)):
-        with patch.object(torch.optim.AdamW, "step", recording_step):
-            common.train(method, argv=["--output-dir", str(root / method / name),
-                                       "--max-updates", str(count), "+workspace.wandb_enabled=false", *overrides])
+    original_directory = root / method / "resumed"
+    with patch.object(torch.optim.AdamW, "step", recording_step):
+        common.train(method, argv=["--output-dir", str(root / method / "full"),
+                                   "--max-updates", str(updates), "--no-wandb", *overrides])
+        with patch.object(common, "export_encoder", side_effect=RuntimeError("export failed")):
+            try:
+                common.train(method, argv=["--output-dir", str(original_directory),
+                                           "--max-updates", "1", "--no-wandb", *overrides])
+            except RuntimeError as error:
+                assert str(error) == "export failed"
+            else:
+                raise AssertionError("Export failure was swallowed")
+    assert not (original_directory / "encoder.pt").exists()
+    with patch("sys.argv", ["export", "--checkpoint", str(original_directory / "checkpoints/latest.pt"),
+                            "--output", str(original_directory / "encoder.pt")]):
+        common.main()
     full_records = [json.loads(line) for line in (root / method / "full/metrics.jsonl").read_text().splitlines()]
     logged_lrs = [row["train/lr"] for row in full_records if "train/lr" in row]
     assert logged_lrs == used_lrs[:updates] and len(set(logged_lrs)) > 1
-    directory = root / method / "resumed"
+    directory = root / method / "moved"
+    shutil.copytree(original_directory, directory)
+    before = {p.relative_to(original_directory): p.read_bytes()
+              for p in original_directory.rglob("*") if p.is_file()}
+    for entry in (directory, directory / "checkpoints/latest.pt"):
+        restored, _, _ = common.load_run(method, ["--resume-from", str(entry)])
+        assert Path(restored.workspace.output_dir) == directory
+    try:
+        common.train(method, argv=["--output-dir", str(directory), *overrides])
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("Fresh pretraining overwrote an existing run")
     with (directory / "metrics.jsonl").open("ab") as stream:
         stream.write(b'{"step":')
     cfg = OmegaConf.create(torch.load(
-        directory / "resume.pt", map_location="cpu", weights_only=False,
+        directory / "checkpoints/latest.pt", map_location="cpu", weights_only=False,
     )["effective_config"])
     save_config = common.ExperimentLogger.save_config
 
@@ -185,10 +211,10 @@ def check_training(root, method, device=torch.device("cpu")):
 
     with patch.object(common, "fit_normalizer", side_effect=AssertionError("Refit on resume")), \
          patch.object(common.ExperimentLogger, "save_config", initialize_logging):
-        common.train(method, argv=["--resume-from", str(directory),
+        common.train(method, argv=["--resume-from", str(directory / "checkpoints/latest.pt"),
                                    "--max-updates", str(updates - 1)])
-    full = torch.load(root / method / "full/resume.pt", map_location="cpu", weights_only=False)
-    resumed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
+    full = torch.load(root / method / "full/checkpoints/latest.pt", map_location="cpu", weights_only=False)
+    resumed = torch.load(directory / "checkpoints/latest.pt", map_location="cpu", weights_only=False)
     for key in ("model_state", "scheduler_state", "global_step"):
         torch.testing.assert_close(full[key], resumed[key], rtol=0, atol=0)
     torch.testing.assert_close(full["optimizer_state"]["state"], resumed["optimizer_state"]["state"], rtol=0, atol=0)
@@ -201,7 +227,11 @@ def check_training(root, method, device=torch.device("cpu")):
     assert any("val/loss" in record for record in records)
     assert [row["train/lr"] for row in records if "train/lr" in row] == logged_lrs
     assert resumed["optimizer_state"]["state"]
-    with patch("sys.argv", ["export", "--checkpoint", str(directory / "resume.pt"),
+    assert Path(resumed["effective_config"]["workspace"]["output_dir"]) == directory
+    assert not (directory / "checkpoints/metrics.jsonl").exists()
+    assert before == {p.relative_to(original_directory): p.read_bytes()
+                      for p in original_directory.rglob("*") if p.is_file()}
+    with patch("sys.argv", ["export", "--checkpoint", str(directory / "checkpoints/latest.pt"),
                             "--output", str(root / "export.pt")]):
         common.main()
     package = torch.load(root / "export.pt", weights_only=True)
@@ -259,15 +289,15 @@ def check_training(root, method, device=torch.device("cpu")):
         torch.testing.assert_close(state[key], actual_rng[key], rtol=0, atol=0)
 
     common.train(method, argv=["--resume-from", str(directory), "--no-wandb"])
-    completed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
+    completed = torch.load(directory / "checkpoints/latest.pt", map_location="cpu", weights_only=False)
     assert completed["global_step"] == cfg.training.loop.total_train_steps
-    artifacts = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in directory.iterdir()}
+    artifacts = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in directory.rglob("*") if path.is_file()}
     with patch.object(common.hydra.utils, "instantiate", side_effect=AssertionError("Built dataset")), \
          patch.object(common, "ExperimentLogger", side_effect=AssertionError("Built logger")), \
          patch.object(AFRO, "__init__", side_effect=AssertionError("Built AFRO")), \
          patch.object(CordViP, "__init__", side_effect=AssertionError("Built CordViP")):
         assert common.train(method, argv=["--resume-from", str(directory), "--no-wandb"]) is None
-    assert {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in directory.iterdir()} == artifacts
+    assert {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in directory.rglob("*") if path.is_file()} == artifacts
 
     failed_directory = root / method / "nonfinite"
     model_class = AFRO if method == "afro" else CordViP
@@ -295,7 +325,7 @@ def check_training(root, method, device=torch.device("cpu")):
     assert failed_model is not None
     for name, parameter in failed_model.named_parameters():
         torch.testing.assert_close(parameter, initial_parameters[name], rtol=0, atol=0)
-    assert not (failed_directory / "resume.pt").exists()
+    assert not (failed_directory / "checkpoints/latest.pt").exists()
     assert not (failed_directory / "encoder.pt").exists()
 
 

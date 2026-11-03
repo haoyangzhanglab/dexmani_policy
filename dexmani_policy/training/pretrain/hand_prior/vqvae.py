@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import uuid
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -97,17 +95,15 @@ def train(cfg):
         positive_int(recipe[name], name)
     if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
-    output_dir = recipe.output_dir
-    if output_dir is None:
-        run = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
-        output_dir = Path("experiments/vq_hand") / Path(cfg.dataset.zarr_path).stem / run
-    output_dir = Path(output_dir).expanduser()
+    output_dir = Path(cfg.workspace.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=False)
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir()
     logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
     train_norm, val_norm, normalizer = prepare_hand_data(cfg)
-    cfg.vq_vae.output_dir = str(output_dir)
+    cfg.workspace.output_dir = str(output_dir)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     train_loader = DataLoader(
@@ -206,12 +202,12 @@ def train(cfg):
 
         checkpoint_paths = []
         if epoch % recipe.save_epochs == 0 and epoch != recipe.num_epochs:
-            checkpoint_paths.append(output_dir / f"vqvae_hand_epoch={epoch:04d}.pt")
+            checkpoint_paths.append(checkpoint_dir / f"epoch_{epoch:04d}.pt")
         if val_loader is not None and metrics["val_lookup_mse"] < best_lookup_mse:
             best_lookup_mse = metrics["val_lookup_mse"]
-            checkpoint_paths.append(output_dir / "vqvae_hand_best.pt")
+            checkpoint_paths.append(checkpoint_dir / "best.pt")
         if epoch == recipe.num_epochs:
-            checkpoint_paths.append(output_dir / "vqvae_hand_last.pt")
+            checkpoint_paths.append(checkpoint_dir / "last.pt")
         if checkpoint_paths:
             payload = {
                 "epoch": int(epoch),
@@ -225,7 +221,7 @@ def train(cfg):
                     torch.save(payload, temporary)
                 logger.info("checkpoint saved: %s", checkpoint_path)
 
-    selected_path = output_dir / ("vqvae_hand_best.pt" if val_loader is not None else "vqvae_hand_last.pt")
+    selected_path = checkpoint_dir / ("best.pt" if val_loader is not None else "last.pt")
     codebook_path = output_dir / "codebook.npz"
     export_codebook(selected_path, codebook_path, device="cpu")
     print(f"Saved selected runtime codebook: {codebook_path}")

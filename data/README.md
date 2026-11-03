@@ -1,4 +1,4 @@
-# data/ — 项目数据目录
+# data/ — 外部预训练权重
 
 ## 目录结构
 
@@ -38,13 +38,7 @@ data/
 
 DQ-RISE 的码本仍由项目原有预训练流程生成，下载 DINO 不会准备码本。自定义 RGB 型号沿用配置中的初始化来源。
 
-### 项目内预训练产物
-
-AFRO/CordViP 的 `encoder.pt` 保存在线 encoder、输入 affine 和归一化模式，identity 也随模块继承；`resume.pt` 另存完整预训练恢复状态。可从完整 `resume.pt` 独立导出 encoder，见 [观测预训练](../docs/观测预训练.md)。完整策略 checkpoint 内嵌 encoder 和最终 normalizer，恢复无需原 encoder 文件。
-
-DQ-RISE 的 `codebook.npz` 只需 `sorted_hand_poses [K,12]`、`hand_normalizer_scale [12]`、`hand_normalizer_offset [12]`，姿态为 normalized FP32 坐标。运行时不依赖预训练分组或数据划分。默认 VQ 从 last 导出，显式 val 时从 lookup_mse best 导出；任意完整 VQ checkpoint 均可重导出，命令见 [手部动作表示](../docs/手部动作表示.md)。fresh 策略保存实际 `num_codes`，完整策略恢复无需原 NPZ。
-
-CordViP 的 `.cordvip.zarr` 自包含 hand/object XYZ、joint_state、contact_map 和存在时的源 action，数值数组固定 FP32，episode 边界为 int64；根 attrs 只保留已有的 dt 与 hand_pointcloud_config。无 action 可用于预训练，主策略仍需 action。完整 Policy 的 normalizer 形状从实际权重恢复，不另存 shape 配置；部署事实不依赖来源标签。
+自产 encoder 和码本直接引用预训练 run 中的文件，见 [观测预训练](../docs/观测预训练.md)和[手部动作表示](../docs/手部动作表示.md)，不存入本目录。
 
 ### Uni3D（R3D 策略的 3D 点云编码器）
 
@@ -78,13 +72,4 @@ CordViP 的 `.cordvip.zarr` 自包含 hand/object XYZ、joint_state、contact_ma
 
 远程复用 `bash scripts/remote/sync_data.sh --host <host> --local data/pretrained --remote /data/project/data/pretrained`，训练启动沿用 `--data-root /data/project`。同步这些本地目录后无需另行复制 HF 缓存；源码同步不携带 `data/` 权重。
 
-## 训练数据
-
-训练数据（本地 Zarr 2 目录，不支持 ZIP、远程 store 或后端插件）存放于顶层 `robot_data/` 目录（不在此 `data/` 目录下）。
-原因：训练数据体积大且常跨磁盘 symlink，独立目录便于管理。
-
-格式: `robot_data/<task_name>.zarr`
-
-主策略和独立预训练均默认 `dataset.seed=42`、`max_train_episodes=null`、`val_episodes=0`。预留 V 条后，训练数量为 `N−V` 或 `min(M,N−V)`；同一排列依次选择 train、val、unused。150 条、上限 100、留出 20 得到 100/20/30；80 条、上限 100、留出 10 得到 70/10/0。主策略从原先最多 100 条改为全部数据属于训练配方变化，100 条预算需显式设置；resume 沿用保存的参数。新统计只使用本阶段 train 的真实源帧，训练不读取来源身份或自动按 trial 分组。各阶段数据参数独立，主策略 val 仅留出，未运行离线验证。
-
-训练使用的数据版本不就地修改。远程同步显式指定路径，例如 `bash scripts/remote/sync_data.sh --host <host> --local robot_data --remote /data/project/robot_data`；脚本保留目标独有文件。启动时的 `--data-root /data/project` 为源码副本提供 `robot_data/`、`data/` 和 `pretrained_models/` 链接，实验目录另外由 `--run` 指定，详见 [SSH 文档](../docs/SSH服务器训练部署.md)。
+示教与 CordViP 加工数据位于 `robot_data/`，格式见[数据集文档](../docs/仿真数据集格式.md)。仓库 `data/` 专用于外部权重；服务器 `/data/project/experiments/` 等磁盘路径不受此约定限制。
