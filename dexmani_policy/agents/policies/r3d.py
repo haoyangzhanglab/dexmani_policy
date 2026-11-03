@@ -70,7 +70,6 @@ class R3D(Policy):
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
-        modality_dropout_probs: dict | None = None,
         use_aux_ee: bool = False,
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
@@ -119,7 +118,6 @@ class R3D(Policy):
             n_obs_steps=n_obs_steps,
             n_action_steps=n_action_steps,
             action_dim=action_dim,
-            modality_dropout_probs=modality_dropout_probs,
         )
         self.loss_groups = {
             "joint": (0, self.joint_dim, 1.0),

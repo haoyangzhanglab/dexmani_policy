@@ -214,7 +214,6 @@ def check_adaptac(device):
     dims = dict(joint_state=19, point_cloud=6, finger_tactile_force=3, action=19)
     policy.configure_normalizer(dims, normalization_feature_shapes(dims))
     policy.to(device)
-    policy.modality_dropout_probs = {"finger_tactile_force": 0.3}
     obs = dict(joint_state=torch.randn(2, 1, 19, device=device),
                point_cloud=torch.randn(2, 1, 48, 6, device=device),
                finger_tactile_force=torch.randn(2, 1, 5, 3, device=device))

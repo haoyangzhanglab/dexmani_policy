@@ -80,7 +80,7 @@ CordViP 的 `.cordvip.zarr` 自包含 hand/object XYZ、joint_state、contact_ma
 
 ## 训练数据
 
-训练数据（Zarr 文件）存放于顶层 `robot_data/` 目录（不在此 `data/` 目录下）。
+训练数据（本地 Zarr 2 目录，不支持 ZIP、远程 store 或后端插件）存放于顶层 `robot_data/` 目录（不在此 `data/` 目录下）。
 原因：训练数据体积大且常跨磁盘 symlink，独立目录便于管理。
 
 格式: `robot_data/<task_name>.zarr`

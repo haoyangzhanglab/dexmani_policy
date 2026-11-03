@@ -86,7 +86,6 @@ class ManiFlow(Policy):
         t_sample_mode_for_consistency: str = "discrete",
         dt_sample_mode_for_consistency: str = "uniform",
         target_t_sample_mode: str = "relative",
-        modality_dropout_probs: dict | None = None,
     ) -> None:
         obs_encoder = ManiFlowEncoder(
             pc_dim=pc_dim,
@@ -132,5 +131,4 @@ class ManiFlow(Policy):
             n_obs_steps=n_obs_steps,
             n_action_steps=n_action_steps,
             action_dim=action_dim,
-            modality_dropout_probs=modality_dropout_probs,
         )

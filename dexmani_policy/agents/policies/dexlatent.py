@@ -39,7 +39,6 @@ class DexLatent(Policy):
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
         num_inference_steps: int = 10,
-        modality_dropout_probs: dict | None = None,
     ) -> None:
         if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DexLatent requires two observations and 19D joint actions/state")
@@ -82,7 +81,6 @@ class DexLatent(Policy):
             n_obs_steps=n_obs_steps,
             n_action_steps=n_action_steps,
             action_dim=action_dim,
-            modality_dropout_probs=modality_dropout_probs,
         )
         self.hand_prior = DexLatentHandPrior()
 

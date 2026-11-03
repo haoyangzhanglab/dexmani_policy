@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import numpy as np
@@ -6,15 +5,15 @@ import zarr
 
 
 class EpisodeStore:
-    """Read-only Zarr arrays with process-local handles."""
+    """Read-only arrays from a local Zarr 2 directory."""
 
     def __init__(self, zarr_path, *, keys=None):
         self.path = str(Path(zarr_path).expanduser().resolve())
-        self.group = zarr.open_group(self.path, mode="r")
-        fields = self.group["data"]
+        group = zarr.open_group(zarr.DirectoryStore(self.path), mode="r")
+        fields = group["data"]
         self.field_names = tuple(dict.fromkeys(fields.keys() if keys is None else keys))
         self.data = {key: fields[key] for key in self.field_names}
-        self.episode_ends = np.asarray(self.group["meta"]["episode_ends"])
+        self.episode_ends = np.asarray(group["meta"]["episode_ends"])
         ends = self.episode_ends
         if (
             ends.ndim != 1
@@ -35,20 +34,7 @@ class EpisodeStore:
                     f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
                 )
         self.episode_ends = ends.astype(np.int64, copy=False)
-        self.attrs = dict(self.group.attrs)
-        self.pid = os.getpid()
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["group"] = state["pid"] = state["data"] = None
-        return state
-
-    def _arrays(self):
-        if self.group is None or self.pid != os.getpid():
-            self.group = zarr.open_group(self.path, mode="r")
-            self.data = {key: self.group["data"][key] for key in self.field_names}
-            self.pid = os.getpid()
-        return self.data
+        self.attrs = dict(group.attrs)
 
     def read(self, key, rows, *, columns=None):
         arr = self[key]
@@ -78,7 +64,7 @@ class EpisodeStore:
         return self.field_names
 
     def __getitem__(self, key):
-        return self._arrays()[key]
+        return self.data[key]
 
 
 def check_finite(buffer, key, start, values, columns=None):

@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.interaction.correspondence import ContactCoordinationEncoder
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.training.pretrain.obs.common import load_run, train
+from dexmani_policy.training.pretrain.obs.common import train
 
 
 class CordViP(nn.Module):
@@ -67,9 +67,7 @@ class CordViP(nn.Module):
 
 
 def main():
-    prepared = load_run("cordvip")
-    if prepared is not None:
-        train("cordvip", *prepared)
+    train("cordvip")
 
 
 if __name__ == "__main__":

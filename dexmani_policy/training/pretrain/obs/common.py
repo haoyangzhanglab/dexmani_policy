@@ -22,7 +22,7 @@ from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_
 from dexmani_policy.training.common.optimization import build_scheduler
 
 
-def load_run(method):
+def load_run(method, argv=None):
     parser = argparse.ArgumentParser(description=f"Pretrain the {method} observation encoder")
     parser.add_argument("--config", help="Config name or relative path under dexmani_policy/configs")
     parser.add_argument("--output-dir")
@@ -34,7 +34,7 @@ def load_run(method):
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("overrides", nargs="*")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     checkpoint = None
     if args.resume_from is not None:
         if args.config is not None or args.output_dir is not None or args.overrides:
@@ -62,7 +62,7 @@ def load_run(method):
     if args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
         cfg.dataset.zarr_path = cfg.zarr_path
-    return prepare_run(method, cfg, checkpoint, args.max_updates)
+    return cfg, checkpoint, args.max_updates
 
 
 def export_encoder(state, normalization, output_path):
@@ -127,7 +127,8 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
         set_rng_state(rng_state, device)
 
 
-def prepare_run(method, cfg, checkpoint=None, max_updates=None):
+def train(method, argv=None):
+    cfg, checkpoint, max_updates = load_run(method, argv)
     resuming = checkpoint is not None
     if resuming and checkpoint["global_step"] >= cfg.training.loop.total_train_steps:
         print(f"Pretraining already completed at step {checkpoint['global_step']}")
@@ -144,10 +145,8 @@ def prepare_run(method, cfg, checkpoint=None, max_updates=None):
     if is_afro:
         positive_int(cfg.training.num_epochs, "training.num_epochs")
         positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
-        if cfg.training.loop.get("gradient_accumulation_steps", 1) != 1:
+        if cfg.training.loop.gradient_accumulation_steps != 1:
             raise ValueError("AFRO VICReg requires accumulation=1")
-        with open_dict(cfg.training.loop):
-            cfg.training.loop.gradient_accumulation_steps = 1
     else:
         positive_int(cfg.training.save_every_updates, "training.save_every_updates")
         positive_int(cfg.training.loop.total_train_steps, "training.loop.total_train_steps")
@@ -201,23 +200,6 @@ def prepare_run(method, cfg, checkpoint=None, max_updates=None):
     logger = ExperimentLogger(**cfg.workspace, resume=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
-    try:
-        logger.save_config(cfg)
-        if rng_state is not None:
-            set_rng_state(rng_state, device)
-    except BaseException:
-        close_resources(lambda: close_data_loader(loader), logger.close)
-        raise
-    return cfg, model, loader, validation, optimizer, scheduler, step, stop_step, logger
-
-
-def train(method, cfg, model, loader, validation, optimizer, scheduler, step, stop_step, logger):
-    is_afro = method == "afro"
-    device = torch.device(cfg.training.device)
-    batches_per_epoch = loader.batch_sampler.batches_per_epoch
-    accumulation = cfg.training.loop.gradient_accumulation_steps
-    total = cfg.training.loop.total_train_steps
-    epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
     stop_requested = False
 
     def request_stop(signum, frame):
@@ -229,8 +211,11 @@ def train(method, cfg, model, loader, validation, optimizer, scheduler, step, st
         stop_requested = True
 
     iterator = None
-    with training_signal_handlers(request_stop):
-        try:
+    try:
+        logger.save_config(cfg)
+        if rng_state is not None:
+            set_rng_state(rng_state, device)
+        with training_signal_handlers(request_stop):
             initial_step = step
             while step < stop_step and not stop_requested:
                 epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
@@ -312,8 +297,8 @@ def train(method, cfg, model, loader, validation, optimizer, scheduler, step, st
             save_run(model, optimizer, scheduler, cfg, step)
             export_encoder(model.state_dict(), cfg.normalization, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[{type(model).__name__}] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
-        finally:
-            close_resources(lambda: close_data_loader(loader, iterator), logger.close)
+    finally:
+        close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():

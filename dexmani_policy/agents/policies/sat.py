@@ -35,7 +35,6 @@ class SAT(Policy):
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
         num_inference_steps: int = 10,
-        modality_dropout_probs: dict | None = None,
         qkv_bias: bool = True,
         qk_norm: bool = True,
     ) -> None:
@@ -81,5 +80,4 @@ class SAT(Policy):
             n_obs_steps=n_obs_steps,
             n_action_steps=n_action_steps,
             action_dim=action_dim,
-            modality_dropout_probs=modality_dropout_probs,
         )

@@ -45,7 +45,6 @@ class DQRISE(Policy):
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
         num_inference_steps: int = 10,
-        modality_dropout_probs: dict | None = None,
     ) -> None:
         if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DQ-RISE requires n_obs_steps=2 and joint action=7+12")
@@ -88,7 +87,6 @@ class DQRISE(Policy):
             n_obs_steps=n_obs_steps,
             n_action_steps=n_action_steps,
             action_dim=action_dim,
-            modality_dropout_probs=modality_dropout_probs,
         )
         self.hand_codebook = HandStateCodebook(
             hand_dim=self.hand_dim,

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import multiprocessing
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.datasets.variants.r3d import R3DDataset
 from dexmani_policy.datasets.variants.tactile import AdapTacDataset, InterActDexDataset, read_future_force
 from dexmani_policy.training.common.config import load_policy_config
-from dexmani_policy.training.common.data import fit_normalizer
+from dexmani_policy.training.common.data import close_data_loader, fit_normalizer
 
 
 def check_splits():
@@ -287,6 +288,38 @@ def check_dataset_reads(root):
     np.testing.assert_array_equal(sample["obs"]["point_cloud"], source["data/point_cloud"][:][rows[:2], :, :3])
 
 
+def check_worker_reads(root):
+    path = root / "workers.zarr"
+    make_source(path, [3, 8])
+    dataset = DemonstrationDataset(
+        path, sensor_modalities=["joint_state", "point_cloud"], obs_horizon=2,
+        horizon=4, pad_before=1, pad_after=2, pc_dim=3,
+    )
+    expected = list(torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=0))
+    contexts = [multiprocessing.get_start_method()]
+    if "spawn" in multiprocessing.get_all_start_methods() and "spawn" not in contexts:
+        contexts.append("spawn")
+    for context in contexts:
+        loader = torch.utils.data.DataLoader(
+            dataset, batch_size=2, num_workers=2, multiprocessing_context=context,
+            persistent_workers=True,
+        )
+        try:
+            for _ in range(2):
+                actual = list(loader)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            iterator = iter(loader)
+            torch.testing.assert_close(next(iterator), expected[0], rtol=0, atol=0)
+        finally:
+            close_data_loader(loader)
+        # A new worker lifecycle can read the same dataset after early shutdown.
+        try:
+            torch.testing.assert_close(list(loader), expected, rtol=0, atol=0)
+        finally:
+            close_data_loader(loader)
+        print(f"PASS local Zarr DataLoader reads and shutdown ({context})", flush=True)
+
+
 def check_rgb_preprocessing(root):
     import torchvision.transforms.functional as TVF
     from dexmani_policy.common.image_util import preprocess_rgb_eval, preprocess_rgb_train
@@ -412,6 +445,7 @@ def main():
         check_source_statistics(root)
         check_method_targets(root)
         check_dataset_reads(root)
+        check_worker_reads(root)
         check_rgb_preprocessing(root)
         check_atomic_io(root)
         print("PASS train-only source statistics, method targets, selected reads, CHW uint8 RGB and atomic IO", flush=True)

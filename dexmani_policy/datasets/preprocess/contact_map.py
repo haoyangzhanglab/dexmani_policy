@@ -54,7 +54,7 @@ def generate(zarr_path, output, num_workers=1):
     output = Path(output).expanduser()
     if output.exists():
         raise FileExistsError(f"Contact output already exists: {output}")
-    source = zarr.open_group(str(Path(zarr_path).expanduser()), mode="r")
+    source = zarr.open_group(zarr.DirectoryStore(Path(zarr_path).expanduser()), mode="r")
     keys = ["hand_pointcloud", "object_pointcloud", "joint_state"]
     if "action" in source["data"]:
         keys.append("action")
@@ -73,7 +73,7 @@ def generate(zarr_path, output, num_workers=1):
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".contact-", dir=output.parent))
     try:
-        group = zarr.open_group(str(temporary), mode="w")
+        group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
         retained_attrs = ("dt", "hand_pointcloud_config")
         group.attrs.update({key: buffer.attrs[key] for key in retained_attrs if key in buffer.attrs})
         group.create_group("meta").create_dataset("episode_ends", data=buffer.episode_ends)

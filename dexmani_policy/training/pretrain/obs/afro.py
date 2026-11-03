@@ -10,7 +10,7 @@ from dexmani_policy.agents.action_decoders.backbones.modules import DiTTimestepE
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.training.pretrain.obs.common import load_run, train
+from dexmani_policy.training.pretrain.obs.common import train
 
 
 def vicreg_loss(prediction, target):
@@ -138,9 +138,7 @@ class AFRO(nn.Module):
 
 
 def main():
-    prepared = load_run("afro")
-    if prepared is not None:
-        train("afro", *prepared)
+    train("afro")
 
 
 if __name__ == "__main__":

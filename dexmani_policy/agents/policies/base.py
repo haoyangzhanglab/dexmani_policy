@@ -54,7 +54,6 @@ class Policy(nn.Module):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        modality_dropout_probs: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
         validate_action_window(horizon, n_obs_steps, n_action_steps)
@@ -65,7 +64,6 @@ class Policy(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.n_action_steps = n_action_steps
         self.action_dim = action_dim
-        self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
         self.normalization_dims: dict[str, int] = {}
 
@@ -102,10 +100,6 @@ class Policy(nn.Module):
                 value = value[..., : self.normalization_dims[key]]
             if key in self.normalizer.fields:
                 value = self.normalizer[key].normalize(value)
-            probability = self.modality_dropout_probs.get(key, 0.0)
-            if self.training and probability > 0:
-                mask = torch.rand(value.shape[0], device=value.device) > probability
-                value = value * mask.view(-1, *([1] * (value.ndim - 1)))
             result[key] = value.flatten(0, 1)
         return result
 

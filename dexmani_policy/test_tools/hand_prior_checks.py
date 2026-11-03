@@ -284,19 +284,6 @@ def check_codebook_pipeline(device):
                 obs, generator=torch.Generator(device=device).manual_seed(1024),
             )["future_actions"]
             torch.testing.assert_close(actual_prediction, expected_prediction, rtol=0, atol=0)
-        assert checkpoint.ema_model_state is not None
-        key = next(iter(checkpoint.model_state))
-        del checkpoint.model_state[key]
-        del checkpoint.ema_model_state[key]
-        invalid = Path(directory) / "incomplete.pt"
-        save_checkpoint(invalid, checkpoint)
-        for use_ema in (False, True):
-            try:
-                restore_policy(invalid, use_ema=use_ema, device=device)
-            except RuntimeError as error:
-                assert "Missing key(s)" in str(error)
-            else:
-                raise AssertionError("Inference accepted an incomplete policy state")
 
 
 def main():

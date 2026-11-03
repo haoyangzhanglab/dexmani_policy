@@ -26,7 +26,7 @@ python -m dexmani_policy.datasets.preprocess.contact_map --zarr-path INPUT --out
 
 ## 快速开始
 
-以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。项目约定使用固定 `dexmani_policy/configs/` 下的名称或相对子路径（如 `dp3`、`pretrain/obs/afro`，可带 `.yaml`）；配置入口不提供安全隔离保证。续训使用下述显式 resume 入口。训练数据默认位于 `robot_data/<task>.zarr`。
+以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。项目约定使用固定 `dexmani_policy/configs/` 下的名称或相对子路径（如 `dp3`、`pretrain/obs/afro`，可带 `.yaml`）；配置入口不提供安全隔离保证。续训使用下述显式 resume 入口。训练数据仅支持本地 Zarr 2 目录，默认位于 `robot_data/<task>.zarr`；不支持 ZIP、远程 store 或后端插件。
 
 ```bash
 # 用实际数据完成短训、保存和原目录恢复；按硬件设置 batch/worker
@@ -56,7 +56,7 @@ python -m dexmani_policy.eval_pipeline \
 
 fresh 与 resume 均使用 FP32 master parameters 和同设备 FP32 EMA；`training.use_bfloat16=true` 仅启用 BF16 autocast，不维护旧低精度 master parameters 的原精度训练轨迹。普通配方 `eval.use_ema` 默认跟随 `training.use_ema`，显式请求缺失 EMA 仍失败；ManiFlow 的 loss 继续要求 EMA。正式部署、仿真评测及 warmup 严格加载后使用 FP32，并合并 RGB LoRA；预测入口显式关闭 autocast，训练 checkpoint 保留适配器。
 
-`dataset.sensor_modalities` 是唯一配方输入列表，实际字段宽度保存为 `normalization_dims`；不另声明模型消费字段或自动过滤额外模态。错误自定义配方可在消费处直接失败。loss 有限性在 accumulation group 结束、optimizer 更新前检查；有裁剪时保留非有限梯度检查，无裁剪路径不逐参数扫描。每次训练调用的首个 update、日志周期和已知最后一个 update 都记录指标。
+`dataset.sensor_modalities` 是唯一配方输入列表，实际字段宽度保存为 `normalization_dims`；不另声明模型消费字段或自动过滤额外模态。错误自定义配方可在消费处直接失败。Policy 不再支持整模态 dropout；Dataset 的点云、颜色和状态增强保持。loss 有限性在 accumulation group 结束、optimizer 更新前检查；有裁剪时保留非有限梯度检查，无裁剪路径不逐参数扫描。每次训练调用的首个 update、日志周期和已知最后一个 update 都记录指标。
 
 归一化默认模式写在 YAML，可通过 `normalization.*` 覆盖；默认 joint action 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity。几何输入、DQ/DexLatent 手部 affine、R3D 辅助目标和触觉字段保留各自数学约束。新统计仅来自本阶段 train episodes 的真实源帧，不包含 val、unused、padding 或随机增强。AFRO/CordViP encoder 所属输入的 affine 与 identity 均直接继承，只有新字段重新拟合；有效配置记录实际使用的模式。续训、评测和部署直接复用完整策略 checkpoint 保存的最终统计。
 
@@ -153,7 +153,7 @@ bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 
 任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可以覆盖 `normalization.finger_tactile_force=max_abs`、`normalization.taxel_tactile_force=max_abs`（dense 模式）及 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。设为 0 仅关闭显式 force MSE；未来真值 force 的加噪输入及 action loss 仍可训练 force predictor，不是无未来标签基线。
 
-AdapTac 默认关闭 compile。PyTorch 2.4.1 / RTX 4090 上的缩小模型验证发现，编译 force predictor 并启用 BF16、accumulation=2 时，可出现 loss 有限但上游观测梯度非有限，裁剪会报错停止；审查基线也有同一现象。默认 eager 路径的 BF16 累积训练、保存及恢复已通过，不能据此推断编译路径有效。
+AdapTac 默认关闭 compile；启用 `training.use_compile=true` 时仅编译 `action_decoder.model`，force predictor 始终使用 eager。此前在 PyTorch 2.4.1 / RTX 4090 的缩小模型上，编译 force predictor 并启用 BF16、accumulation=2 可出现 loss 有限但上游观测梯度非有限。本项目停止支持该特殊编译路径；这不表示底层问题已修复，也不承诺性能提升。
 
 RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=sqrt(sum(x²)/N)`，然后固定执行 `x/S`，不去均值、不裁剪；非空全零字段使用 identity affine。aggregate 与 dense 独立统计，完整 FP32 affine 随 checkpoint 保存。非退化字段应满足 `mean(z²)≈1`，不要求均值为零。该变换保留零点、方向和相对幅度，不能消除异常峰值或跨源物理差异。
 

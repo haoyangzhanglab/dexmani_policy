@@ -400,10 +400,6 @@ class PolicyTrainer:
 
                 if iterator is not None:
                     callbacks.append(lambda: close_data_loader(self.train_loader, iterator))
-                if pbar.n != self.global_step:
-                    # Show the actual stop step without metrics from an older step.
-                    pbar.set_postfix({}, refresh=False)
-                    pbar.n = self.global_step
 
                 self.model.eval()
                 close_resources(*callbacks)

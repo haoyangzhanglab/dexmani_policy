@@ -82,7 +82,6 @@ class DP3(Policy):
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
-        modality_dropout_probs: dict[str, float] | None = None,
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
     ) -> None:
@@ -120,5 +119,4 @@ class DP3(Policy):
             n_obs_steps,
             n_action_steps,
             action_dim,
-            modality_dropout_probs=modality_dropout_probs,
         )

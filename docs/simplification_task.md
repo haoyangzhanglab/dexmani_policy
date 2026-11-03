@@ -146,7 +146,7 @@
 
 1. 删除 `consumed_observation_fields` 的静态声明、Base 转发、AdapTac 两层 union，以及 `validate_observation_fields` 与全部调用；不新增 `required_fields` 等同义替身。
 2. Trainer fresh 直接使用 `data_description['field_dims']` 配置 normalizer，不再按模型字段投影；resume 仍遵循 T01 的保存表与一次实际宽度核对。
-3. 删除 `train_microbatch` 的 obs 过滤；删除 `Policy._preprocess_obs` 的字段丢弃，只保留实际预处理、归一化、点云通道裁剪、modality dropout、B/T flatten。
+3. 删除 `train_microbatch` 的 obs 过滤；删除 `Policy._preprocess_obs` 的字段丢弃，只保留实际预处理、归一化、点云通道裁剪、B/T flatten。后续增量范围决定已删除整模态 dropout，覆盖本条原先的保留要求。
 4. fresh 部署 metadata 已由 `build_dataset` 按唯一输入列表取得，删除第二次按 consumed 集合裁剪。
 5. evaluation/Runner 从保存的 `normalization_dims` 去掉 `action` 得到输入；Runner 以自己已有的 `sensor_modalities` 做来源判断。离线 `PolicyInfo.observation_fields` 已使用保存表，不必导入模型探测输入。
 6. normalization 的配方字段检查收敛到装配处一次；继承 encoder affine/identity 后再确定最终模式。不要新增所有 encoder 的独立字段 schema 来恢复早期错误诊断。

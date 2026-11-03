@@ -31,6 +31,7 @@ training:
   val_every_epochs: 200
   save_every_epochs: 20
   loop:
+    gradient_accumulation_steps: 1
     log_interval_steps: 100
 workspace:
   output_dir: experiments/pretrain/obs/afro/${task_name}/${run_id:}_seed${training.seed}

@@ -11,7 +11,7 @@ import hydra
 import numpy as np
 import torch
 import zarr
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 
 from dexmani_policy.agents.policies.afro import AFROEncoder
 from dexmani_policy.agents.policies.cordvip import CordViPEncoder
@@ -191,14 +191,13 @@ def check_training(root, method, device=torch.device("cpu")):
         overrides += ["n_obs_steps=2", "training.loop.total_train_steps=4",
                       "training.save_every_updates=1", "training.loop.gradient_accumulation_steps=2"]
         updates = 3
-    base = load_policy_config(f"pretrain/obs/{method}", overrides)
     for name, count in (("full", updates), ("resumed", 1)):
-        cfg = copy.deepcopy(base)
-        cfg.workspace.output_dir = str(root / method / name)
-        common.train(method, *common.prepare_run(method, cfg, max_updates=count))
+        common.train(method, argv=["--output-dir", str(root / method / name),
+                                   "--max-updates", str(count), "--no-wandb", *overrides])
     directory = root / method / "resumed"
-    checkpoint = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
-    cfg = OmegaConf.create(checkpoint["effective_config"])
+    cfg = OmegaConf.create(torch.load(
+        directory / "resume.pt", map_location="cpu", weights_only=False,
+    )["effective_config"])
     save_config = common.ExperimentLogger.save_config
 
     def initialize_logging(logger, config):
@@ -207,9 +206,8 @@ def check_training(root, method, device=torch.device("cpu")):
 
     with patch.object(common, "fit_normalizer", side_effect=AssertionError("Refit on resume")), \
          patch.object(common.ExperimentLogger, "save_config", initialize_logging):
-        prepared = common.prepare_run(method, cfg, checkpoint, max_updates=updates - 1)
-        del checkpoint
-        common.train(method, *prepared)
+        common.train(method, argv=["--resume-from", str(directory),
+                                   "--max-updates", str(updates - 1), "--no-wandb"])
     full = torch.load(root / method / "full/resume.pt", map_location="cpu", weights_only=False)
     resumed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
     for key in ("model_state", "scheduler_state", "global_step"):
@@ -276,17 +274,18 @@ def check_training(root, method, device=torch.device("cpu")):
     for key in ("torch", "torch_cuda"):
         torch.testing.assert_close(state[key], actual_rng[key], rtol=0, atol=0)
 
-    common.train(method, *common.prepare_run(
-        method, cfg, torch.load(directory / "resume.pt", map_location="cpu", weights_only=False),
-    ))
+    common.train(method, argv=["--resume-from", str(directory), "--no-wandb"])
     completed = torch.load(directory / "resume.pt", map_location="cpu", weights_only=False)
     assert completed["global_step"] == cfg.training.loop.total_train_steps
-    artifacts = {path: path.stat().st_mtime_ns for path in directory.iterdir()}
-    assert common.prepare_run(method, OmegaConf.create(completed["effective_config"]), completed) is None
-    assert {path: path.stat().st_mtime_ns for path in directory.iterdir()} == artifacts
+    artifacts = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in directory.iterdir()}
+    with patch.object(common.hydra.utils, "instantiate", side_effect=AssertionError("Built dataset")), \
+         patch.object(common, "ExperimentLogger", side_effect=AssertionError("Built logger")), \
+         patch.object(AFRO, "__init__", side_effect=AssertionError("Built AFRO")), \
+         patch.object(CordViP, "__init__", side_effect=AssertionError("Built CordViP")):
+        assert common.train(method, argv=["--resume-from", str(directory), "--no-wandb"]) is None
+    assert {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in directory.iterdir()} == artifacts
 
-    failed_cfg = copy.deepcopy(base)
-    failed_cfg.workspace.output_dir = str(root / method / "nonfinite")
+    failed_directory = root / method / "nonfinite"
     model_class = AFRO if method == "afro" else CordViP
     forward = model_class.forward
     failed_model = None
@@ -303,7 +302,8 @@ def check_training(root, method, device=torch.device("cpu")):
 
     with patch.object(model_class, "forward", nonfinite_first_batch):
         try:
-            common.train(method, *common.prepare_run(method, failed_cfg, max_updates=1))
+            common.train(method, argv=["--output-dir", str(failed_directory),
+                                       "--max-updates", "1", "--no-wandb", *overrides])
         except RuntimeError as error:
             assert "Nonfinite" in str(error)
         else:
@@ -311,8 +311,8 @@ def check_training(root, method, device=torch.device("cpu")):
     assert failed_model is not None
     for name, parameter in failed_model.named_parameters():
         torch.testing.assert_close(parameter, initial_parameters[name], rtol=0, atol=0)
-    assert not (Path(failed_cfg.workspace.output_dir) / "resume.pt").exists()
-    assert not (Path(failed_cfg.workspace.output_dir) / "encoder.pt").exists()
+    assert not (failed_directory / "resume.pt").exists()
+    assert not (failed_directory / "encoder.pt").exists()
 
 
 def check_train_only(root, method, device=torch.device("cpu")):
@@ -333,29 +333,50 @@ def check_train_only(root, method, device=torch.device("cpu")):
     cfg = load_policy_config(f"pretrain/obs/{method}", overrides)
     cfg.workspace.output_dir = str(root / method / "train_only")
     assert cfg.dataset.val_episodes == 0
-    incomplete = copy.deepcopy(cfg)
-    with open_dict(incomplete.normalization):
-        del incomplete.normalization[next(iter(incomplete.normalization))]
+    argv = ["--output-dir", cfg.workspace.output_dir, "--max-updates", "1", "--no-wandb", *overrides]
     try:
-        common.prepare_run(method, incomplete, max_updates=1)
+        common.train(method, argv=[*argv, f"~normalization.{next(iter(cfg.normalization))}"])
     except ValueError as error:
         assert "Normalization must declare" in str(error)
     else:
         raise AssertionError("Fresh pretraining accepted missing normalization modes")
+    if method == "afro":
+        with patch.object(common.hydra.utils, "instantiate", side_effect=AssertionError("Built dataset")):
+            try:
+                common.train(method, argv=[*argv, "training.loop.gradient_accumulation_steps=2"])
+            except ValueError as error:
+                assert "AFRO VICReg requires accumulation=1" in str(error)
+            else:
+                raise AssertionError("AFRO accepted gradient accumulation")
+
+    failed_loggers = []
+    def fail_config(logger, config):
+        failed_loggers.append(logger)
+        raise RuntimeError("config logging failure")
+
+    with patch.object(common.ExperimentLogger, "save_config", fail_config):
+        try:
+            common.train(method, argv=["--output-dir", str(root / method / "failed_logging"),
+                                       "--max-updates", "1", "--no-wandb", *overrides])
+        except RuntimeError as error:
+            assert str(error) == "config logging failure"
+        else:
+            raise AssertionError("Config logging failure was swallowed")
+    assert len(failed_loggers) == 1 and failed_loggers[0].metrics_file.closed
+
     with (
         patch.object(common, "DataLoader", side_effect=AssertionError("Built val loader")),
         patch.object(ObservationPretrainDataset, "iter_normalization_data", side_effect=AssertionError("Read identity stats")),
         patch.object(common, "evaluate", side_effect=AssertionError("Evaluated without val")),
     ):
-        common.train(method, *common.prepare_run(method, cfg, max_updates=1))
+        common.train(method, argv=argv)
     package = torch.load(Path(cfg.workspace.output_dir) / "encoder.pt", weights_only=True)
     assert package["normalizer_state"] == {}
     assert all(mode == "identity" for mode in package["normalization"].values())
     records = [json.loads(line) for line in (Path(cfg.workspace.output_dir) / "metrics.jsonl").read_text().splitlines()]
     assert all(not any(key.startswith("val/") for key in record) for record in records)
-    cfg.dataset.zarr_path = str(root / "missing.zarr")
     try:
-        common.prepare_run(method, cfg, max_updates=1)
+        common.train(method, argv=[*argv, f"zarr_path={root / 'missing.zarr'}"])
     except FileExistsError as error:
         assert "Pretraining output already exists" in str(error)
     else:

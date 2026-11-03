@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, cast
+from typing import Any
 
 import torch
 from torch import nn
@@ -240,7 +240,3 @@ class AdapTac(Policy):
         for module in (self.force_predictor, self.force_fusion, self.action_decoder):
             groups += parameter_groups(module, lr=lr, weight_decay=weight_decay)
         return groups
-
-    def compile_backbone(self, **compile_kwargs: Any) -> None:
-        super().compile_backbone(**compile_kwargs)
-        self.force_predictor.model = cast(nn.Module, torch.compile(self.force_predictor.model, **compile_kwargs))
