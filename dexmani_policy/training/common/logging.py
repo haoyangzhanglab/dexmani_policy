@@ -25,10 +25,6 @@ class ExperimentLogger:
                         stream.seek(-1, os.SEEK_END)
                         if stream.read(1) != b"\n":
                             stream.write(b"\n")
-        else:
-            for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
-                if (self.output_dir / name).exists():
-                    raise FileExistsError(f"Training output already exists: {self.output_dir / name}")
 
         self.metrics_file = (self.output_dir / "metrics.jsonl").open(
             "a", buffering=1, encoding="utf-8"
@@ -49,7 +45,7 @@ class ExperimentLogger:
 
     def save_config(self, hydra_config):
         if not self.resuming:
-            with atomic_path(self.output_dir / "config.yaml", overwrite=False) as temporary:
+            with atomic_path(self.output_dir / "config.yaml") as temporary:
                 OmegaConf.save(hydra_config, temporary, resolve=True)
         if self.wandb_run is not None:
             cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -51,10 +51,6 @@ class AdapTacEncoder(nn.Module):
             self.tactile_encoder.num_tokens * self.tactile_encoder.out_dim, feature_dim
         )
         self.state_encoder = StateEncoder(19, state_out_dim)
-
-    @property
-    def consumed_observation_fields(self):
-        return ("joint_state", "point_cloud", *self.tactile_encoder.consumed_observation_fields)
 
     @property
     def effective_config(self) -> dict:
@@ -168,10 +164,6 @@ class AdapTac(Policy):
         self.tactile_source = tactile_source
         self.force_loss_weight = force_loss_weight
 
-    @property
-    def consumed_observation_fields(self):
-        return tuple(dict.fromkeys((*self.obs_encoder.consumed_observation_fields, "finger_tactile_force")))
-
     def _encode_force_inputs(
         self, obs_dict: dict,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
@@ -251,4 +243,4 @@ class AdapTac(Policy):
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
         super().compile_backbone(**compile_kwargs)
-        self.force_predictor.model = torch.compile(self.force_predictor.model, **compile_kwargs)
+        self.force_predictor.model = cast(nn.Module, torch.compile(self.force_predictor.model, **compile_kwargs))

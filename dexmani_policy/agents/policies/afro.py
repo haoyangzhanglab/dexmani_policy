@@ -14,7 +14,6 @@ from dexmani_policy.agents.policies.base import Policy, module_parameter_group
 
 
 class AFROEncoder(nn.Module):
-    consumed_observation_fields = ("point_cloud", "joint_state")
 
     def __init__(self, n_obs_steps):
         super().__init__()

@@ -19,9 +19,6 @@ from dexmani_policy.common.config import positive_int, require_tactile_source
 
 
 class InterActDexEncoder(nn.Module):
-    consumed_observation_fields = (
-        "joint_state", "point_cloud", "eef_pose", "fingertip_xyz", "finger_tactile_force",
-    )
     out_dim = 192
 
     def __init__(

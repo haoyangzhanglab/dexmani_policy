@@ -48,13 +48,3 @@ def require_tactile_source(fields: Iterable[str], source: str | None) -> str | N
             raise ValueError("Tactile observations require tactile_source=real or sim")
         return source
     return None
-
-
-def validate_observation_fields(agent, declared):
-    consumed = set(agent.consumed_observation_fields)
-    declared = set(declared)
-    missing = consumed - declared
-    if missing:
-        raise ValueError(
-            f"Model observation mismatch: missing={sorted(missing)}"
-        )

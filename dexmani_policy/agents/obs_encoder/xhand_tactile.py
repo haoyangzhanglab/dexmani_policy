@@ -15,7 +15,6 @@ class XHandForceEncoder(nn.Module):
     num_tokens = 5
     out_dim = 64
     input_key = "finger_tactile_force"
-    consumed_observation_fields = (input_key,)
 
     def __init__(self) -> None:
         super().__init__()
@@ -41,7 +40,6 @@ class XHandTaxelEncoder(nn.Module):
     num_tokens = 5
     out_dim = 64
     input_key = "taxel_tactile_force"
-    consumed_observation_fields = (input_key,)
 
     def __init__(self) -> None:
         super().__init__()
@@ -106,7 +104,6 @@ class XHandPatchEncoder(nn.Module):
     num_regions = 5
     out_dim = 64
     input_key = "taxel_tactile_force"
-    consumed_observation_fields = (input_key,)
 
     def __init__(self, region_ids: torch.Tensor | None = None, activity_scale: float = 1.0) -> None:
         super().__init__()

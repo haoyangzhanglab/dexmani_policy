@@ -94,4 +94,4 @@ training:
 
 eval:
   inference_steps: ${agent.num_inference_steps}
-  use_ema: true
+  use_ema: ${training.use_ema}

@@ -16,7 +16,6 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DPEncoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "rgb")
 
     def __init__(
         self,

@@ -15,7 +15,6 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DP3Encoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "point_cloud")
 
     def __init__(
         self,
@@ -29,6 +28,7 @@ class DP3Encoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
+        encoder_cls: type[PointNet] | type[MultiStagePointNet]
         if encoder_type == "dp3":
             encoder_cls = PointNet
         elif encoder_type == "idp3":

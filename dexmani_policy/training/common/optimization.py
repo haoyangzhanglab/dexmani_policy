@@ -47,20 +47,12 @@ class EMA:
     ) -> None:
         ema_model.eval()
         ema_model.requires_grad_(False)
-        self.parameter_groups: dict[
-            tuple[torch.device, torch.dtype, bool], tuple[list[torch.Tensor], list[torch.Tensor]]
-        ] = {}
+        self.parameters = []
+        self.ema_parameters = []
         for param, ema_param in zip(model.parameters(), ema_model.parameters()):
-            if not param.requires_grad:
-                continue
-            if ema_param.dtype in (torch.float16, torch.bfloat16):
-                ema_param.data = ema_param.data.float()
-            needs_cast = param.device != ema_param.device or param.dtype != ema_param.dtype
-            targets, sources = self.parameter_groups.setdefault(
-                (ema_param.device, ema_param.dtype, needs_cast), ([], [])
-            )
-            targets.append(ema_param)
-            sources.append(param)
+            if param.requires_grad:
+                self.parameters.append(param)
+                self.ema_parameters.append(ema_param)
         self.update_after_step = update_after_step
         self.inv_gamma = inv_gamma
         self.power = power
@@ -79,11 +71,7 @@ class EMA:
     def step(self) -> None:
         decay = self.get_decay(self.optimization_step)
         update = get_ema_multi_avg_fn(decay)
-        for (device, dtype, needs_cast), (targets, sources) in self.parameter_groups.items():
-            if needs_cast:
-                # Read current values; caching casts would keep stale parameter copies.
-                sources = [param.to(device=device, dtype=dtype) for param in sources]
-            update(targets, sources, self.optimization_step)
+        update(self.ema_parameters, self.parameters, self.optimization_step)
 
         self.optimization_step += 1
 

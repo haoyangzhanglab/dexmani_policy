@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -13,18 +12,8 @@ def _resolve_checkpoint(experiment, selector):
         directory = PROJECT_ROOT / "experiments" / experiment
     directory = directory.resolve(strict=True)
     selector = str(selector)
-    best = None
-    if selector == "best":
-        best = json.loads((directory / "best_ckpt.json").read_text())
-        path = directory / best["ckpt_relpath"]
-    elif selector == "latest":
+    if selector == "latest":
         path = directory / "checkpoints/latest.pt"
-    elif selector.endswith("pct") and selector[:-3].isdigit():
-        target = int(selector[:-3])
-        matches = sorted(directory.glob(f"checkpoints/epoch=*-step=*-milestone={target:02d}pct.pt"))
-        if not matches:
-            raise FileNotFoundError(f"No {target}% milestone")
-        path = matches[0]
     else:
         path = Path(selector).expanduser()
         if not path.is_absolute():
@@ -32,7 +21,7 @@ def _resolve_checkpoint(experiment, selector):
     path = path.resolve(strict=True)
     if not path.is_file():
         raise ValueError(f"Checkpoint must be a file: {path}")
-    return directory, path, best
+    return directory, path
 
 
 @dataclass(frozen=True)
@@ -73,11 +62,11 @@ class PolicyInfo:
         return result
 
 
-def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=None) -> PolicyInfo:
+def inspect_policy(experiment, checkpoint="latest", weights=None, inference_steps=None) -> PolicyInfo:
     # Read the checkpoint recipe without constructing a model.
-    directory, path, best = _resolve_checkpoint(experiment, checkpoint)
+    directory, path = _resolve_checkpoint(experiment, checkpoint)
     cfg = load_checkpoint(path).effective_config
-    defaults = cfg["eval"] if best is None else best["inference"]
+    defaults = cfg["eval"]
     if weights is None:
         if type(defaults["use_ema"]) is not bool:
             raise ValueError("Saved use_ema must be boolean")
@@ -99,7 +88,7 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         task_name=cfg["task_name"],
         observation_fields=tuple(key for key in cfg["normalization_dims"] if key != "action"),
         n_obs_steps=agent["n_obs_steps"],
-        n_action_steps=agent["n_action_steps"] if best is None else defaults["action_steps"],
+        n_action_steps=agent["n_action_steps"],
         horizon=agent["horizon"],
         action_start_index=metadata["action_start_index"],
         action_dim=agent["action_dim"],

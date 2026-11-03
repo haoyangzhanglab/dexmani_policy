@@ -67,7 +67,9 @@ class CordViP(nn.Module):
 
 
 def main():
-    train("cordvip", *load_run("cordvip"))
+    prepared = load_run("cordvip")
+    if prepared is not None:
+        train("cordvip", *prepared)
 
 
 if __name__ == "__main__":

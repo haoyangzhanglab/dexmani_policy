@@ -15,12 +15,12 @@ from dexmani_policy.common.checkpoint import (
     Checkpoint, policy_state_dict, save_checkpoint,
 )
 from dexmani_policy.common.config import (
-    positive_int, validate_observation_fields,
+    positive_int,
 )
 from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.normalizer import normalizer_shapes_from_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
-from dexmani_policy.training.common.config import assemble_effective_config
+from dexmani_policy.training.common.config import assemble_effective_config, validate_normalization
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position, fit_normalizer
 from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
@@ -43,12 +43,12 @@ class PolicyTrainer:
             with open_dict(cfg.agent):
                 cfg.agent.num_codes = codebook.num_codes
         model = hydra.utils.instantiate(cfg.agent, _convert_="all")
-        validate_observation_fields(model, cfg.dataset.sensor_modalities)
         if data_description["control_action_dim"] != model.control_action_dim:
             raise ValueError("Dataset primary action width must match policy control output")
-        fields = (*model.consumed_observation_fields, "action")
+        if checkpoint is not None and data_description["field_dims"] != cfg.normalization_dims:
+            raise ValueError("Resume data/model mismatch: normalization_dims")
         model.configure_normalizer(
-            {key: data_description["field_dims"][key] for key in fields},
+            data_description["field_dims"] if checkpoint is None else cfg.normalization_dims,
             {} if checkpoint is None else normalizer_shapes_from_state(checkpoint.model_state),
         )
         if checkpoint is None:
@@ -85,12 +85,9 @@ class PolicyTrainer:
                             has_affine = any(f"fields.{key}.{part}" in pretrained_state for part in ("scale", "offset"))
                             cfg.normalization[key] = payload["normalization"][key] if has_affine else "identity"
                     del payload
-            missing = set(fields) - cfg.normalization.keys()
-            if missing:
-                raise ValueError(f"Missing normalization modes for model fields: {sorted(missing)}")
-            spec = {key: cfg.normalization[key] for key in fields}
+            validate_normalization(cfg)
             normalizer = fit_normalizer(
-                dataset, spec, initial_state=pretrained_state,
+                dataset, cfg.normalization, initial_state=pretrained_state,
                 feature_dims=model.normalization_dims, hand_affine=hand_affine,
             )
             print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
@@ -114,7 +111,7 @@ class PolicyTrainer:
                     f"EMA requires frozen BatchNorm or GroupNorm; active modules: {active_batchnorm}"
                 )
 
-        # Freeze before EMA chooses which parameters need FP32 accumulation.
+        # Freeze before EMA selects the trainable parameters.
         obs_lr = cfg.optimizer.get("obs_lr")
         if (cfg.optimizer.lr if obs_lr is None else obs_lr) == 0:
             model.obs_encoder.requires_grad_(False)
@@ -131,9 +128,9 @@ class PolicyTrainer:
                 if checkpoint.ema_model_state is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
-        model.to(device)
+        model.to(device=device, dtype=torch.float32)
         if ema_model is not None:
-            ema_model.to(device)
+            ema_model.to(device=device, dtype=torch.float32)
             # Bind current Parameters only after assignment and device migration.
             ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
 
@@ -145,7 +142,7 @@ class PolicyTrainer:
             self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
             cfg.training.loop.total_train_steps,
         )
-        self.cfg = assemble_effective_config(cfg, data_description, model, checkpoint=checkpoint)
+        self.cfg = cfg if checkpoint is not None else assemble_effective_config(cfg, data_description, model)
         self.total_train_steps = cfg.training.loop.total_train_steps
         self.log_interval_steps = cfg.training.loop.log_interval_steps
         self.gradient_accumulation_steps = cfg.training.loop.gradient_accumulation_steps
@@ -214,12 +211,6 @@ class PolicyTrainer:
             self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.trainable_parameters, self.max_grad_norm, error_if_nonfinite=True
             ).detach()
-        else:
-            finite = [
-                torch.isfinite(p.grad).all() for p in self.trainable_parameters if p.grad is not None
-            ]
-            if finite and not torch.stack(finite).all():
-                raise RuntimeError(f"Non-finite gradient at step {self.global_step}")
 
         self.optimizer.step()
         self.scheduler.step()
@@ -234,11 +225,6 @@ class PolicyTrainer:
         loss_divisor: int = 1,
         log_metrics: bool = True,
     ):
-        fields = self.model.consumed_observation_fields
-        batch = {**batch, "obs": {
-            key: value for key, value in batch["obs"].items()
-            if key in fields
-        }}
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = self.model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(
@@ -248,16 +234,8 @@ class PolicyTrainer:
         ):
             raw_loss, log_dict = self.model(batch, log_metrics=log_metrics, **loss_kwargs)
 
-        value = raw_loss.detach()
-        if not torch.isfinite(value):
-            self.optimizer.zero_grad(set_to_none=True)
-            raise RuntimeError(
-                f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step} "
-                f"(raw_loss={value.item()})"
-            )
         (raw_loss / loss_divisor).backward()
-
-        return log_dict
+        return raw_loss.detach(), log_dict
 
     def save_checkpoint(self, tag_suffix: str):
         global_step = self.global_step
@@ -311,7 +289,6 @@ class PolicyTrainer:
             lr=f"{metrics['train/lr']:.2e}",
             refresh=False,
         )
-        pbar.update(self.global_step - pbar.n)
         self.logger.log(metrics, step=self.global_step)
 
     def train(self, *, max_updates=None):
@@ -332,6 +309,7 @@ class PolicyTrainer:
         if self.ema_model is not None:
             self.ema_model.eval()
 
+        initial_step = self.global_step
         self.stop_requested = False
         self.model.train()
         with training_signal_handlers(self.signal_handler), tqdm(
@@ -358,7 +336,12 @@ class PolicyTrainer:
                         start_batch, num_batches, self.gradient_accumulation_steps
                     ):
                         group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
-                        record_group = (self.global_step + 1) % self.log_interval_steps == 0
+                        record_group = (
+                            self.global_step == initial_step
+                            or (self.global_step + 1) % self.log_interval_steps == 0
+                            or self.global_step + 1 == stop_step
+                        )
+                        finite_loss = torch.ones((), dtype=torch.bool, device=self.device)
                         group_metric_sums: dict[str, torch.Tensor | float] = {}
                         if record_group:
                             # Time the full update from its first batch wait, excluding iterator creation.
@@ -367,12 +350,15 @@ class PolicyTrainer:
                             group_start_time = time.perf_counter()
                         for group_pos in range(group_size):
                             batch = next(iterator)
-                            log_dict = self.train_microbatch(
+                            loss, log_dict = self.train_microbatch(
                                 batch, loss_divisor=group_size, log_metrics=record_group,
                             )
+                            finite_loss.logical_and_(torch.isfinite(loss))
                             if record_group and group_pos + 1 < group_size:
                                 accumulate_metrics(group_metric_sums, log_dict)
 
+                        if not finite_loss:
+                            raise RuntimeError(f"Non-finite loss at step {self.global_step}")
                         self.optimizer_step()
                         if record_group:
                             if self.device.type == "cuda":
@@ -381,6 +367,7 @@ class PolicyTrainer:
                             # Keep the final metric reduction outside the measured update.
                             accumulate_metrics(group_metric_sums, log_dict)
                         self.global_step += 1
+                        pbar.update(1)
                         if record_group:
                             group_metrics = {
                                 key: value / group_size

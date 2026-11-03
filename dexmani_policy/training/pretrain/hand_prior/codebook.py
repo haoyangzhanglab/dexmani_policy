@@ -56,7 +56,7 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     offset = state["fields.hand.offset"].detach().float().cpu()
     codebook.set_prototypes(poses)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with atomic_path(output, overwrite=overwrite) as temporary:
+    with atomic_path(output) as temporary:
         payload = {
             "sorted_hand_poses": codebook.sorted_hand_poses.detach().cpu().numpy(),
             "hand_normalizer_scale": scale.numpy(),

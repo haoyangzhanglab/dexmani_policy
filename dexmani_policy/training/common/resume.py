@@ -34,7 +34,9 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
         if zarr_path is not None:
             cfg.zarr_path = str(Path(zarr_path).expanduser().resolve(strict=True))
             cfg.dataset.zarr_path = cfg.zarr_path
-    return cfg, checkpoint
+    from dexmani_policy.train import build_trainer
+
+    return build_trainer(cfg, checkpoint=checkpoint)
 
 
 def main(argv=None):
@@ -54,9 +56,9 @@ def main(argv=None):
     max_updates = options.pop("max_updates")
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
-    cfg, checkpoint = prepare_resume(**options)
-    from dexmani_policy.train import run_training
-    run_training(cfg, checkpoint=checkpoint, max_updates=max_updates)
+    from dexmani_policy.train import run_trainer
+
+    run_trainer(prepare_resume(**options), max_updates=max_updates)
 
 
 if __name__ == "__main__":

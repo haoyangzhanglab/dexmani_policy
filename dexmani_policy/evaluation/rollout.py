@@ -63,7 +63,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     if action_steps > agent.future_steps:
         raise ValueError(f"action_steps must not exceed future_steps ({agent.future_steps})")
     options.update(n_obs_steps=agent.n_obs_steps,
-                   sensor_modalities=list(agent.consumed_observation_fields),
+                   sensor_modalities=[key for key in cfg["normalization_dims"] if key != "action"],
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     from dexmani_policy.env_runner.sim_runner import SimRunner
     runner = SimRunner(**options)
@@ -80,6 +80,6 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                   episodes=episode_results, statistics=summarize_episodes(episode_results))
     if hasattr(agent, "force_predictor"):
         record["force_inference_steps"] = agent.force_predictor.num_inference_steps
-    write_json(path, record, overwrite=False)
+    write_json(path, record)
     print(f"{record['statistics']}; {path}")
     return record, path

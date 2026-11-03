@@ -30,7 +30,7 @@ python -m dexmani_policy.datasets.preprocess.contact_map --zarr-path INPUT --out
 
 ```bash
 # 用实际数据完成短训、保存和原目录恢复；按硬件设置 batch/worker
-python -m dexmani_policy.test_tools.smoke_test dp3 --max-updates 2 --resume-updates 1 \
+python -m dexmani_policy.test_tools.smoke_test dp3 --max-updates 4 --resume-updates 2 \
   --override 'task_name=<task>' --override dataloader.num_workers=0
 
 # 训练，支持 Hydra 配置覆盖
@@ -45,16 +45,18 @@ python -m dexmani_policy.evaluate \
   --checkpoint <run>/checkpoints/latest.pt --weights ema --inference-steps 10 \
   --episodes 100 --seed 1024
 
-# 显式候选选点与独立测试，测试完成后发布 best
+# 显式候选选点与独立测试，保存胜者及实际推理设置
 python -m dexmani_policy.eval_pipeline \
   --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
   --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
   --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
-续训复用 Checkpoint 中的训练配方和 normalizer，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。日志直接追加，允许重复或较小 step，历史损坏行保留，不解析、截断或备份旧日志；训练进度只取 checkpoint。
+续训直接使用 Checkpoint 中的有效配方与完整训练状态，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续。只有 fresh 装配配方、访问初始化来源和拟合统计；恢复不重写保存的部署事实或训练总预算，`--max-updates` 只限制本次调用。恢复要求同数据、同配方、同训练布局，不保证 worker 增强或编译计算逐位重放。日志直接追加，允许重复或较小 step，历史损坏行保留；训练进度只取 checkpoint。
 
-新训练默认使用 FP32，包括 RGB 主干及 LoRA 参数；通过 `training.use_bfloat16=true` 可选启用 BF16 autocast。续训沿用保存的训练配置及训练状态恢复方式。正式部署、仿真评测及 warmup 在严格加载完整策略后统一转为 FP32，并合并 RGB LoRA 权重；预测入口显式关闭 autocast。合并仅作用于推理实例，训练 checkpoint 保留适配器。
+fresh 与 resume 均使用 FP32 master parameters 和同设备 FP32 EMA；`training.use_bfloat16=true` 仅启用 BF16 autocast，不维护旧低精度 master parameters 的原精度训练轨迹。普通配方 `eval.use_ema` 默认跟随 `training.use_ema`，显式请求缺失 EMA 仍失败；ManiFlow 的 loss 继续要求 EMA。正式部署、仿真评测及 warmup 严格加载后使用 FP32，并合并 RGB LoRA；预测入口显式关闭 autocast，训练 checkpoint 保留适配器。
+
+`dataset.sensor_modalities` 是唯一配方输入列表，实际字段宽度保存为 `normalization_dims`；不另声明模型消费字段或自动过滤额外模态。错误自定义配方可在消费处直接失败。loss 有限性在 accumulation group 结束、optimizer 更新前检查；有裁剪时保留非有限梯度检查，无裁剪路径不逐参数扫描。每次训练调用的首个 update、日志周期和已知最后一个 update 都记录指标。
 
 归一化默认模式写在 YAML，可通过 `normalization.*` 覆盖；默认 joint action 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity。几何输入、DQ/DexLatent 手部 affine、R3D 辅助目标和触觉字段保留各自数学约束。新统计仅来自本阶段 train episodes 的真实源帧，不包含 val、unused、padding 或随机增强。AFRO/CordViP encoder 所属输入的 affine 与 identity 均直接继承，只有新字段重新拟合；有效配置记录实际使用的模式。续训、评测和部署直接复用完整策略 checkpoint 保存的最终统计。
 
@@ -74,7 +76,8 @@ DexLatent 使用同一观测及普通时间 token DiTX，内部预测 7D arm + 3
 
 ```bash
 bash scripts/utils/download_pretrained.sh dexlatent  # 仅准备 DINOv2-small 和官方 DexLatent 权重。
-python -m dexmani_policy.test_tools.agent_checks --device cpu
+python -m dexmani_policy.test_tools.observation_checks --device cpu
+python -m dexmani_policy.test_tools.hand_prior_checks --device cpu
 bash scripts/training/train.sh sat 'task_name=<task>'
 bash scripts/training/train.sh dqrise 'task_name=<task>' 'initialization.codebook=<codebook.npz>'
 bash scripts/training/train.sh dexlatent 'task_name=<task>'
@@ -148,7 +151,9 @@ bash scripts/training/train.sh adaptac tactile=taxel 'zarr_path=<real_zarr>'
 bash scripts/training/train.sh adaptac tactile=patch 'zarr_path=<real_zarr>'
 ```
 
-任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可以覆盖 `normalization.finger_tactile_force=max_abs`、`normalization.taxel_tactile_force=max_abs`（dense 模式）及 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。
+任务名称不同于默认值时，追加 `'task_name=<task>'`。每个 preset 用于独立新实验；对照可以覆盖 `normalization.finger_tactile_force=max_abs`、`normalization.taxel_tactile_force=max_abs`（dense 模式）及 `agent.force_loss_weight=...`。默认 loss weight 为 1.0，要求有限、非负。设为 0 仅关闭显式 force MSE；未来真值 force 的加噪输入及 action loss 仍可训练 force predictor，不是无未来标签基线。
+
+AdapTac 默认关闭 compile。PyTorch 2.4.1 / RTX 4090 上的缩小模型验证发现，编译 force predictor 并启用 BF16、accumulation=2 时，可出现 loss 有限但上游观测梯度非有限，裁剪会报错停止；审查基线也有同一现象。默认 eager 路径的 BF16 累积训练、保存及恢复已通过，不能据此推断编译路径有效。
 
 RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=sqrt(sum(x²)/N)`，然后固定执行 `x/S`，不去均值、不裁剪；非空全零字段使用 identity affine。aggregate 与 dense 独立统计，完整 FP32 affine 随 checkpoint 保存。非退化字段应满足 `mean(z²)≈1`，不要求均值为零。该变换保留零点、方向和相对幅度，不能消除异常峰值或跨源物理差异。
 
@@ -162,15 +167,25 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
 python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>/<run>
 ```
 
-`test_tools/smoke_test.py` 每次接收一个配置，调用正式 `prepare_training/run_training` 短训、保存，再用 `prepare_resume` 在原目录恢复。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，不在 smoke 中建立第二套配置或扫描流程。
+`test_tools/smoke_test.py` 每次接收一个配置，调用正式训练与原目录恢复路径。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，不在 smoke 中建立第二套配置或扫描流程。
 
-`python -m dexmani_policy.test_tools.agent_checks --device cuda` 提供无需外部数据集或预训练权重的数值回归与合成短训，也覆盖 Policy 普通配置容器、嵌套 tactile 构造及临时 Zarr 的窗口、padding、列切片和字段 horizon；支持 `--device cpu`，点云检查使用实际 PyTorch3D 后端。覆盖及组件计时边界见[项目架构](docs/项目架构.md#agents-优化依据与验证)。
+检查按职责独立运行，支持 `--device cpu` 或 `--device cuda`；点云检查使用实际 PyTorch3D 后端，数据窗口检查固定 CPU。数值回归与合成短训无需外部数据集或预训练权重，不能代替正式数据训练和闭环验证：
 
-默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
+```bash
+python -m dexmani_policy.test_tools.decoder_checks --device cpu
+python -m dexmani_policy.test_tools.observation_checks --device cpu
+python -m dexmani_policy.test_tools.hand_prior_checks --device cpu
+python -m dexmani_policy.test_tools.training_checks --device cpu
+python -m dexmani_policy.test_tools.dataset_checks
+python -m dexmani_policy.test_tools.pretrain_checks --device cpu
+python -m dexmani_policy.test_tools.remote_checks
+```
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用同一 checkpoint 的实际配置、保存的 affine 与严格张量赋值，部署参数统一转为 FP32，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径以实验 checkpoints 目录解析；默认 best 恢复选优时的执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。Runtime 返回完整未来动作窗口，由调用方按 `info.n_action_steps` 消费。
+默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 指定保留产物的目录，空目录可用，已有训练产物由正式 fresh 入口拒绝覆盖；未指定时使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-训练按已有数据事实和实际消费模态保存控制周期、点云配方、depth 尺度及指尖名称，由公开 `PolicyInfo` 提供给 Real，不要求 Canonical/source 标签。inspect 和纯策略推理允许缺少硬件事实；设备入口按需检查。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需未改写、未重排的原数据及保存的划分参数。恢复使用保存配置、affine 与 strict load，不读取外部 config.yaml。inspect 默认 latest，也接受明确文件路径，相对文件名以实验 checkpoints 目录解析；不支持 best 或百分比 selector。Runtime 返回完整未来动作窗口，调用方设置实际执行长度，详见[执行长度](docs/仿真评测机制.md#执行长度)。
+
+fresh 按数据事实和配方输入保存控制周期、点云配方、depth 尺度及指尖名称，resume 原样保留，由公开 `PolicyInfo` 提供给 Real。inspect 和纯策略推理允许缺少硬件事实；设备入口按需检查。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 
 数据边界必须区分来源：sim 是世界系 N，来自接触 impulse/physics_dt，再按控制周期子步进行有符号向量平均，目前没有 dense producer。real aggregate/dense 分别来自 SDK `calc_force`/`raw_force`，不是代码中的求和关系；单位为 `sdk_native_unknown_physical_scale`，轴为 `sdk_sensor_axes_not_world_frame`，canonical 尚未完整复制这些 raw 元信息。`fingertip_xyz` 只有位置，不能用于完成轴变换。五指顺序为 thumb/index/middle/ring/pinky，dense 保留 SDK 索引顺序。
 
@@ -190,7 +205,9 @@ experiments/<policy_name>/<task_name>/<run>/
 
 设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验保留配置、Checkpoint 和对应源码；数据加工版本、模板等笔记按实验需要记录，不要求 source_id/commit/template 手工清单作为使用条件。
 
-选模仅在独立测试和完整结果保存成功后原子更新 `best_ckpt.json`，其中只含 `ckpt_relpath` 与 `inference`。外部候选可用 `--run-dir` 指定发布目录，`--output-dir` 可指定任意空目录。best 路径相对 run，selection 内路径相对结果目录；详见[仿真评测机制](docs/仿真评测机制.md)。
+选模完成独立测试后保存 `selection_result.json`，不自动发布 best 指针。结果路径相对结果目录，`--output-dir` 可指定任意空目录。使用胜者时显式指定 checkpoint、weights、NFE 与执行长度；Real 的执行长度在其运行配置设置。历史 `best_ckpt.json` 保留但不再读取，详见[仿真评测机制](docs/仿真评测机制.md)。
+
+每个 run 使用单写者，fresh 在昂贵初始化前检查输出冲突。保存采用同目录临时文件加 `os.replace`，不提供并发排他、强制 fsync 或多文件事务。远程下载用一次普通 rsync，同步已停止/完成的 run，全部成功后再使用。时间采样接口仅保留 uniform、beta、discrete；旧额外分布实验使用原源码版本。
 
 训练划分只依赖 episode 顺序、数量、dataset seed 和数量参数，不读取或比较 `source_id`、episode/trial 身份，也不自动按 trial 分组。续训由研究者保证使用同一份未改写、未重排的数据；原样搬迁可更新路径。重新导出或改变数据顺序应开启新实验，避免复用失配的模型状态和 normalizer。若要避免同一长轨迹的片段跨集合，应在该实验的数据准备阶段处理。
 

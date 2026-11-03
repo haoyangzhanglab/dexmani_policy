@@ -13,8 +13,6 @@ from dexmani_policy.agents.policies.base import Policy
 class R3DEncoder(nn.Module):
     """Concatenate Uni3D features, broadcast state and XYZ encoding as [B, T*K, 2*D+D_s]."""
 
-    consumed_observation_fields = ("joint_state", "point_cloud")
-
     def __init__(
         self,
         state_dim: int,

@@ -14,8 +14,6 @@ from dexmani_policy.agents.policies.base import Policy
 class ManiFlowEncoder(nn.Module):
     """Dense XYZRGB and state tokens in frame-major order [B,T*N,D]."""
 
-    consumed_observation_fields = ("joint_state", "point_cloud")
-
     def __init__(
         self,
         pc_dim: int,

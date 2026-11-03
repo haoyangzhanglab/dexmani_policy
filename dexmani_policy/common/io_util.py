@@ -9,9 +9,7 @@ from pathlib import Path
 
 
 @contextmanager
-def atomic_path(
-    path: str | os.PathLike[str], *, overwrite: bool = True
-) -> Iterator[Path]:
+def atomic_path(path: str | os.PathLike[str]) -> Iterator[Path]:
     """Publish a temporary sibling path atomically after the writer succeeds."""
     path = Path(path)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=".dexmani-publish-", suffix=".tmp")
@@ -20,20 +18,13 @@ def atomic_path(
 
     try:
         yield temporary
-        if not temporary.is_symlink():
-            with temporary.open("rb") as stream:
-                os.fsync(stream.fileno())
-        if overwrite:
-            os.replace(temporary, path)
-        else:
-            # Hard links fail atomically when the destination already exists.
-            os.link(temporary, path)
+        os.replace(temporary, path)
     finally:
         close_resources(lambda: temporary.unlink(missing_ok=True))
 
 
-def write_json(path, record, *, overwrite=True):
-    with atomic_path(Path(path), overwrite=overwrite) as temporary:
+def write_json(path, record):
+    with atomic_path(Path(path)) as temporary:
         temporary.write_text(
             json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         )

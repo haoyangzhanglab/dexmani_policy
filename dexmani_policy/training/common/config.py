@@ -78,6 +78,10 @@ def assemble_policy_config(cfg):
 
 
 def prepare_training(cfg):
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
+        path = Path(cfg.workspace.output_dir) / name
+        if path.exists():
+            raise FileExistsError(f"Training output already exists: {path}")
     validate_config(cfg)
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         name = cfg.agent.get("rgb_backbone_name", "dino")
@@ -96,12 +100,11 @@ def prepare_training(cfg):
     return cfg
 
 
-def validate_config(cfg):
+def validate_normalization(cfg):
     spec = cfg.normalization
     expected = set(cfg.dataset.sensor_modalities) | {"action"}
-    extra = spec.keys() - expected
-    if extra:
-        raise ValueError(f"Normalization fields are not present in dataset: {sorted(extra)}")
+    if set(spec) != expected:
+        raise ValueError(f"Normalization must declare dataset inputs and action: {sorted(expected)}")
     for key, mode in spec.items():
         allowed = {"rms", "max_abs"} if key in TACTILE_FEATURE_SHAPES else {"identity", "limits", "gaussian", "rms", "max_abs"}
         if mode not in allowed:
@@ -118,6 +121,8 @@ def validate_config(cfg):
         if key in spec and spec[key] != "identity":
             raise ValueError(f"{key} must use identity for image preprocessing or physical geometry")
 
+
+def validate_config(cfg):
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
@@ -135,30 +140,13 @@ def validate_config(cfg):
     print("Config validation passed")
 
 
-def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
-    metadata = model.inference_metadata
-    if checkpoint is not None:
-        if checkpoint.effective_config["normalization_dims"] != model.normalization_dims:
-            raise ValueError("Resume data/model mismatch: normalization_dims")
-        for key in ("action_start_index", "control_action_dim"):
-            if checkpoint.effective_config["policy_metadata"][key] != metadata[key]:
-                raise ValueError(f"Resume data/model mismatch: policy_metadata.{key}")
-
+def assemble_effective_config(cfg, data_description, model):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
+        effective.pop("max_updates", None)
         effective.normalization_dims = model.normalization_dims
-        effective.policy_metadata = metadata
-        deployment = dict(data_description["deployment_metadata"])
-        for field, key in (
-            ("point_cloud", "pointcloud_config"),
-            ("hand_pointcloud", "hand_pointcloud_config"),
-            ("fingertip_xyz", "fingertip_link_names"),
-            ("depth", "depth_config"),
-        ):
-            if field not in model.consumed_observation_fields:
-                deployment.pop(key, None)
-        effective.deployment_metadata = deployment
-        if checkpoint is None:
-            effective.agent.update(model.effective_config)
+        effective.policy_metadata = model.inference_metadata
+        effective.deployment_metadata = data_description["deployment_metadata"]
+        effective.agent.update(model.effective_config)
     OmegaConf.resolve(effective)
     return effective
