@@ -4,9 +4,11 @@ import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from torch import nn
 from torch.nn import functional as F
+from timm.models.vision_transformer import Mlp
 
-from dexmani_policy.agents.action_decoders.backbones.dit import DiTBlock
-from dexmani_policy.agents.action_decoders.backbones.modules import DiTTimestepEmbedding, initialize_linear
+from dexmani_policy.agents.action_decoders.backbones.modules import (
+    DiTTimestepEmbedding, approximate_gelu, initialize_linear, modulate,
+)
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
 from dexmani_policy.common.normalizer import LinearNormalizer
@@ -28,13 +30,38 @@ def vicreg_loss(prediction, target):
         return 25 * invariance + 25 * variance + covariance, invariance, variance, covariance
 
 
+class DynamicsBlock(nn.Module):
+    def __init__(self, hidden_size, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.value_proj = nn.Linear(hidden_size, hidden_size)
+        self.output_proj = nn.Linear(hidden_size, hidden_size)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=int(hidden_size * mlp_ratio),
+            act_layer=approximate_gelu,
+            drop=0,
+        )
+        self.adaln_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True),
+        )
+
+    def forward(self, x, c):
+        shift_value, scale_value, gate_value, shift_mlp, scale_mlp, gate_mlp = self.adaln_modulation(c).chunk(6, dim=1)
+        # FDM has one token, so its attention softmax is always one.
+        value = self.value_proj(modulate(self.norm1(x), shift_value, scale_value))
+        x = x + gate_value.unsqueeze(1) * self.output_proj(value)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return x
+
+
 class ForwardDynamics(nn.Module):
     def __init__(
         self,
         input_dim,
         hidden_size=256,
         depth=4,
-        num_heads=4,
         mlp_ratio=4.0,
         timestep_embed_dim=256,
     ):
@@ -51,7 +78,7 @@ class ForwardDynamics(nn.Module):
         )
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+            DynamicsBlock(hidden_size, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
         self.output_layer = nn.Linear(hidden_size, input_dim)
 
@@ -60,6 +87,8 @@ class ForwardDynamics(nn.Module):
     def initialize_weights(self):
         self.apply(initialize_linear)
         for block in self.blocks:
+            # Match the V slice's Xavier variance in the former [3H,H] QKV matrix.
+            nn.init.xavier_uniform_(block.value_proj.weight, gain=2 ** -0.5)
             nn.init.zeros_(block.adaln_modulation[-1].weight)
             nn.init.zeros_(block.adaln_modulation[-1].bias)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)

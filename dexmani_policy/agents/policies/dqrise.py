@@ -111,7 +111,7 @@ class DQRISE(Policy):
         normed = self.normalizer["action"].normalize(batch["action"])
         arm_part = normed[..., : self.arm_dim]
         hand_part = normed[..., self.arm_dim :]
-        index, _ = self.hand_codebook.encode(hand_part)
+        index = self.hand_codebook.encode(hand_part)
 
         flow_target = torch.cat([arm_part, index], dim=-1)
         return self.action_decoder.compute_loss(
@@ -135,7 +135,7 @@ class DQRISE(Policy):
 
         arm_pred = reduced_action[..., : self.arm_dim]
         idx_pred = reduced_action[..., -1]
-        hand_pred, _ = self.hand_codebook.decode(idx_pred)
+        hand_pred = self.hand_codebook.decode(idx_pred)
 
         normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)

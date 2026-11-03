@@ -72,27 +72,22 @@ def prepare_hand_data(cfg):
 
 
 @torch.no_grad()
-def evaluate_vq(vqvae, loader, device):
+def evaluate_vq(vqvae, loader, device) -> float:
     """Evaluate a fixed model's runtime lookup error."""
-    training = vqvae.training
-    vqvae.eval()
-    try:
-        prototypes = build_hand_prototypes(vqvae)
-        lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
-        count = 0
-        for (batch,) in loader:
-            batch = batch.to(device, non_blocking=True)
-            count += batch.shape[0]
-            distances = codebook_distances(batch, prototypes)
-            lookup_sum += distances.amin(-1).double().square().sum()
-        if not count:
-            raise ValueError("VQ evaluation loader is empty")
-        lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
-        if not np.isfinite(lookup_mse):
-            raise FloatingPointError("Non-finite lookup_mse during VQ evaluation")
-        return {"lookup_mse": lookup_mse}
-    finally:
-        vqvae.train(training)
+    prototypes = build_hand_prototypes(vqvae)
+    lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
+    count = 0
+    for (batch,) in loader:
+        batch = batch.to(device, non_blocking=True)
+        count += batch.shape[0]
+        distances = codebook_distances(batch, prototypes)
+        lookup_sum += distances.amin(-1).double().square().sum()
+    if not count:
+        raise ValueError("VQ evaluation loader is empty")
+    lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
+    if not np.isfinite(lookup_mse):
+        raise FloatingPointError("Non-finite lookup_mse during VQ evaluation")
+    return lookup_mse
 
 
 def train(cfg):
@@ -195,7 +190,7 @@ def train(cfg):
             "lr": lr,
         }
         if val_loader is not None:
-            metrics["val_lookup_mse"] = evaluate_vq(vqvae, val_loader, device)["lookup_mse"]
+            metrics["val_lookup_mse"] = evaluate_vq(vqvae, val_loader, device)
         logger.info(
             "epoch %4d | lr %.2e | train recon %.5f commitment %.5f recon_mse %.5f",
             epoch,

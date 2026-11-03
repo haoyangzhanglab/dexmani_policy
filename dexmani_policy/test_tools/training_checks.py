@@ -605,6 +605,9 @@ def check_inherited_policy(root, method, device=torch.device("cpu")):
 
 
 def check_codebook_training(root, device=torch.device("cpu")):
+    from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
+    from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
+
     path = root / "dqrise.zarr"
     source = make_source(path, [6, 12, 18])
     rng = np.random.default_rng(9)
@@ -618,8 +621,13 @@ def check_codebook_training(root, device=torch.device("cpu")):
     artifact = root / "codebook.npz"
     scale = np.linspace(1, 2, 12, dtype=np.float32)
     offset = np.linspace(-0.5, 0.5, 12, dtype=np.float32)
-    np.savez(artifact, sorted_hand_poses=rng.uniform(-1, 1, (3, 12)).astype(np.float32),
-             hand_normalizer_scale=scale, hand_normalizer_offset=offset)
+    vq = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=1,
+                   num_groups=1, codebook_size=3)
+    vq_checkpoint = root / "vq.pt"
+    torch.save(dict(model_config=vq.model_config, model_state_dict=vq.state_dict(),
+                    normalizer_state_dict={"fields.hand.scale": torch.from_numpy(scale),
+                                           "fields.hand.offset": torch.from_numpy(offset)}), vq_checkpoint)
+    assert export_codebook(vq_checkpoint, artifact) == 3
     cfg = load_policy_config("dqrise", [
         f"zarr_path={path}", f"initialization.codebook={artifact}", "initialization.rgb=null",
         f"workspace.output_dir={root / 'dqrise'}", "workspace.wandb_cfg=null",
@@ -712,19 +720,33 @@ def check_training_resume(device):
         root = Path(temporary)
         source = make_source(root / "source.zarr", [4, 9, 14])
         for bfloat16 in (False, True):
+            used_lrs = []
+
+            def record_lr(optimizer, args, kwargs):
+                used_lrs.append(optimizer.param_groups[0]["lr"])
+
             source.attrs.update(dt=0.02, pointcloud_config={"num_points": 8})
             full, split = root / f"full-{bfloat16}", root / f"split-{bfloat16}"
             cfg = small_training_config(root / "source.zarr", full, device, bfloat16=bfloat16)
+            cfg.training.lr_warmup_steps = 2
+            cfg.training.loop.log_interval_steps = 1
             with open_dict(cfg):
                 cfg.max_updates = 6
-            assert run_training(cfg, max_updates=6) == 6
+            trainer = build_trainer(cfg)
+            trainer.optimizer.register_step_pre_hook(record_lr)
+            assert run_trainer(trainer, max_updates=6) == 6
             cfg = small_training_config(root / "source.zarr", split, device, bfloat16=bfloat16)
-            assert run_training(cfg, max_updates=4) == 4
+            cfg.training.lr_warmup_steps = 2
+            cfg.training.loop.log_interval_steps = 1
+            trainer = build_trainer(cfg)
+            trainer.optimizer.register_step_pre_hook(record_lr)
+            assert run_trainer(trainer, max_updates=4) == 4
             original = load_checkpoint(split / "checkpoints/latest.pt")
             source.attrs.update(dt=0.1, pointcloud_config={"num_points": 123})
             with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
                 trainer = prepare_resume(split, device=str(device))
                 assert trainer is not None
+            trainer.optimizer.register_step_pre_hook(record_lr)
             assert trainer.cfg.deployment_metadata == original.effective_config["deployment_metadata"]
             assert all(p.dtype == torch.float32 for p in trainer.model.parameters())
             assert all(p.dtype == torch.float32 for p in trainer.ema_model.parameters())
@@ -743,9 +765,17 @@ def check_training_resume(device):
             assert resumed.effective_config["deployment_metadata"] == original.effective_config["deployment_metadata"]
             for key in ("torch", "torch_cuda"):
                 torch.testing.assert_close(continuous.rng_state[key], resumed.rng_state[key], rtol=0, atol=0)
-            records = [json.loads(line) for line in (split / "metrics.jsonl").read_text().splitlines()]
-            assert [row["step"] for row in records] == [1, 4, 5, 6]
-            assert all(np.isfinite(row["train/loss"]) for row in records)
+            assert used_lrs[:6] == used_lrs[6:] and len(set(used_lrs[:6])) > 1
+            for directory, lrs in ((full, used_lrs[:6]), (split, used_lrs[6:])):
+                records = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
+                assert [row["step"] for row in records] == list(range(1, 7))
+                assert [row["train/lr"] for row in records] == lrs
+                assert [row["train/epoch"] for row in records] == [
+                    epoch_position(step - 1, trainer.batches_per_epoch,
+                                   trainer.gradient_accumulation_steps)[0]
+                    for step in range(1, 7)
+                ]
+                assert all(np.isfinite(row["train/loss"]) for row in records)
 
         # Finish the actual saved budget, then resume without the original data.
         trainer = prepare_resume(split, device=str(device))

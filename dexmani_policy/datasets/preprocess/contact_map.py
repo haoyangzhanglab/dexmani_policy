@@ -28,7 +28,7 @@ def estimate_normals(points):
     return np.asarray(cloud.normals)
 
 
-def compute_contact_map(object_points, object_normals, hand_points, *, gamma=1.0, theta=10.0, point_chunk_size=128):
+def compute_contact_map(object_points, object_normals, hand_points, *, point_chunk_size=128):
     objects = np.asarray(object_points, dtype=np.float64)
     normals = np.asarray(object_normals, dtype=np.float64)
     hand = np.asarray(hand_points, dtype=np.float64)
@@ -40,8 +40,8 @@ def compute_contact_map(object_points, object_normals, hand_points, *, gamma=1.0
         alignment = np.abs(
             np.einsum("ijk,ik->ij", difference, normals[start:stop])
         ) / (distance + 1e-8)
-        minimum = (distance * np.exp(gamma * (1 - alignment))).min(axis=1)
-        contacts[start:stop] = 1 - 2 * (1 / (1 + np.exp(-theta * minimum)) - 0.5)
+        minimum = (distance * np.exp(1 - alignment)).min(axis=1)
+        contacts[start:stop] = 1 - 2 * (1 / (1 + np.exp(-10 * minimum)) - 0.5)
     return contacts
 
 

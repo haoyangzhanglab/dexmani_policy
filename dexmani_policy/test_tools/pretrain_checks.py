@@ -100,6 +100,13 @@ def check_afro_directions(device=torch.device("cpu")):
     model = AFRO({"point_cloud": "identity"}).to(device)
     with torch.no_grad():
         for block in model.fdm.blocks:
+            width = block.value_proj.in_features
+            torch.testing.assert_close(block.value_proj.weight.std(),
+                                       block.value_proj.weight.new_tensor((0.5 / width) ** 0.5), rtol=0.03, atol=0)
+            torch.testing.assert_close(block.output_proj.weight.std(),
+                                       block.output_proj.weight.new_tensor((1 / width) ** 0.5), rtol=0.03, atol=0)
+            assert not block.adaln_modulation[-1].weight.count_nonzero()
+            assert not block.adaln_modulation[-1].bias.count_nonzero()
             block.adaln_modulation[-1].weight.normal_(0, 0.01)
     reference = copy.deepcopy(model)
     points = torch.randn(2, 3, 8, 3, device=device)
@@ -191,7 +198,10 @@ def check_training(root, method, device=torch.device("cpu")):
     records = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
     assert any("val/loss" in record for record in records)
     assert [row["train/lr"] for row in records if "train/lr" in row] == logged_lrs
-    common.export_encoder(resumed["model_state"], cfg.normalization, root / "export.pt")
+    assert resumed["optimizer_state"]["state"]
+    with patch("sys.argv", ["export", "--checkpoint", str(directory / "resume.pt"),
+                            "--output", str(root / "export.pt")]):
+        common.main()
     package = torch.load(root / "export.pt", weights_only=True)
     assert package["normalization"] == dict(cfg.normalization)
     saved = torch.load(directory / "encoder.pt", weights_only=True)

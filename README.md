@@ -56,7 +56,7 @@ python -m dexmani_policy.eval_pipeline \
 
 fresh 与 resume 均使用 FP32 master parameters 和同设备 FP32 EMA；`training.use_bfloat16=true` 仅启用 BF16 autocast，不维护旧低精度 master parameters 的原精度训练轨迹。普通配方 `eval.use_ema` 默认跟随 `training.use_ema`，显式请求缺失 EMA 仍失败；ManiFlow 的 loss 继续要求 EMA。正式部署、仿真评测及 warmup 严格加载后使用 FP32，并合并 RGB LoRA；预测入口显式关闭 autocast，训练 checkpoint 保留适配器。
 
-`dataset.sensor_modalities` 是唯一配方输入列表，实际字段宽度保存为 `normalization_dims`；不另声明模型消费字段或自动过滤额外模态。错误自定义配方可在消费处直接失败。Policy 不再支持整模态 dropout；Dataset 的点云、颜色和状态增强保持。loss 有限性在 accumulation group 结束、optimizer 更新前检查；有裁剪时保留非有限梯度检查，无裁剪路径不逐参数扫描。每次训练调用的首个 update、日志周期和已知最后一个 update 都记录指标。
+`dataset.sensor_modalities` 是唯一配方输入列表，实际字段宽度保存为 `normalization_dims`；不另声明模型消费字段或自动过滤额外模态。错误自定义配方可在消费处直接失败。Policy 不再支持整模态 dropout；Dataset 的点云、颜色和状态增强保持。loss 有限性在 accumulation group 结束、optimizer 更新前检查；有裁剪时保留非有限梯度检查，无裁剪路径不逐参数扫描。每次训练调用的首个 update、日志周期和已知最后一个 update 都记录指标。日志 LR 为本次更新实际使用的值，零起点 epoch 对应产生该 loss 的训练轮次，step 为已完成的更新数。
 
 归一化默认模式写在 YAML，可通过 `normalization.*` 覆盖；默认 joint action 使用训练集 `limits`，EEF 的 position/hand 使用 `limits`、rot6d 保持 identity。几何输入、DQ/DexLatent 手部 affine、R3D 辅助目标和触觉字段保留各自数学约束。新统计仅来自本阶段 train episodes 的真实源帧，不包含 val、unused、padding 或随机增强。AFRO/CordViP encoder 所属输入的 affine 与 identity 均直接继承，只有新字段重新拟合；有效配置记录实际使用的模式。续训、评测和部署直接复用完整策略 checkpoint 保存的最终统计。
 

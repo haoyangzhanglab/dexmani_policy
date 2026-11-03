@@ -134,7 +134,7 @@ def train(method, argv=None):
         print(f"Pretraining already completed at step {checkpoint['global_step']}")
         return
     if not resuming:
-        for name in ("config.yaml", "metrics.jsonl", "checkpoints", "encoder.pt", "resume.pt"):
+        for name in ("config.yaml", "metrics.jsonl", "encoder.pt", "resume.pt"):
             path = Path(cfg.workspace.output_dir) / name
             if path.exists():
                 raise FileExistsError(f"Pretraining output already exists: {path}")
@@ -298,7 +298,7 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False, mmap=True)
     export_encoder(checkpoint["model_state"], checkpoint["effective_config"]["normalization"], args.output)
 
 

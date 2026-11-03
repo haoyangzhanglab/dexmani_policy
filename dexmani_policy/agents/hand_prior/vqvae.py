@@ -43,21 +43,6 @@ def kmeans(samples: Tensor, num_clusters: int, num_iters: int) -> tuple[Tensor, 
     return means, counts
 
 
-class HandStateMLP(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int, num_layers: int) -> None:
-        super().__init__()
-        positive_int(num_layers, "num_layers")
-        self.trunk = build_mlp(
-            [input_dim] + [hidden_dim] * num_layers,
-            activation=nn.ReLU, normalize=False, activate_last=True,
-        )
-        self.head = nn.Linear(hidden_dim, output_dim)
-        self.apply(orthogonal_init)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.head(self.trunk(x))
-
-
 class EMAVectorQuantizer(nn.Module):
     """Euclidean nearest-neighbor quantization with EMA codebook updates."""
 
@@ -125,7 +110,7 @@ class EMAVectorQuantizer(nn.Module):
                 self.cluster_size[expired] = self.threshold_ema_dead_code
                 self.embed_avg[expired] = replacements * self.threshold_ema_dead_code
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         with torch.autocast(device_type=x.device.type, enabled=False):
             samples = x.detach().reshape(-1, x.shape[-1]).float()
             if not self.is_initialized:
@@ -141,7 +126,7 @@ class EMAVectorQuantizer(nn.Module):
                 self.update_codebook(samples, indices)
                 quantized = x + (quantized - x).detach()
 
-        return quantized, indices.reshape(x.shape[:-1]), commitment
+        return quantized, commitment
 
 
 class ResidualVectorQuantizer(nn.Module):
@@ -164,11 +149,11 @@ class ResidualVectorQuantizer(nn.Module):
         losses = []
         weights = self.layer_weights.softmax(0)
         for weight, layer in zip(weights, self.layers):
-            quantized, _, loss = layer(residual)
+            quantized, loss = layer(residual)
             residual = residual - quantized.detach()
             output = output + weight * quantized
             losses.append(loss)
-        return cast(Tensor, output), torch.stack(losses)
+        return cast(Tensor, output), torch.stack(losses).sum()
 
 
 class HandVQVAE(nn.Module):
@@ -191,6 +176,7 @@ class HandVQVAE(nn.Module):
         super().__init__()
         if len(loss_weight) != hand_dim:
             raise ValueError("loss_weight must contain one weight per hand joint")
+        positive_int(num_layers, "num_layers")
 
         self.hand_dim = hand_dim
         self.latent_dim = latent_dim
@@ -200,8 +186,16 @@ class HandVQVAE(nn.Module):
         self.num_layers = num_layers
         self.kmeans_init = kmeans_init
         self.register_buffer("loss_weight", torch.tensor(loss_weight, dtype=torch.float32))
-        self.encoder = HandStateMLP(hand_dim, latent_dim, hidden_dim, num_layers)
-        self.decoder = HandStateMLP(latent_dim, hand_dim, hidden_dim, num_layers)
+        self.encoder = build_mlp(
+            [hand_dim] + [hidden_dim] * num_layers + [latent_dim],
+            activation=nn.ReLU, normalize=False,
+        )
+        self.encoder.apply(orthogonal_init)
+        self.decoder = build_mlp(
+            [latent_dim] + [hidden_dim] * num_layers + [hand_dim],
+            activation=nn.ReLU, normalize=False,
+        )
+        self.decoder.apply(orthogonal_init)
         self.quantizer = ResidualVectorQuantizer(
             latent_dim,
             num_groups,
@@ -226,12 +220,12 @@ class HandVQVAE(nn.Module):
         }
 
     def forward(self, hand: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        quantized, losses = self.quantizer(self.encoder(hand))
+        quantized, commitment = self.quantizer(self.encoder(hand))
         reconstruction = self.decoder(quantized)
         reconstruction_loss = ((hand - reconstruction).abs() * self.loss_weight).mean()
         with torch.no_grad():
             mse = F.mse_loss(hand, reconstruction)
-        return reconstruction_loss, losses.sum(), mse
+        return reconstruction_loss, commitment, mse
 
     @property
     def codebooks(self) -> Tensor:

@@ -41,14 +41,16 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     if output.exists() and not overwrite:
         raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
 
-    from sklearn.decomposition import PCA
-
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     poses = build_hand_prototypes(model).cpu().numpy()
     if len(poses) > 1:
-        projection = PCA(n_components=1).fit_transform(poses)[:, 0]
-        poses = poses[np.argsort(projection)]
+        centered = poses - poses.mean(axis=0)
+        _, _, axes = np.linalg.svd(centered, full_matrices=False)
+        axis = axes[0]
+        if axis[np.abs(axis).argmax()] < 0:
+            axis = -axis
+        poses = poses[np.argsort(centered @ axis)]
     state = checkpoint["normalizer_state_dict"]
     scale = state["fields.hand.scale"].detach().float().cpu()
     offset = state["fields.hand.offset"].detach().float().cpu()

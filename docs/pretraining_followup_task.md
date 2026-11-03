@@ -1,6 +1,6 @@
 # 预训练后续精简与优化任务书
 
-状态：待实施。本文汇总上一轮实施后的两轮新审查，2026-11-03。
+状态：已实施，2026-11-03。F1–F8 完成；E1 未推荐，E2 验证后采用。本文汇总上一轮实施后的两轮新审查及本轮完成记录。
 
 审查基线：[`156fe679e6825fb306d0488e1f945d9ee9f60b2f`](https://github.com/haoyangzhanglab/dexmani_policy/commit/156fe679e6825fb306d0488e1f945d9ee9f60b2f)。[上一份任务书](pretraining_simplification_task.md)的 T1–T8 已落地，保留其实施记录；本任务书只补充新问题与后续决策。开始实施时核对最新代码和真实调用方，已解决项不重复修改。
 
@@ -204,14 +204,51 @@ python -m dexmani_policy.test_tools.contact_map_checks
 
 验收以以下行为为准：
 
-- [ ] F1：变化 LR 与实际 update 对齐，epoch 边界与恢复日志正确；训练状态未变。
-- [ ] F2–F5：MLP/量化损失/梯度/EMA 正确，接口消费者全部更新，lookup 评估无状态副作用，必要外部边界与索引 finite 检查保留。
-- [ ] F6：一维 PCA 几何语义正确，原型集合与 lookup MSE 不变；生产/测试/直接依赖中不再需要 sklearn，新码本可供下游使用。
-- [ ] F7：mmap 独立导出与直接导出的 encoder/normalizer 一致。
-- [ ] F8：接触公式/分块结果未变，相关文档和测试同步。
-- [ ] E1/E2：分别注明采用、未采用或未测及原因；若合入，提供实际数值/恢复/性能验证，未引入双模式或兼容层。
-- [ ] 最终 diff 无无关变更、无新工程框架、无旧接口残留；`git diff --check` 通过。
+- [x] F1：变化 LR 与实际 update 对齐，epoch 边界与恢复日志正确；训练状态未变。
+- [x] F2–F5：MLP/量化损失/梯度/EMA 正确，接口消费者全部更新，lookup 评估无状态副作用，必要外部边界与索引 finite 检查保留。
+- [x] F6：一维 PCA 几何语义正确，原型集合与 lookup MSE 不变；生产/测试/直接依赖中不再需要 sklearn，新码本可供下游使用。
+- [x] F7：mmap 独立导出与直接导出的 encoder/normalizer 一致。
+- [x] F8：接触公式/分块结果未变，相关文档和测试同步。
+- [x] E1/E2：分别注明采用、未采用或未测及原因；若合入，提供实际数值/恢复/性能验证，未引入双模式或兼容层。
+- [x] 最终 diff 无无关变更、无新工程框架、无旧接口残留；`git diff --check` 通过。
 
 两轮审查已完成源码对照和局部验证：日志控制流显示实际使用 0.001 而记录 0.0005；NumPy 单 token 对照、MLP 结构对照及 SVD 与 full PCA 的样例比较支持本方案。**这些不等于完成 Torch 梯度、CUDA 性能或真实任务训练验收。** 上一份任务书中的 CPU/CUDA 通过记录属于旧实现，不能当成本轮修改后的验证。
 
 实施者最终用中文报告：实际删除/修复内容、算法或产物语义变化、运行的命令和结果、未验证项、E1/E2 取舍。可在本文末尾追加简短完成记录；不另建 evidence 清单或大篇审查文档。基础任务完成、必要验证通过后收敛，不继续无边界重构。
+
+## 7. 完成记录（2026-11-03）
+
+- F1：用局部 LR/epoch 对齐本次 loss 和 update；变化 warmup/cosine、epoch 尾组、恢复首组与连续/分段训练状态对照通过，无新增持久日志状态。
+- F2–F6：删除 MLP 包装、无消费者返回值、lookup 模式切换、setter 和重复内部校验；加载边界保留 FP32 finite/affine 检查，decode 保留整数转换前 finite 检查。使用中心化 NumPy SVD，移除生产、测试及两处 sklearn 依赖。一次性基线 MLP 深度 1/6 的初始化、输出、loss、梯度、EMA 逐位对照通过；未留下旧实现。
+- F7/F8：独立 encoder 导出使用 mmap；contact 固定原有 gamma/theta 配方，保留分块与预处理资源清理。新 VQ checkpoint→NPZ→正式 DQ-RISE 训练/推理/续训和实际 resume checkpoint→独立 encoder 导出均通过。
+- 新 VQ/AFRO checkpoint 键名改变，PCA 排序编号可改变；不提供旧产物兼容。VQ 目标、EMA、归一化、direct FP32 距离、采样与恢复位置语义保持；AFRO 保留 V/output 双线性参数化，初始化分布保持，但不承诺相同 seed 的旧训练轨迹。
+
+本次使用 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`，Torch 2.4.1+cu124；CUDA 在宿主 RTX 4090 上执行。以下检查实际通过：
+
+| 命令/定向入口 | 本次结果 |
+| --- | --- |
+| `python -m dexmani_policy.test_tools.hand_prior_checks --device cpu` 及 `--device cuda:0` | VQ loss/梯度/EMA、strict roundtrip、尾批、加载边界、K=1/16/512 与重复原型排序、lookup/模式/RNG 不变性、DQ-RISE 链路通过 |
+| `OMP_NUM_THREADS=1 python -m dexmani_policy.test_tools.pretrain_checks --device cpu` 及 `--device cuda:0` | 最终 AFRO/CordViP loss/梯度、短训/严格恢复、独立 mmap 导出与 encoder/normalizer 精确对照通过 |
+| `python -c` 定向调用 `training_checks.check_training_resume`、`check_codebook_training`，分别使用 CPU/CUDA | 变化 LR/epoch 日志、FP32/BF16 连续/恢复状态，以及新 VQ→NPZ→正式 DQ-RISE 训练/推理/恢复通过 |
+| `OMP_NUM_THREADS=1 python -m dexmani_policy.test_tools.contact_map_checks` | 公式、分块、normal 符号、串行/spawn、数据对齐及失败清理通过 |
+| `git diff --check` | 通过 |
+
+E1/E2 使用临时脚本，未增加仓库实验框架。均为 FP32 驻留 GPU 的合成输入，真实 affine、loss/backward/finite、teacher 更新、AdamW 和 scheduler 的完整 update；每组 20 次预热，三轮各 50 次计时，交替次序并同步，排除数据加载和日志 I/O。
+
+| 实验 | 三轮 ms/update：原实现 → 候选 | 取舍 |
+| --- | --- | --- |
+| E1 AFRO，B=128/F=17/P=1024（E2 前） | 165.393/165.643/165.540 → 170.080/167.074/166.099 | 无收益；不改默认，不加推荐 override |
+| E1 CordViP，B=256/F=4，hand/object 各 1024 点 | 126.744/124.936/126.407 → 124.671/123.627/124.371 | 均值改善约 1.43%，接近轮间波动，未推荐；两方法 fused override 的短训/严格恢复均通过 |
+| E2 最终 AFRO，B=128/F=17/P=1024，limits affine | 164.666/164.953/165.637 → 154.831/155.464/154.901 | 三轮提速 5.97%/5.75%/6.48%，中位 5.97%，超过波动与确认的 3% 门槛，采用 |
+
+E2 使用局部 `DynamicsBlock`，删除 Q/K、head reshape、SDPA 和局部 num_heads，保留 V/output 两层及正确初始化，少 526336 个参数；峰值分配显存 12170.85→12163.69 MiB，仅减少约 7.16 MiB。实际新类在 CPU/CUDA 非零 gates 下的输出、输入/保留参数梯度及三步 AdamW 更新对照通过；最终新版本短训、保存、严格续训通过。临时验证命令为 `PYTHONPATH=. python /tmp/dexmani-followup-e2.py --device cuda:0 --benchmark`；E1 使用 `OMP_NUM_THREADS=1 python /tmp/dexmani_e1.py`。
+
+未执行真实任务长训、闭环机器人/仿真评测或跨平台逐位排序验证；未测量独立 mmap 导出的内存/耗时改善比例。上述局部与合成数据检查不代表任务成功率。
+
+### 后续全链路审查与清理
+
+- 核对 VQ→NPZ→DQ-RISE、观测训练→恢复→encoder 导出→下游继承及 contact 调用链，未发现遗留 SHA/哈希、旧格式兼容或漏适配生产调用。保留 finite、affine、参数顺序、资源清理和防误覆盖等实际边界。
+- 修复 tail-batch 检查的函数/指标字典重名及 mypy 错误；明确 lookup 标量和 hand affine 返回类型。LR 回归改用 optimizer 自带 step pre-hook，删除依赖 scheduler 构造时捕获方法的全局 patch。
+- 清除 AFRO 的 MSA 局部旧命名、重复 V bias 初始化及观测入口不再生成的 checkpoints 目录检查；既有检查补充 V/output 初始化方差与零 AdaLN 验证，继续使用非零 gates 检查梯度。同步架构文档的局部 DynamicsBlock、LR/epoch 描述和手部文档的 commitment 求和/量化加权语义。
+- 本次重新执行 hand_prior_checks、pretrain_checks 的 CPU/CUDA，独立 contact_map_checks，主训练 resume/lifecycle 的 CPU/CUDA，以及 CPU 配置和 nonfinite-group 检查，均通过。相关 14 个文件的 mypy（`--check-untyped-defs --follow-imports=skip --ignore-missing-imports`）、全包 compileall、6 个 CLI 的 --help、3 个 shell 的 bash -n、隔离目录 wheel 构建及包内配置/依赖检查、最终 `git diff --check` 均通过。
+- 本次清理不改变训练目标、参数化、归一化、EMA 或恢复规则；未重测性能，也未补做真实任务长训或闭环评测。此前性能数字仅对应上次明确记录的测量。

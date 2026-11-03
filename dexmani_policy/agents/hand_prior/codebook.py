@@ -42,39 +42,26 @@ class HandStateCodebook(nn.Module):
         self.register_buffer("sorted_hand_poses", torch.empty(self.num_codes, self.hand_dim, dtype=torch.float32))
 
     @torch.no_grad()
-    def set_prototypes(self, poses: Tensor) -> None:
-        if poses.shape != self.sorted_hand_poses.shape:
-            raise ValueError(f"Hand prototypes require shape {tuple(self.sorted_hand_poses.shape)}")
-        if poses.is_complex() or poses.dtype == torch.bool:
-            raise ValueError("Hand prototypes must contain real numeric values")
-        poses = poses.detach().to(self.sorted_hand_poses)
-        if not torch.isfinite(poses).all():
-            raise ValueError("Hand prototypes must be finite in runtime dtype")
-        self.sorted_hand_poses.copy_(poses)
-
-    @torch.no_grad()
-    def encode(self, hand: Tensor) -> tuple[Tensor, Tensor]:
-        """Map normalized states to continuous and discrete nearest-prototype indices."""
-        if hand.ndim == 0 or hand.shape[-1] != self.hand_dim:
-            raise ValueError(f"Expected hand width {self.hand_dim}, got shape {tuple(hand.shape)}")
+    def encode(self, hand: Tensor) -> Tensor:
+        """Map normalized states to continuous nearest-prototype indices."""
         distances = codebook_distances(hand.reshape(-1, self.hand_dim), self.sorted_hand_poses)
         indices = distances.argmin(-1).reshape(hand.shape[:-1])
         continuous = indices.float() / max(self.num_codes - 1, 1) * 2.0 - 1.0
-        return continuous.unsqueeze(-1), indices
+        return continuous.unsqueeze(-1)
 
-    def decode(self, continuous: Tensor) -> tuple[Tensor, Tensor]:
+    def decode(self, continuous: Tensor) -> Tensor:
         """Round continuous indices half-up before looking up normalized hand states."""
         if not torch.isfinite(continuous).all():
             raise ValueError("Continuous hand indices must be finite before quantization")
         scaled = (continuous.float().clamp(-1.0, 1.0) + 1.0) * 0.5 * (self.num_codes - 1)
         indices = torch.floor(scaled + 0.5).long().clamp(0, self.num_codes - 1)
-        return self.sorted_hand_poses[indices], indices
+        return self.sorted_hand_poses[indices]
 
     def extra_repr(self) -> str:
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}"
 
 
-def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict]:
+def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor]]:
     with np.load(Path(path).expanduser(), allow_pickle=False) as data:
         poses = torch.from_numpy(data["sorted_hand_poses"])
         affine = {
@@ -83,6 +70,11 @@ def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict]:
         }
     if poses.ndim != 2 or poses.shape[1] != 12:
         raise ValueError("Hand codebook requires sorted_hand_poses shape [K,12]")
+    if poses.is_complex() or poses.dtype == torch.bool:
+        raise ValueError("Hand prototypes must contain real numeric values")
+    poses = poses.float()
+    if not torch.isfinite(poses).all():
+        raise ValueError("Hand prototypes must be finite in runtime dtype")
     codebook = HandStateCodebook(hand_dim=poses.shape[1], num_codes=poses.shape[0])
     for key, values in affine.items():
         if values.shape != (codebook.hand_dim,) or values.is_complex() or values.dtype == torch.bool:
@@ -90,5 +82,5 @@ def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict]:
         affine[key] = values.float()
     if any(not torch.isfinite(value).all() for value in affine.values()) or (affine["scale"] == 0).any():
         raise ValueError("Hand normalizer must be finite and invertible in runtime dtype")
-    codebook.set_prototypes(poses)
+    codebook.sorted_hand_poses.copy_(poses)
     return codebook, affine

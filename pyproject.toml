@@ -25,7 +25,6 @@ dependencies = [
     "peft",
     "wandb",
     "imageio-ffmpeg",
-    "scikit-learn",
     "pyyaml",
 ]
 

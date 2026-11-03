@@ -37,8 +37,12 @@ def check_vq(device):
         counts = state["cluster_size"].lerp(assignment.sum(0), 1 - quantizer.decay)
         sums = state["embed_avg"].lerp(assignment.T @ x.detach(), 1 - quantizer.decay)
         smoothed = (counts + quantizer.eps) / (counts.sum() + 4 * quantizer.eps) * counts.sum()
-        output, indices, loss = quantizer(x)
-        assert torch.equal(indices, expected_indices)
+        expected_output = state["embed"][expected_indices]
+        output, loss = quantizer(x)
+        torch.testing.assert_close(output, expected_output)
+        torch.testing.assert_close(loss, F.mse_loss(expected_output, x))
+        commitment_grad, = torch.autograd.grad(loss, x, retain_graph=True)
+        torch.testing.assert_close(commitment_grad, 2 * (x.detach() - expected_output) / x.numel())
         torch.testing.assert_close(quantizer.cluster_size, counts)
         torch.testing.assert_close(quantizer.embed_avg, sums, rtol=1e-5, atol=1e-6)
         torch.testing.assert_close(quantizer.embed, sums / smoothed[:, None], rtol=1e-5, atol=1e-6)
@@ -53,7 +57,7 @@ def check_vq(device):
         quantizer.embed[0, 0] += 1e-4
         quantizer.embed[1].fill_(1)
     with torch.autocast(device.type, dtype=torch.bfloat16):
-        assert quantizer(torch.ones(1, 12, device=device))[1].item() == 1
+        torch.testing.assert_close(quantizer(torch.ones(1, 12, device=device))[0], quantizer.embed[1:2])
 
     initialized = EMAVectorQuantizer(3, 4, kmeans_init=True, kmeans_iters=2).to(device)
     initialized(torch.zeros(8, 3, device=device))
@@ -80,7 +84,8 @@ def check_vq(device):
         "model_config": vae.model_config,
         "model_state_dict": {name: value.cpu() for name, value in vae.state_dict().items()},
     }, device=device)
-    assert all(torch.isfinite(p).all() for p in loaded.parameters())
+    for name, value in vae.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], value, rtol=0, atol=0)
 
 
 def check_vq_objective(device):
@@ -90,11 +95,20 @@ def check_vq_objective(device):
     reference = copy.deepcopy(model)
     hand = torch.randn(5, 12, device=device)
     actual = model(hand)
-    latent, commitments = reference.quantizer(reference.encoder(hand))
+    residual = reference.encoder(hand)
+    latent = torch.zeros_like(residual)
+    losses = []
+    for weight, layer in zip(reference.quantizer.layer_weights.softmax(0), reference.quantizer.layers):
+        index = (residual.detach()[:, None] - layer.embed).square().sum(-1).argmin(-1)
+        selected = layer.embed[index]
+        losses.append(F.mse_loss(selected, residual))
+        quantized = residual + (selected - residual).detach()
+        latent = latent + weight * quantized
+        residual = residual - quantized.detach()
     decoded = reference.decoder(latent)
     expected = (
         ((hand - decoded).abs() * reference.loss_weight).mean(),
-        commitments.sum(), F.mse_loss(hand, decoded),
+        torch.stack(losses).sum(), F.mse_loss(hand, decoded),
     )
     torch.testing.assert_close(actual, expected)
     (3 * actual[0] + 5 * actual[1]).backward()
@@ -124,13 +138,13 @@ def check_vq_tail_batches(device):
             seen = []
             observed = []
             forward = HandVQVAE.forward
-            def record(model, hand):
+            def record_forward(model, hand):
                 seen.append(hand.detach().cpu().numpy())
                 values = forward(model, hand)
                 observed.append((len(hand), [float(v.detach()) for v in values]))
                 return values
             with (
-                patch.object(HandVQVAE, "forward", record),
+                patch.object(HandVQVAE, "forward", record_forward),
                 patch.object(vq_training, "evaluate_vq", side_effect=AssertionError("No validation requested")),
                 patch.object(vq_training, "build_scheduler", wraps=vq_training.build_scheduler) as scheduler,
             ):
@@ -139,13 +153,13 @@ def check_vq_tail_batches(device):
             assert scheduler.call_args.kwargs["num_training_steps"] == 2 * updates
             assert len(observed) == 2 * updates
             records = [json.loads(line) for line in (root / "run/metrics.jsonl").read_text().splitlines()]
-            for epoch, record in enumerate(records):
+            for epoch, epoch_metrics in enumerate(records):
                 batches = observed[epoch * updates:(epoch + 1) * updates]
                 assert sum(n for n, _ in batches) == count
                 actual_rows = np.concatenate(seen[epoch * updates:(epoch + 1) * updates])
                 np.testing.assert_array_equal(actual_rows[np.argsort(actual_rows[:, 0])], expected_rows)
                 expected = np.sum([np.array(v) * n for n, v in batches], axis=0) / count
-                np.testing.assert_allclose([record[k] for k in ("train_enc", "train_vq", "train_mse")], expected)
+                np.testing.assert_allclose([epoch_metrics[k] for k in ("train_enc", "train_vq", "train_mse")], expected)
             table, _ = load_codebook(root / "run/codebook.npz")
             assert table.num_codes == 1
 
@@ -153,10 +167,10 @@ def check_vq_tail_batches(device):
 def check_codebook(device):
     for size in (256, 512):
         table = HandStateCodebook(12, num_codes=size).to(device)
-        table.set_prototypes(torch.randn(size, 12, device=device))
+        table.sorted_hand_poses.copy_(torch.randn(size, 12, device=device))
         for dtype in (torch.float16, torch.bfloat16, torch.float32):
-            _, index = table.decode(torch.tensor([-2, -1, 1, 2], device=device, dtype=dtype))
-            assert index.tolist() == [0, 0, size - 1, size - 1]
+            decoded = table.decode(torch.tensor([-2, -1, 1, 2], device=device, dtype=dtype))
+            torch.testing.assert_close(decoded, table.sorted_hand_poses[[0, 0, size - 1, size - 1]])
         for invalid in (float("nan"), float("inf"), -float("inf")):
             try:
                 table.decode(torch.tensor([invalid], device=device))
@@ -170,20 +184,93 @@ def check_codebook(device):
             table.sorted_hand_poses[0, 0] += 1e-4
             table.sorted_hand_poses[1].fill_(1)
         for shape in ((12,), (2, 12), (2, 3, 12)):
-            continuous, indices = table.encode(torch.ones(shape, device=device))
-            assert indices.shape == shape[:-1] and (indices == 1).all()
+            continuous = table.encode(torch.ones(shape, device=device))
             assert continuous.shape == (*shape[:-1], 1)
+            torch.testing.assert_close(continuous, torch.full_like(continuous, 2 / (size - 1) - 1))
         restored = HandStateCodebook(12, num_codes=size).to(device)
         restored.load_state_dict(table.state_dict(), strict=True)
         assert set(restored.state_dict()) == {"sorted_hand_poses"}
     single = HandStateCodebook(12, num_codes=1).to(device)
-    single.set_prototypes(torch.ones(1, 12, device=device))
-    continuous, indices = single.encode(torch.ones(2, 12, device=device))
-    assert (continuous == -1).all() and (indices == 0).all()
-    assert (single.decode(torch.tensor([-3., 0., 3.], device=device))[1] == 0).all()
+    single.sorted_hand_poses.fill_(1)
+    continuous = single.encode(torch.ones(2, 12, device=device))
+    assert (continuous == -1).all()
+    torch.testing.assert_close(single.decode(torch.tensor([-3., 0., 3.], device=device)),
+                               torch.ones(3, 12, device=device))
     odd = HandStateCodebook(12, num_codes=3).to(device)
-    odd.set_prototypes(torch.arange(3, device=device)[:, None].expand(-1, 12))
-    assert odd.decode(torch.tensor([-0.5, 0., 0.5], device=device))[1].tolist() == [1, 1, 2]
+    odd.sorted_hand_poses.copy_(torch.arange(3, device=device)[:, None].expand(-1, 12))
+    torch.testing.assert_close(odd.decode(torch.tensor([-0.5, 0., 0.5], device=device)),
+                               odd.sorted_hand_poses[[1, 1, 2]])
+
+
+def check_codebook_loading(device):
+    with tempfile.TemporaryDirectory(prefix="dexmani-codebook-loading-") as directory:
+        path = Path(directory) / "codebook.npz"
+        valid = dict(sorted_hand_poses=np.zeros((2, 12), dtype=np.float32),
+                     hand_normalizer_scale=np.ones(12, dtype=np.float32),
+                     hand_normalizer_offset=np.zeros(12, dtype=np.float32))
+        invalid = [
+            ("sorted_hand_poses", np.zeros((2, 11), dtype=np.float32)),
+            ("sorted_hand_poses", np.empty((0, 12), dtype=np.float32)),
+            ("sorted_hand_poses", np.zeros((2, 12), dtype=np.complex64)),
+            ("sorted_hand_poses", np.zeros((2, 12), dtype=bool)),
+            ("sorted_hand_poses", np.full((2, 12), np.nan)),
+            ("sorted_hand_poses", np.full((2, 12), 1e100)),
+            ("hand_normalizer_scale", np.zeros(12)),
+            ("hand_normalizer_scale", np.full(12, 1e100)),
+            ("hand_normalizer_offset", np.full(12, np.inf)),
+        ]
+        for key, value in invalid:
+            np.savez(path, **{**valid, key: value})
+            try:
+                load_codebook(path)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Invalid {key} was accepted: {value.dtype}, {value.shape}")
+        np.savez(path, **valid)
+        table, affine = load_codebook(path)
+        torch.testing.assert_close(table.sorted_hand_poses, torch.zeros(2, 12))
+        torch.testing.assert_close(affine["scale"], torch.ones(12))
+
+
+def check_codebook_ordering(device):
+    direction = torch.tensor([0.5, -0.75, 1.] + [0.] * 9, device=device)
+    with tempfile.TemporaryDirectory(prefix="dexmani-codebook-ordering-") as directory:
+        root = Path(directory)
+        for size in (1, 16, 512):
+            model = HandVQVAE(12, [1] * 12, latent_dim=12, hidden_dim=12, num_layers=1,
+                              num_groups=1, codebook_size=size).to(device)
+            positions = torch.linspace(-0.5, 0.5, size, device=device)
+            if size > 1:
+                positions[size // 2] = positions[size // 2 - 1]
+            expected = positions[:, None] * direction
+            with torch.no_grad():
+                # The decoder is identity on these poses; its ReLU input stays positive.
+                model.decoder[0].weight.copy_(torch.eye(12, device=device))
+                model.decoder[0].bias.fill_(1)
+                model.decoder[2].weight.copy_(torch.eye(12, device=device))
+                model.decoder[2].bias.fill_(-1)
+                model.quantizer.layers[0].embed.copy_(expected[torch.randperm(size, device=device)])
+            checkpoint, artifact = root / f"vq-{size}.pt", root / f"codebook-{size}.npz"
+            scale, offset = torch.linspace(0.5, 2., 12), torch.linspace(-0.2, 0.3, 12)
+            torch.save(dict(model_config=model.model_config, model_state_dict=model.state_dict(),
+                            normalizer_state_dict={"fields.hand.scale": scale, "fields.hand.offset": offset}),
+                       checkpoint)
+            assert export_codebook(checkpoint, artifact) == size
+            table, affine = load_codebook(artifact)
+            # The largest component of the known first principal axis is positive.
+            torch.testing.assert_close(table.sorted_hand_poses, expected.cpu(), atol=1e-7, rtol=1e-5)
+            torch.testing.assert_close(affine["scale"], scale, rtol=0, atol=0)
+            torch.testing.assert_close(affine["offset"], offset, rtol=0, atol=0)
+            unsorted = build_hand_prototypes(model)
+            actual = table.sorted_hand_poses.to(device)
+            for column in range(12):
+                torch.testing.assert_close(actual[:, column].sort().values, unsorted[:, column].sort().values,
+                                           atol=1e-7, rtol=1e-5)
+            queries = torch.randn(7, 12, device=device)
+            before = (queries[:, None] - unsorted).square().sum(-1).amin(-1).mean()
+            after = (queries[:, None] - actual).square().sum(-1).amin(-1).mean()
+            torch.testing.assert_close(after, before, atol=1e-6, rtol=1e-5)
 
 
 def check_vq_training(device):
@@ -249,12 +336,27 @@ def check_codebook_pipeline(device):
     with torch.no_grad():
         model.quantizer.layer_weights.copy_(torch.tensor([-1., 2.], device=device))
     rows = torch.randn(19, 12).clamp(-1, 1)
-    loader = DataLoader(TensorDataset(rows), batch_size=7)
+    loader = DataLoader(TensorDataset(rows), batch_size=7, generator=torch.Generator().manual_seed(2))
     before = {key: value.clone() for key, value in model.state_dict().items()}
-    metrics = evaluate_vq(model, loader, device)
-    assert model.training
-    for key, value in model.state_dict().items():
-        torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+    lookup_values = []
+    for training in (True, False):
+        model.train(training)
+        model.encoder.train(not training)
+        modes = [module.training for module in model.modules()]
+        before_rng = get_rng_state(device)
+        lookup_values.append(evaluate_vq(model, loader, device))
+        after_rng = get_rng_state(device)
+        assert modes == [module.training for module in model.modules()]
+        assert before_rng["python"] == after_rng["python"]
+        assert before_rng["numpy"][0] == after_rng["numpy"][0]
+        np.testing.assert_array_equal(before_rng["numpy"][1], after_rng["numpy"][1])
+        assert before_rng["numpy"][2:] == after_rng["numpy"][2:]
+        torch.testing.assert_close(before_rng["torch"], after_rng["torch"], rtol=0, atol=0)
+        if device.type == "cuda":
+            torch.testing.assert_close(before_rng["torch_cuda"], after_rng["torch_cuda"], rtol=0, atol=0)
+        for key, value in model.state_dict().items():
+            torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+    assert lookup_values[0] == lookup_values[1]
     with tempfile.TemporaryDirectory(prefix="dexmani-codebook-check-") as directory:
         vq_checkpoint, artifact = Path(directory) / "vq.pt", Path(directory) / "codebook.npz"
         hand_scale = torch.linspace(0.5, 2., 12)
@@ -278,12 +380,12 @@ def check_codebook_pipeline(device):
         loaded_table, affine = load_codebook(artifact)
         torch.testing.assert_close(affine["scale"], hand_scale)
         torch.testing.assert_close(affine["offset"], hand_offset)
-        from sklearn.decomposition import PCA
         poses = build_hand_prototypes(model).cpu().numpy()
-        order = np.argsort(PCA(n_components=1).fit_transform(poses)[:, 0])
-        np.testing.assert_allclose(loaded_table.sorted_hand_poses.numpy(), poses[order], rtol=1e-5, atol=1e-6)
+        actual_poses = loaded_table.sorted_hand_poses.numpy()
+        np.testing.assert_allclose(actual_poses[np.lexsort(actual_poses.T)], poses[np.lexsort(poses.T)],
+                                   rtol=1e-5, atol=1e-6)
         lookup_mse = (rows[:, None] - loaded_table.sorted_hand_poses).square().sum(-1).amin(-1).mean() / model.hand_dim
-        torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
+        torch.testing.assert_close(torch.tensor(lookup_values[0]),
                                    lookup_mse, rtol=1e-5, atol=1e-7)
         policy_config: dict[str, Any] = dict(
             horizon=4, n_obs_steps=2, n_action_steps=2, action_dim=19,
@@ -384,7 +486,8 @@ def main():
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_vq, check_vq_objective, check_vq_tail_batches, check_codebook, check_vq_training, check_codebook_pipeline,):
+    for check in (check_vq, check_vq_objective, check_vq_tail_batches, check_codebook,
+                  check_codebook_loading, check_codebook_ordering, check_vq_training, check_codebook_pipeline):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

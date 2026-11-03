@@ -270,10 +270,10 @@ class PolicyTrainer:
         )
         self.stop_requested = True
 
-    def log_step(self, group_metrics, pbar):
+    def log_step(self, group_metrics, pbar, *, lr, epoch):
         metrics = {
-            "train/lr": self.scheduler.get_last_lr()[0],
-            "train/epoch": self.current_epoch,
+            "train/lr": lr,
+            "train/epoch": epoch,
         }
         if self.last_grad_norm is not None:
             metrics.update(
@@ -352,6 +352,7 @@ class PolicyTrainer:
 
                         if not finite_loss:
                             raise RuntimeError(f"Non-finite loss at step {self.global_step}")
+                        lr = self.optimizer.param_groups[0]["lr"]
                         self.optimizer_step()
                         self.global_step += 1
                         pbar.update(1)
@@ -360,7 +361,7 @@ class PolicyTrainer:
                                 key: value / group_size
                                 for key, value in group_metric_sums.items()
                             }
-                            self.log_step(group_metrics, pbar)
+                            self.log_step(group_metrics, pbar, lr=lr, epoch=epoch)
 
                         pct = self.milestone_steps.get(self.global_step)
                         if pct is not None:
