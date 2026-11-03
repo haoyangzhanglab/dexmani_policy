@@ -5,9 +5,6 @@ defaults:
 
 policy_name: interact-dex
 
-horizon: 16
-n_obs_steps: 4
-n_action_steps: 4
 interaction_horizon: 4
 
 normalization:
@@ -17,7 +14,6 @@ normalization:
   joint_state: limits
 
 dataloader:
-  batch_size: 128
   drop_last: true
 
 dataset:

@@ -18,13 +18,14 @@ class ForceTransformer(nn.Module):
         num_heads: int = 4,
         embed_dim: int = 256,
         dropout: float = 0.3,
+        n_obs_steps: int = 1,
     ) -> None:
         super().__init__()
         self.input_emb = nn.Linear(force_dim, embed_dim)
         self.pos_emb = nn.Parameter(torch.zeros(1, horizon, embed_dim))
         self.time_emb = SinusoidalTimestepEmbedding(embed_dim)
         self.cond_obs_emb = nn.Linear(cond_dim, embed_dim)
-        self.cond_pos_emb = nn.Parameter(torch.zeros(1, 2, embed_dim))
+        self.cond_pos_emb = nn.Parameter(torch.zeros(1, n_obs_steps + 1, embed_dim))
         self.condition_mlp = nn.Sequential(
             nn.Linear(embed_dim, 4 * embed_dim), nn.Mish(), nn.Linear(4 * embed_dim, embed_dim)
         )

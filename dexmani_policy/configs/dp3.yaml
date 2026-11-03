@@ -6,16 +6,11 @@ defaults:
 
 policy_name: dp3
 
-horizon: 16
-n_obs_steps: 2
-n_action_steps: 8
-
 normalization:
   joint_state: limits
   point_cloud: limits
 
 dataloader:
-  batch_size: 128
   drop_last: true
 
 dataset:

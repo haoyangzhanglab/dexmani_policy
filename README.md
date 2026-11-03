@@ -52,7 +52,9 @@ python -m dexmani_policy.eval_pipeline \
   --seed 1024 --output-dir <run>/eval/<new-evaluation>
 ```
 
-续训直接使用 Checkpoint 中的有效配方与完整训练状态，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续。只有 fresh 装配配方、访问初始化来源和拟合统计；恢复不重写保存的部署事实或训练总预算，`--max-updates` 只限制本次调用。恢复要求同数据、同配方、同训练布局，不保证 worker 增强或编译计算逐位重放。日志追加前丢弃末尾未以换行结束的残段，完整历史行保持原样，允许重复或较小 step；训练进度只取 checkpoint。
+11 个主策略的新训练统一从 `configs/common.yaml` 继承 `horizon=16`、`n_obs_steps=2`、`n_action_steps=8` 和 `dataloader.batch_size=128`；各方法 YAML 不再重复这四项，独立预训练保留自己的配方。窗口包含15个未来动作，每次默认执行前8个。
+
+续训直接使用 Checkpoint 中的有效配方与完整训练状态，以保存的 dataset seed、训练上限及验证数量重建划分，根据已完成的 optimizer updates 从下一个 batch 继续。只有 fresh 装配配方、访问初始化来源和拟合统计；新默认值不改写已保存 checkpoint 的窗口、batch、部署事实或训练总预算，`--max-updates` 只限制本次调用。恢复要求同数据、同配方、同训练布局，不保证 worker 增强或编译计算逐位重放。日志追加前丢弃末尾未以换行结束的残段，完整历史行保持原样，允许重复或较小 step；训练进度只取 checkpoint。
 
 fresh 与 resume 均使用 FP32 master parameters 和同设备 FP32 EMA；`training.use_bfloat16=true` 仅启用 BF16 autocast，不维护旧低精度 master parameters 的原精度训练轨迹。普通配方 `eval.use_ema` 默认跟随 `training.use_ema`，显式请求缺失 EMA 仍失败；ManiFlow 的 loss 继续要求 EMA。正式部署、仿真评测及 warmup 严格加载后使用 FP32，并合并 RGB LoRA；预测入口显式关闭 autocast，训练 checkpoint 保留适配器。
 
@@ -121,14 +123,14 @@ python -m dexmani_policy.test_tools.smoke_test interact_dex \
 
 InterAct-Dex 包含以下四部分：
 
-1. **动作耦合的力残差监督**：标量 `interaction_horizon=4` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为13。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `3:7` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
+1. **动作耦合的力残差监督**：标量 `interaction_horizon=4` 定义预测边界 K，与实际执行长度 C 独立；K 不得超过可用未来动作数，默认窗口下上限为15。16个动作与6个交互 token 组成22-token 动态序列；每层固定 mask 使预测边界内的四个动作 `1:5` 与交互状态只能互读，全部 token 仍可读取静态观测。共享主干的五指特征预测单个 `+4` 力残差；标签只进入 loss，合法零值有效。
 2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
 3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取五指触觉均值；HandHistoryEncoder 编码空间关系和因果历史，动态交互 token 在主干中继续交换信息。
-4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandSceneFusion 查询；四帧观测形成 `[B,72,192]` 静态条件，复用请求内观测 K/V 缓存。
+4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandSceneFusion 查询；两帧观测形成 `[B,36,192]` 静态条件，复用请求内观测 K/V 缓存。
 
 力目标使用原始 batch：`target = (F_future - F_current) * scale`，仿真中即世界系未来力增量。只乘已有触觉 normalizer 的 scale，不加 offset、不旋转、不裁剪；端点之间的归一化增量可以达到 ±2，不另拟合统计。共享 `768→128→3` 力 head 的末层零初始化。
 
-标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。权重为0时使用普通 Dataset，无需未来标签，但六个交互 token 仍参与动作生成。训练只编码一次观测并执行一次 Flow forward；推理跳过力 head，每次 velocity evaluation 重建交互状态，仅积分 FP32 动作。保持768维、8层、8 heads、10步 Euler，以及 `future_actions[B,13,19]` 输出。
+标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。权重为0时使用普通 Dataset，无需未来标签，但六个交互 token 仍参与动作生成。训练只编码一次观测并执行一次 Flow forward；推理跳过力 head，每次 velocity evaluation 重建交互状态，仅积分 FP32 动作。默认 `H=16,Nobs=2,C=8`，保持768维、8层、8 heads、10步 Euler，输出 `future_actions[B,15,19]`。
 
 完整 checkpoint 保存配置、optimizer、EMA 和归一化统计，按当前模型结构严格加载。权重和 affine 必须来自相同的原始触觉约定；使用 EEF 触觉输入训练的模型须重新训练。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-动作耦合交互状态预测)。
 
@@ -137,6 +139,8 @@ interaction 组件按 `correspondence.py / future_tactile.py / hand_interaction.
 ## AdapTac 触觉实验
 
 通过 `tactile=force`、`tactile=taxel` 或 `tactile=patch` 选择观测编码。`force` 接收仿真或真实 aggregate 原始通道；`taxel`、`patch` 目前仅有真实 dense 数据生产端。无需指定来源参数，SimRunner 根据请求的观测字段，在创建环境前明确拒绝 dense 输入。三种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。
+
+默认使用两帧观测；逐帧共享 encoder 和 ForceGuidedFusion，再按时间拼接融合特征与状态，动作条件为 `[B,1152]`。力预测条件为 `[B,2,1024]`，ForceTransformer 的 memory 包含一个 time token 和两帧观测 token；预测 `[B,15,15]` 未来力，与两帧当前力拼成 `[B,255]` guide。各帧 encoder/fusion 的宽度与深度保持原配方。
 
 | preset | 来源 | 必需触觉输入 | encoder | 默认尺度 |
 | --- | --- | --- | --- | --- |

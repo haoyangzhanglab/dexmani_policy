@@ -191,7 +191,7 @@ def check_adaptac(device):
     from dexmani_policy.evaluation import rollout
 
     cfg = load_policy_config("adaptac", [
-        "horizon=8", "n_action_steps=8", "agent.num_points=32",
+        "agent.num_points=32",
         "agent.pc_encoder_config.channels=24", "agent.pc_encoder_config.num_patches=12",
         "agent.pc_encoder_config.group_size=8", "agent.pc_encoder_config.depth=1",
         "agent.pc_encoder_config.num_heads=4", "agent.feature_dim=32", "agent.state_out_dim=8",
@@ -202,15 +202,16 @@ def check_adaptac(device):
     dims = dict(joint_state=19, point_cloud=6, finger_tactile_force=3, action=19)
     policy.configure_normalizer(dims, normalization_feature_shapes(dims))
     policy.to(device)
-    obs = dict(joint_state=torch.randn(2, 1, 19, device=device),
-               point_cloud=torch.randn(2, 1, 48, 6, device=device),
-               finger_tactile_force=torch.randn(2, 1, 5, 3, device=device))
-    valid = torch.ones(2, 8, dtype=torch.bool, device=device)
+    obs = dict(joint_state=torch.randn(2, cfg.n_obs_steps, 19, device=device, requires_grad=True),
+               point_cloud=torch.randn(2, cfg.n_obs_steps, 48, 6, device=device),
+               finger_tactile_force=torch.randn(2, cfg.n_obs_steps, 5, 3, device=device))
+    future_steps = policy.future_steps
+    valid = torch.ones(2, future_steps, dtype=torch.bool, device=device)
     valid[1, -2:] = False
     batch = dict(
         obs=obs,
-        action=torch.randn(2, 8, 19, device=device),
-        future_force=torch.randn(2, 8, 5, 3, device=device),
+        action=torch.randn(2, cfg.horizon, 19, device=device),
+        future_force=torch.randn(2, future_steps, 5, 3, device=device),
         future_force_valid=valid,
     )
 
@@ -236,17 +237,19 @@ def check_adaptac(device):
                 loss, metrics = policy.compute_loss(batch)
                 assert torch.isfinite(loss) and metrics["loss_force_weighted"] == 0
                 loss.backward()
+                assert (obs["joint_state"].grad.abs().sum(dim=(0, 2)) > 0).all()
                 policy.force_loss_weight = cfg.agent.force_loss_weight
             else:
                 output = policy.predict_action(obs, inference_steps=steps, generator=generator)
-                assert output["future_actions"].shape == (2, 8, 19)
+                assert output["future_actions"].shape == (2, future_steps, 19)
                 assert torch.isfinite(output["future_actions"]).all()
             assert preprocess.call_count == encoder.call_count == 1
             features, current_force, predicted_force = condition.call_args.args
             torch.testing.assert_close(current_force,
-                                       encoder.call_args.args[0]["finger_tactile_force"].reshape(2, 1, 15))
-            torch.testing.assert_close(force.call_args.args[0], torch.cat(features[:2], -1).unsqueeze(1))
-            assert predicted_force.shape == (2, 8, 15)
+                                       encoder.call_args.args[0]["finger_tactile_force"].reshape(2, cfg.n_obs_steps, 15))
+            torch.testing.assert_close(force.call_args.args[0], torch.cat(features[:2], -1))
+            assert force.call_args.args[0].shape == (2, cfg.n_obs_steps, 64)
+            assert predicted_force.shape == (2, future_steps, 15)
             assert force_model.call_count == (1 if training else 20)
             assert action_model.call_count == (1 if training else steps or 20)
         if training:

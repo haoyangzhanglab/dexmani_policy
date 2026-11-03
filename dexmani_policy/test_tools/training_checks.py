@@ -727,6 +727,7 @@ def check_configs(_device):
     cases += [("adaptac", [f"tactile={kind}"]) for kind in ("force", "taxel", "patch")]
     for method, overrides in cases:
         cfg = load_policy_config(method, overrides)
+        assert (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps, cfg.dataloader.batch_size) == (16, 2, 8, 128)
         validate_config(cfg)
         validate_normalization(cfg)
         assert cfg.dataset.max_train_episodes is None

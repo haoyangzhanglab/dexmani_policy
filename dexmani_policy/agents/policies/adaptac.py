@@ -107,8 +107,8 @@ class AdapTac(Policy):
         fusion_num_heads: int = 8,
         fusion_dropout: float = 0.1,
     ) -> None:
-        if (n_obs_steps, action_dim) != (1, 19):
-            raise ValueError("AdapTac requires single-frame observations and 19D joint state/actions")
+        if action_dim != 19:
+            raise ValueError("AdapTac requires 19D joint state/actions")
         if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
             raise ValueError("force_loss_weight must be finite and nonnegative")
         validate_unet_horizon(horizon, down_dims)
@@ -123,7 +123,7 @@ class AdapTac(Policy):
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
-            context_dim=feature_dim + state_out_dim,
+            context_dim=n_obs_steps * (feature_dim + state_out_dim),
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=down_dims,
             kernel_size=kernel_size,
@@ -144,6 +144,7 @@ class AdapTac(Policy):
                 horizon=self.future_steps,
                 cond_dim=2 * feature_dim,
                 force_dim=self.force_dim,
+                n_obs_steps=n_obs_steps,
                 **(force_predictor_config or {}),
             ),
             num_training_steps,
@@ -177,15 +178,22 @@ class AdapTac(Policy):
         current_force = obs["finger_tactile_force"].float().reshape(
             -1, self.n_obs_steps, self.force_dim,
         )
-        features = self.obs_encoder(obs)
-        force_condition = torch.cat(features[:2], dim=-1).unsqueeze(1)
+        features = tuple(
+            feature.unflatten(0, (-1, self.n_obs_steps))
+            for feature in self.obs_encoder(obs)
+        )
+        force_condition = torch.cat(features[:2], dim=-1)
         return features, current_force, force_condition
 
     def _action_condition(self, features, current_force, predicted_force) -> torch.Tensor:
         visual, tactile, state = features
         guide = torch.cat((current_force, predicted_force), dim=1).flatten(1)
-        fused = self.force_fusion(visual, tactile, guide)
-        return torch.cat((fused, state), dim=-1)
+        # Fuse each observed frame with the shared force trajectory, then retain time order.
+        fused = self.force_fusion(
+            visual.flatten(0, 1), tactile.flatten(0, 1),
+            guide[:, None].expand(-1, self.n_obs_steps, -1).flatten(0, 1),
+        ).unflatten(0, (-1, self.n_obs_steps))
+        return torch.cat((fused, state), dim=-1).flatten(1)
 
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs: Any,

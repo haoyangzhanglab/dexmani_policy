@@ -9,16 +9,11 @@ policy_name: dp
 initialization:
   rgb: data/pretrained/dinov2-small
 
-horizon: 16
-n_obs_steps: 2
-n_action_steps: 8
-
 normalization:
   rgb: identity
   joint_state: limits
 
 dataloader:
-  batch_size: 64
   drop_last: true
 
 dataset:
