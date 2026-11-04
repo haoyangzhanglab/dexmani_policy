@@ -114,7 +114,9 @@ def validate_normalization(cfg):
     if set(spec) != expected:
         raise ValueError(f"Normalization must declare dataset inputs and action: {sorted(expected)}")
     for key, mode in spec.items():
-        allowed = {"limits", "rms", "max_abs"} if key in TACTILE_FEATURE_SHAPES else {"identity", "limits", "gaussian", "rms", "max_abs"}
+        allowed = {"limits", "gaussian", "rms", "max_abs"}
+        if key not in TACTILE_FEATURE_SHAPES:
+            allowed.add("identity")
         if mode not in allowed:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected {sorted(allowed)}")
 

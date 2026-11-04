@@ -34,6 +34,8 @@
 
 部分方法需要外部视觉权重或独立预训练产物。来源与用途见[data 说明](data/README.md)，方法机制见[手部动作表示](docs/手部动作表示.md)和[观测预训练](docs/观测预训练.md)。完整策略 checkpoint 保存模型、构造配置和最终归一化统计，推理无需原训练数据或初始权重文件。
 
+恢复直接加载 checkpoint 中的 affine 数值，不根据历史 normalization 标签重新拟合或解释。触觉训练支持 `limits`、`gaussian`、`rms` 和 `max_abs`，默认仍为 `limits`；触觉 `identity` 暂不支持。
+
 仿真由 `dexmani_sim` 提供环境；真实观测构建、硬件控制与执行调度由独立的 `dexmani_real` 项目负责。本仓库负责策略学习与推理。
 
 ## 快速检查

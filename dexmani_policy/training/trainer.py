@@ -49,7 +49,7 @@ class PolicyTrainer:
         model.configure_normalizer(
             data_description["field_dims"] if checkpoint is None else cfg.normalization_dims,
             {} if checkpoint is None else normalizer_shapes_from_state(
-                checkpoint.model_state, normalization=cfg.normalization, feature_dims=cfg.normalization_dims,
+                checkpoint.model_state, feature_dims=cfg.normalization_dims,
             ),
         )
         if checkpoint is None:
@@ -129,7 +129,7 @@ class PolicyTrainer:
                 if checkpoint.ema_model_state is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
                 normalizer_shapes_from_state(
-                    checkpoint.ema_model_state, normalization=cfg.normalization, feature_dims=cfg.normalization_dims,
+                    checkpoint.ema_model_state, feature_dims=cfg.normalization_dims,
                 )
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
         model.to(device=device, dtype=torch.float32)

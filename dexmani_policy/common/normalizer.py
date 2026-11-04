@@ -14,15 +14,11 @@ def normalization_feature_shapes(dims):
 
 
 def normalizer_shapes_from_state(
-    state: Mapping[str, torch.Tensor], *, normalization: Mapping[str, str], feature_dims: Mapping[str, int],
+    state: Mapping[str, torch.Tensor], *, feature_dims: Mapping[str, int],
 ) -> dict[str, torch.Size]:
-    """Validate declared tactile affine before rebuilding saved buffer shapes."""
-    required = TACTILE_FEATURE_SHAPES.keys() & (set(feature_dims) | set(normalization))
+    """Validate required tactile affine before rebuilding saved buffer shapes."""
+    required = TACTILE_FEATURE_SHAPES.keys() & feature_dims.keys()
     for key in required:
-        mode = normalization.get(key)
-        if mode not in {"limits", "rms", "max_abs"}:
-            raise ValueError(f"Missing or invalid saved tactile normalization mode for {key}: {mode}")
-        parts = []
         for part in ("scale", "offset"):
             name = f"normalizer.fields.{key}.{part}"
             if name not in state:
@@ -30,12 +26,8 @@ def normalizer_shapes_from_state(
             value = state[name].float()
             if tuple(value.shape) != TACTILE_FEATURE_SHAPES[key] or not torch.isfinite(value).all():
                 raise ValueError(f"Invalid tactile affine shape or nonfinite parameter: {name}")
-            parts.append(value)
-        scale, offset = parts
-        if not (scale > 0).all():
-            raise ValueError(f"Tactile scale must be positive: {key}")
-        if mode in {"rms", "max_abs"} and (offset != 0).any():
-            raise ValueError(f"Tactile offset must be zero for {key} with mode={mode}")
+            if part == "scale" and not (value > 0).all():
+                raise ValueError(f"Tactile scale must be positive: {key}")
     prefix, suffix = "normalizer.fields.", ".scale"
     return {
         key[len(prefix):-len(suffix)]: value.shape
