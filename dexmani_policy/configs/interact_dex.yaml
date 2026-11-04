@@ -35,6 +35,7 @@ agent:
   future_force_loss_weight: 0.1
   pc_dim: 6
   num_points: 1024
+  scene_num_queries: 12
 
   fps_random_config:
     use_random: true

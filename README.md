@@ -111,11 +111,11 @@ bash scripts/training/train.sh sat 'task_name=<task>' \
 
 ## InterAct-Dex 身体表征与未来力监督
 
-InterAct-Dex 保留 Sparse3D、HandStateEncoder、原始点级局部几何及空间/因果历史编码，每帧输出六个身体 token，默认 condition `[B,24,192]`。一次几何 cross-attention 中，只有五指前三个 head 可读取零 K/V null；五指通过共享 `Linear(67,384)` 残差 FiLM 融合已归一化的 aggregate force，腕部由后续空间注意力接收全手信息。
+InterAct-Dex 保留 Sparse3D、HandStateEncoder、原始点级局部几何及空间/因果历史编码，共享一次 Sparse3D，返回 `InterActFeatures(interaction[B,T,6,192], scene[B,T,12,192])`；scene 由12个 FPS 空间 query 经一次共同原点 3D RoPE cross-attention 读取全部 patches。Policy 按帧拼接两类 token，默认 condition `[B,72,192]`。一次几何 cross-attention 中，只有五指前三个 head 可读取零 K/V null；五指通过共享 `Linear(67,384)` 残差 FiLM 融合已归一化的 aggregate force，腕部由后续空间注意力接收全手信息。
 
 普通 DiTX 保持768D、8层、8 heads和10步 Euler，输出 `future_actions[B,13,19]`。共享 `272→128→3` future head 从同一次观测编码的最新五指表征及有序动作前缀预测 h={1,2,4} 的力增量。前缀用原始 action 减当前 joint_state 后只乘 action scale；力目标只对原始力差乘 force scale。两种 mask 分离，不旋转力、不重复归一化。默认 lambda=0.1 尚未经闭环调优；lambda=0 不构造头、不读取未来标签，未来误差为 N.A.。在线推理不执行未来头，eval 模式仍支持离线受力评测。
 
-本结构作为新实验配方，使用整策略 EMA 和 strict 保存/恢复，与旧 scene/Coupled checkpoint 不兼容。模型、数据契约见[项目架构](docs/项目架构.md#handscenefusion-触觉融合与历史)；实际参数、检查命令、真实数据4+2步 smoke 及后续预算见[实施记录](docs/interact_dex_implementation_task.md#16-本次实施与验证记录2026-11-04)。有限验证不代表速度、成功率或泛化提升。
+本结构从 fresh training 开始，使用整策略 EMA；恢复要求保存的实际配置和 strict state_dict。模型、数据契约见[项目架构](docs/项目架构.md#handscenefusion-触觉融合与历史)；实际参数、检查命令、真实数据4+2步 smoke 及后续预算见[实施记录](docs/interact_dex_implementation_task.md#12-最终交付与实施记录)。有限验证不代表速度、成功率或泛化提升。
 
 ## AdapTac 触觉实验
 

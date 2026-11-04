@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import torch
 from torch import nn
@@ -13,10 +14,16 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
     HandHistoryEncoder, HandSceneFusion,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
+from dexmani_policy.agents.obs_encoder.pointcloud.scene_tokenizer import SceneTokenizer
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
 from dexmani_policy.common.config import validate_future_force_horizons
+
+
+class InterActFeatures(NamedTuple):
+    interaction: torch.Tensor  # [B, T, 6, 192]
+    scene: torch.Tensor  # [B, T, Q, 192]
 
 
 class InterActDexEncoder(nn.Module):
@@ -30,12 +37,16 @@ class InterActDexEncoder(nn.Module):
         n_obs_steps: int,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
+        scene_num_queries: int = 12,
     ) -> None:
         super().__init__()
         self.n_obs_steps = n_obs_steps
         self.num_points = num_points
         self.pc_encoder = Sparse3DEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
+        )
+        self.scene_tokenizer = SceneTokenizer(
+            self.pc_encoder.out_dim, scene_num_queries, self.pc_encoder.fps_random_config,
         )
         self.hand_state = HandStateEncoder(token_dim=self.out_dim)
         self.hand_scene = HandSceneFusion(self.pc_encoder.out_dim, tactile_encoder)
@@ -48,14 +59,16 @@ class InterActDexEncoder(nn.Module):
             "fps_random_config": self.pc_encoder.fps_random_config,
             "tactile_encoder": self.hand_scene.tactile_encoder.effective_config,
             "n_obs_steps": self.n_obs_steps,
+            "scene_num_queries": self.scene_tokenizer.num_queries,
         }
 
-    def forward(self, obs: dict) -> torch.Tensor:
+    def forward(self, obs: dict) -> InterActFeatures:
         pc = preprocess_point_cloud(
             obs["point_cloud"], self.num_points,
             self.pc_encoder.fps_random_config, training=self.training,
         )
         patches = self.pc_encoder(pc)
+        scene = self.scene_tokenizer(patches["tokens"], patches["xyz"])
         hand = self.hand_state(obs["joint_state"], obs["eef_pose"], obs["fingertip_xyz"])
         interaction = self.hand_scene(
             pc, patches, hand["anchor_xyz"], hand["hand_tokens"],
@@ -64,7 +77,7 @@ class InterActDexEncoder(nn.Module):
         )
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps))
         interaction = self.hand_history(interaction)
-        return interaction.flatten(1, 2).float()
+        return InterActFeatures(interaction, scene.unflatten(0, (-1, self.n_obs_steps)))
 
 
 class InterActDex(Policy):
@@ -83,6 +96,7 @@ class InterActDex(Policy):
         num_points: int = 1024,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
+        scene_num_queries: int = 12,
         timestep_embed_dim: int = 128,
         n_layers: int = 8,
         hidden_dim: int = 768,
@@ -119,6 +133,7 @@ class InterActDex(Policy):
             n_obs_steps=n_obs_steps,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
+            scene_num_queries=scene_num_queries,
         )
         backbone = DiTX(
             horizon=horizon,
@@ -167,20 +182,34 @@ class InterActDex(Policy):
             "future_force_horizons": list(self.future_force_horizons),
         }
 
-    def _predict_future_force(self, condition: torch.Tensor, batch: dict) -> torch.Tensor:
-        assert self.future_force_head is not None, "Future force prediction requires a positive loss weight"
-        fingers = condition.unflatten(1, (self.n_obs_steps, 6))[:, -1, 1:]
+    def _encode_features(self, obs: dict) -> InterActFeatures:
+        return self.obs_encoder(self._preprocess_obs(obs))
+
+    @staticmethod
+    def _pack_action_context(features: InterActFeatures) -> torch.Tensor:
+        return torch.cat((features.interaction, features.scene), dim=2).flatten(1, 2).float()
+
+    def _encode_obs(self, obs: dict) -> torch.Tensor:
+        return self._pack_action_context(self._encode_features(obs))
+
+    def _prepare_future_action_condition(
+        self, raw_actions: torch.Tensor, current_raw_joints: torch.Tensor,
+    ) -> torch.Tensor:
         k = max(self.future_force_horizons)
-        actions = batch["action"][:, self.action_start_index:self.action_start_index + k]
-        current = batch["obs"]["joint_state"][:, -1]
-        displacement = (actions.float() - current[:, None].float()) * self.normalizer["action"].scale
-        horizons = torch.tensor(self.future_force_horizons, device=condition.device)
-        mask = torch.arange(k, device=condition.device)[None] < horizons[:, None]
+        actions = raw_actions[:, self.action_start_index:self.action_start_index + k]
+        displacement = (actions.float() - current_raw_joints[:, None].float()) * self.normalizer["action"].scale
+        horizons = torch.tensor(self.future_force_horizons, device=raw_actions.device)
+        mask = torch.arange(k, device=raw_actions.device)[None] < horizons[:, None]
         prefix = torch.where(mask[None, ..., None], displacement[:, None], 0.0).flatten(2)
-        prefix = torch.cat((prefix, mask[None].expand(condition.shape[0], -1, -1).float()), -1)
+        return torch.cat((prefix, mask[None].expand(raw_actions.shape[0], -1, -1).float()), -1)
+
+    def _predict_future_force(
+        self, fingers: torch.Tensor, action_condition: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.future_force_head is not None, "Future force prediction requires a positive loss weight"
         features = torch.cat((
-            fingers[:, None].expand(-1, len(self.future_force_horizons), -1, -1),
-            prefix[:, :, None].expand(-1, -1, 5, -1),
+            fingers[:, None].expand(-1, action_condition.shape[1], -1, -1),
+            action_condition[:, :, None].expand(-1, -1, fingers.shape[1], -1),
         ), -1)
         return self.future_force_head(features.to(self.future_force_head[0].weight.dtype))
 
@@ -207,16 +236,19 @@ class InterActDex(Policy):
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs,
     ) -> tuple[torch.Tensor, dict]:
-        if self.future_force_head is None:
-            return super().compute_loss(batch, log_metrics=log_metrics, **kwargs)
-
-        condition = self._encode_obs(batch["obs"])
+        features = self._encode_features(batch["obs"])
+        condition = self._pack_action_context(features)
         actions = self.normalizer["action"].normalize(batch["action"])
         kwargs["dim_groups"] = self.loss_groups
         action_loss, metrics = self.action_decoder.compute_loss(
             condition, actions, log_metrics=log_metrics, **kwargs,
         )
-        prediction = self._predict_future_force(condition, batch)
+        if self.future_force_head is None:
+            return action_loss, metrics
+        action_condition = self._prepare_future_action_condition(
+            batch["action"], batch["obs"]["joint_state"][:, -1],
+        )
+        prediction = self._predict_future_force(features.interaction[:, -1, 1:6], action_condition)
         future_force_loss, mask = self._compute_future_force_loss(prediction, batch)
         weighted_loss = self.future_force_loss_weight * future_force_loss
         loss = action_loss + weighted_loss

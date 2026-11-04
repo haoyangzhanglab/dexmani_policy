@@ -1087,7 +1087,8 @@ def check_interact_representation(device):
     ])
     model = hydra.utils.instantiate(cfg.agent, _convert_="all").to(device).eval()
     dims = dict(action=19, joint_state=19, point_cloud=3, eef_pose=9, fingertip_xyz=3, finger_tactile_force=3)
-    model.configure_normalizer(dims, dict(action=(19,), joint_state=(19,), finger_tactile_force=(5, 3)))
+    shapes = dict(action=(19,), joint_state=(19,), finger_tactile_force=(5, 3))
+    model.configure_normalizer(dims, shapes)
     model.to(device)
     model.normalizer["action"].scale.fill_(2)
     model.normalizer["action"].offset.fill_(7)
@@ -1102,15 +1103,30 @@ def check_interact_representation(device):
     batch = dict(obs=obs, action=torch.randn(2, 16, 19, device=device),
                  future_force=torch.randn(2, 3, 5, 3, device=device),
                  future_force_valid=torch.tensor([[True, True, False], [True, False, False]], device=device))
-    condition = model._encode_obs(obs)
-    assert condition.shape == (2, 24, 192)
+    features = model._encode_features(obs)
+    condition = model._pack_action_context(features)
+    assert condition.shape == (2, 72, 192)
+    torch.testing.assert_close(condition, model._encode_obs(obs))
+    assert features._fields == ("interaction", "scene")
+    assert features.interaction.shape == (2, 4, 6, 192)
+    assert features.scene.shape == (2, 4, 12, 192)
+    frames = condition.unflatten(1, (4, 18))
+    torch.testing.assert_close(frames[:, :, :6], features.interaction)
+    torch.testing.assert_close(frames[:, :, 6:], features.scene)
+
+    def predict(batch):
+        action_condition = model._prepare_future_action_condition(
+            batch["action"], batch["obs"]["joint_state"][:, -1],
+        )
+        return model._predict_future_force(features.interaction[:, -1, 1:6], action_condition)
+
     assert sum(p.numel() for p in model.future_force_head.parameters()) == 35331
-    assert torch.count_nonzero(model._predict_future_force(condition, batch)) == 0
+    assert torch.count_nonzero(predict(batch)) == 0
     with torch.no_grad():
         model.future_force_head[-1].weight.normal_(std=.1)
     seen = []
     hook = model.future_force_head.register_forward_pre_hook(lambda m, a: seen.append(a[0]))
-    prediction = model._predict_future_force(condition, batch)
+    prediction = predict(batch)
     hook.remove()
     assert prediction.shape == (2, 3, 5, 3)
     expected = (batch["action"][:, 3:7] - obs["joint_state"][:, -1, None]) * 2
@@ -1119,21 +1135,25 @@ def check_interact_representation(device):
     for index, h in enumerate((1, 2, 4)):
         changed = {**batch, "action": batch["action"].clone()}
         changed["action"][:, 3+h:] += 10
-        torch.testing.assert_close(model._predict_future_force(condition, changed)[:, index], prediction[:, index])
+        torch.testing.assert_close(predict(changed)[:, index], prediction[:, index])
         changed["action"][:, 3] += 1
-        assert not torch.allclose(model._predict_future_force(condition, changed)[:, index], prediction[:, index])
+        assert not torch.allclose(predict(changed)[:, index], prediction[:, index])
     changed_labels = {**batch, "future_force": torch.full_like(batch["future_force"], float("nan")),
                       "future_force_valid": torch.zeros_like(batch["future_force_valid"])}
-    torch.testing.assert_close(model._predict_future_force(condition, changed_labels), prediction)
+    torch.testing.assert_close(predict(changed_labels), prediction)
     zero, _ = model._compute_future_force_loss(prediction, changed_labels)
     zero_grad, = torch.autograd.grad(zero, prediction, retain_graph=True)
     assert zero == 0 and torch.count_nonzero(zero_grad) == 0
     loss, _ = model._compute_future_force_loss(prediction, batch)
     loss.backward()
     assert model.obs_encoder.hand_history.temporal_ffn[-1].weight.grad.abs().sum() > 0
-    with patch.object(model, "_encode_obs", wraps=model._encode_obs) as encode:
+    assert model.obs_encoder.scene_tokenizer.query_projection.weight.grad is None
+    assert model.obs_encoder.pc_encoder.patch_embedding.projection[0].weight.grad.abs().sum() > 0
+    with patch.object(model, "_preprocess_obs", wraps=model._preprocess_obs) as preprocess, \
+         patch.object(model.obs_encoder, "forward", wraps=model.obs_encoder.forward) as encode, \
+         patch.object(model.obs_encoder.pc_encoder, "forward", wraps=model.obs_encoder.pc_encoder.forward) as sparse:
         model.compute_loss(batch)
-        assert encode.call_count == 1
+        assert preprocess.call_count == encode.call_count == sparse.call_count == 1
     with patch.object(model.future_force_head, "forward", side_effect=AssertionError("online future head")):
         assert model.predict_action(obs)["future_actions"].shape == (2, 13, 19)
     # Unequal horizon counts must not weight the densely supervised horizon more heavily.
@@ -1143,12 +1163,77 @@ def check_interact_representation(device):
     target_batch = {**batch, "future_force": obs["finger_tactile_force"][:, -1:].expand(-1, 3, -1, -1)}
     value, _ = model._compute_future_force_loss(probe, target_batch)
     torch.testing.assert_close(value, value.new_tensor(.75))
-    optimizer = build_optimizer(model, **cfg.optimizer)
+    # Activate only the fixture's zero-initialized velocity head and cross-attention gate.
+    backbone = model.action_decoder.model
+    with torch.no_grad():
+        backbone.final_layer.ffn_final.fc2.weight.normal_(std=.1)
+        for block in backbone.ditx_blocks:
+            block.adaln_modulation[-1].bias.chunk(9)[5].fill_(1)
+    model.zero_grad(set_to_none=True)
+    packed = model._encode_obs(obs)
+    noise = torch.randn(2, 16, 19, device=device)
+    t = torch.full((2,), .5, device=device)
+    actual = backbone(noise, t, packed)
+    cached = backbone(noise, t, packed, context_kv=backbone.prepare_context_kv(packed))
+    torch.testing.assert_close(actual, cached)
+    assert not torch.allclose(actual, backbone(noise, t, packed + torch.randn_like(packed)))
+    actual.square().mean().backward()
+    assert model.obs_encoder.scene_tokenizer.query_projection.weight.grad.abs().sum() > 0
+    assert model.obs_encoder.pc_encoder.patch_embedding.projection[0].weight.grad.abs().sum() > 0
+    with patch.object(backbone, "prepare_context_kv", return_value=None):
+        uncached = model.predict_action(obs, generator=torch.Generator(device=device).manual_seed(71))
+    cached = model.predict_action(obs, generator=torch.Generator(device=device).manual_seed(71))
+    torch.testing.assert_close(cached, uncached)
+    for cap in (0., 2.):
+        result = model.predict_action(obs, rtc_prefix=cached["future_actions"][:, :3],
+            delay_steps=1, rtc_guidance_cap=cap,
+            generator=torch.Generator(device=device).manual_seed(71))
+        assert torch.isfinite(result["future_actions"]).all()
+        if cap == 0:
+            torch.testing.assert_close(result, cached)
+    model.zero_grad(set_to_none=True)
+    with torch.autocast(device.type, dtype=torch.bfloat16):
+        mixed_loss, _ = model.compute_loss(batch)
+    mixed_loss.backward()
+    assert torch.isfinite(mixed_loss)
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    optimizer = build_optimizer(model, **{**cfg.optimizer, "obs_lr": 2e-4})
     names = [name for group in optimizer.param_groups for name in group["param_names"]]
-    assert len(names) == len(set(names))
+    assert any(name.startswith("future_force_head.") for name in names)
+    scene_names = {"obs_encoder.scene_tokenizer." + name for name, _ in model.obs_encoder.scene_tokenizer.named_parameters()}
+    assert scene_names <= set(names)
     for group in optimizer.param_groups:
+        if scene_names & set(group["param_names"]):
+            assert group["lr"] == 2e-4
         if any(name.endswith("null_logits") for name in group["param_names"]):
-            assert group["weight_decay"] == 0 and group["lr"] == cfg.optimizer.obs_lr
+            assert group["weight_decay"] == 0 and group["lr"] == 2e-4
+
+    # Head width and optional parameters are fixed at construction.
+    for horizons, weight in (([1, 3], .1), ([1, 2, 4], 0.)):
+        variant = hydra.utils.instantiate(
+            cfg.agent, future_force_horizons=horizons, future_force_loss_weight=weight,
+            _convert_="all",
+        )
+        variant.configure_normalizer(dims, shapes)
+        variant.to(device).eval()
+        variant.normalizer.load_state_dict(model.normalizer.state_dict())
+        if weight == 0:
+            assert variant.future_force_head is None
+            with patch.object(variant, "_prepare_future_action_condition", side_effect=AssertionError("lambda=0 condition")), \
+                 patch.object(variant, "_predict_future_force", side_effect=AssertionError("lambda=0 prediction")), \
+                 patch.object(variant, "_compute_future_force_loss", side_effect=AssertionError("lambda=0 labels")):
+                _, metrics = variant.compute_loss(dict(obs=obs, action=batch["action"]))
+            assert not any("future_force" in name for name in metrics)
+        else:
+            action_condition = variant._prepare_future_action_condition(batch["action"], obs["joint_state"][:, -1])
+            expected_prefix = expected[:, :3].clone()
+            expected_prefix[:, 1:] = 0
+            expected_condition = torch.cat((
+                torch.stack((expected_prefix.flatten(1), expected[:, :3].flatten(1)), dim=1),
+                expected.new_tensor([[1, 0, 0], [1, 1, 1]]).expand(2, -1, -1),
+            ), dim=-1)
+            torch.testing.assert_close(action_condition, expected_condition)
+            assert variant._predict_future_force(features.interaction[:, -1, 1:6], action_condition).shape == (2, 2, 5, 3)
 
 
 def main():

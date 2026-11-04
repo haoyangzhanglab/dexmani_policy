@@ -833,6 +833,56 @@ def check_image_geometry(device):
                                processor.process_images(quantized.float() / 255), rtol=0, atol=0)
 
 
+def check_scene_tokenizer(device):
+    from dexmani_policy.agents.obs_encoder.pointcloud.scene_tokenizer import SceneTokenizer
+    from dexmani_policy.agents.obs_encoder.pointcloud.ops import farthest_point_sample, index_points
+    config = dict(use_random=True, use_random_start=True, use_shuffle_output=True)
+    model = SceneTokenizer(384, fps_random_config=config).to(device).eval()
+    assert sum(p.numel() for p in model.parameters()) == 445824
+    assert config["use_shuffle_output"] and not model.fps_random_config["use_shuffle_output"]
+    features = torch.randn(2, 96, 384, device=device, requires_grad=True)
+    xyz = torch.randn(2, 96, 3, device=device) * .1
+    anchors, indices = farthest_point_sample(xyz, 12, use_random=False)
+    seeds = []
+    hook = model.query_projection.register_forward_pre_hook(lambda m, a: seeds.append(a[0]))
+    with patch.object(model.rope, "forward", wraps=model.rope.forward) as rope, \
+         patch.object(F, "scaled_dot_product_attention", wraps=F.scaled_dot_product_attention) as attention:
+        output = model(features, xyz)
+    hook.remove()
+    assert output.shape == (2, 12, 192) and rope.call_count == attention.call_count == 1
+    torch.testing.assert_close(rope.call_args.args[0], torch.cat((anchors, xyz), 1))
+    torch.testing.assert_close(seeds[0], index_points(features, indices))
+    assert seeds[0].requires_grad
+    seed_grad, = torch.autograd.grad(seeds[0].sum(), features, retain_graph=True)
+    assert seed_grad.abs().sum() > 0
+    q, k, v = attention.call_args.args
+    assert q.shape == (2, 4, 12, 48) and k.shape == v.shape == (2, 4, 96, 48)
+    (output * torch.randn_like(output)).mean().backward()
+    nonseed = torch.ones(2, 96, dtype=torch.bool, device=device).scatter_(1, indices, False)
+    assert features.grad[nonseed].abs().sum() > 0
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+    changed = features.detach().clone()
+    changed[nonseed] += torch.randn_like(changed[nonseed])
+    assert not torch.allclose(output, model(changed, xyz))
+    torch.testing.assert_close(output, model(features, xyz), rtol=0, atol=0)
+    permutation = torch.randperm(96, device=device)
+    remapped = torch.argsort(permutation)[indices]
+    with patch("dexmani_policy.agents.obs_encoder.pointcloud.scene_tokenizer.farthest_point_sample",
+               return_value=(anchors, remapped)):
+        permuted = model(features[:, permutation], xyz[:, permutation])
+    torch.testing.assert_close(output, permuted, rtol=1e-5, atol=2e-6)
+    for bf16 in (False, True):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+            result = model(features, xyz)
+        assert result.dtype == torch.float32 and torch.isfinite(result).all()
+    try:
+        model(features[:, :11], xyz[:, :11])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Accepted fewer patches than queries")
+
+
 def check_fps(device):
     from pytorch3d.ops import sample_farthest_points
     from dexmani_policy.agents.obs_encoder.pointcloud.ops import farthest_point_sample, preprocess_point_cloud
@@ -870,7 +920,7 @@ def main():
         torch.backends.cudnn.benchmark = False
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_fps, check_null, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_adaptac_history, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
+    for check in (check_scene_tokenizer, check_fps, check_null, check_tactile, check_interaction, check_force_interaction, check_adaptac, check_adaptac_history, check_rgb, check_rgb_deployment, check_dinov3, check_output_boundaries, check_sim_observations, check_image_geometry,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

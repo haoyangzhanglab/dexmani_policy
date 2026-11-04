@@ -1,6 +1,6 @@
 # InterAct-Dex：12-query 场景表征与清晰数据流实施任务书
 
-> 状态：**方案定稿，代码待实施；本文件中的验收项目均为实施要求，不代表已经通过。**
+> 状态：**scene12 已实施；实际验证范围见第12节，历史要求不自动视为通过。**
 > 日期：2026-11-04（Asia/Shanghai）。
 > 仓库：`haoyangzhanglab/dexmani_policy`；审查分支：`main`。
 > 代码基线：[`5ac4aa48d82f3f5a5351b845fd3efc601ad8580d`](https://github.com/haoyangzhanglab/dexmani_policy/tree/5ac4aa48d82f3f5a5351b845fd3efc601ad8580d)。
@@ -211,7 +211,7 @@ cos, sin = rope(torch.cat((query_xyz, patch_xyz), dim=1))
 
 旧版 SceneTokenizer 加外部 projection 为 891,328 参数，约为本模块两倍；相较本次代码基线 body-only，则是新增 445,824 参数。不要混用这两个比较口径。
 
-SceneTokenizer 每次观测编码执行一次，不在 NFE 循环内重复。动作 context 默认为 72，而非全保留 patch 的 408，也不是当前 body-only 的 24。长度和参数变化都不直接等于端到端延迟变化。
+SceneTokenizer 每次观测编码执行一次，不在 NFE 循环内重复。动作 context 默认为 72，而非全保留 patch 的 408，也不是模型基线 body-only 的 24。长度和参数变化都不直接等于端到端延迟变化。
 
 ## 5. Encoder 输出与动作打包
 
@@ -547,15 +547,46 @@ smoke_test 本身会关闭该次运行的 wandb，并走正式 fresh/save/原目
 - 新结构保存恢复、有效配置中的 scene_num_queries、在线推理和 lambda=0 行为。
 - 未验证的闭环成功率、泛化与实际效率，以及下一步最小实验。
 
-本任务书发布时的记录：
+本次实施基于 c302959 工作区（模型基线5ac4aa4），没有后续模型差异或预存工作区修改。新增一个 SceneTokenizer，其余修改局限于 InterActDex、YAML、既有 checks及相关说明；未修改公共decoder、dataset或Runtime。实现与审查修改随本记录一同提交，旧实验目录保留。
 
-| 项目 | 状态 |
-| --- | --- |
-| 最新代码与调用方核对 | 已完成，基线 5ac4aa4 |
-| 架构、数据契约与实施范围 | 已定稿 |
-| 模型代码修改 | 待 Codex 实施 |
-| 新结构定向检查与 smoke | 待执行 |
-| 长训练、调参、闭环与性能结论 | 未执行、未验证 |
+实际结构：interaction `[B,T,6,192]`、scene `[B,T,12,192]`，按帧打包 `[B,T*18,192]`；默认动作context `[B,72,192]`，未来条件 `[B,3,80]`、预测 `[B,3,5,3]`、在线动作 `[B,13,19]`。默认模型实测123,483,129参数，其中SceneTokenizer445,824、future head35,331；C=24 tokenizer为237,744。
 
-完成最小完整实现并通过匹配风险的验证后收敛，不继续增加可选机制或扩大重构范围。
+验证环境：Python3.10.20、Torch2.4.1+cu124、PyTorch3D0.7.8；CPU及sandbox外RTX4090。CUDA在sandbox内不可见，外部可用并支持BF16。使用 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python` 执行：
 
+```bash
+python -m compileall -q dexmani_policy
+git diff --check
+python -m pytest dexmani_policy/test_tools/config_checks.py -k interact -q
+python -m dexmani_policy.test_tools.observation_checks --device cpu
+python -m dexmani_policy.test_tools.tactile_normalization_checks --device cpu
+python -m dexmani_policy.test_tools.tactile_normalization_checks --device cuda:0
+```
+
+另以seed7、4个CPU线程直接调用 `check_scene_tokenizer`、`check_interaction`、`check_interact_representation`，分别使用cpu/cuda:0；覆盖FP32、BF16 autocast、96→12压缩与非seed memory、共同RoPE原点、梯度、单次编码、lambda=0、非退化DiTX条件和缓存/RTC检查。正式参数及raw/EMA离线恢复使用现有checkpoint API检查。
+
+真实数据smoke命令：
+
+```bash
+OMP_NUM_THREADS=4 python -m dexmani_policy.test_tools.smoke_test interact_dex --device cuda:0 --max-updates 4 --resume-updates 2 --output-dir experiments/train/interact-dex/scene12_smoke --override zarr_path=/home/zhanghaoyang/Desktop/dexmani_policy/robot_data/pick_apple_messy.zarr --override task_name=pick_apple_messy --override dataloader.batch_size=2 --override agent.scene_num_queries=12
+```
+
+RTX4090/FP32、正式96/384/2 Sparse3D及768D/8层DiTX，fresh4步+原目录resume2步通过；保存预算100,000步、query数量12。正式产物raw/EMA strict恢复、72-token context、离线未来力、在线13步动作及RTC检查通过。CPU observation检查与20项InterAct配置检查通过。
+
+合成Trainer的最终CPU/CUDA检查全部通过，包含limits/rms/max_abs、lambda=0不读取未来标签、raw/EMA strict恢复、normalizer不重拟合、optimizer/scheduler恢复与连续训练对照。开发过程中修正了测试fixture缺失Hydra输出目录、optimizer字符串元数据及跨设备比较、额外train模式shape检查消耗RNG的问题，未因此改动生产恢复逻辑。最终日志保存在smoke目录中的observation_cpu.log、tactile_cpu.log、tactile_cuda.log、smoke.log；定向检查与正式产物检查结果见本节。
+
+未验证长训练收敛、闭环成功率、泛化、正式batch128显存或端到端性能；未运行真实机器人及async控制调度闭环，保留既有sync/async/RTC接口。下一步最小实验为固定scene12、数据/训练预算/采样一致的lambda=0与0.1比较，以闭环行为判断辅助监督收益。本次有限smoke不构成这些结论。
+
+
+### 本轮审查与清理
+
+沿点云原语、Encoder/Policy、Dataset、配置组装、优化器、checkpoint/resume及Flow/Runtime审查。当前链路没有SHA校验、旧结构迁移器或双轨加载；保留strict恢复、参数覆盖、query数量和动作跨度等实际正确性边界。`interaction_horizon` 的显式拒绝防止旧顶层键被Hydra接受后静默忽略，不提供兼容行为。
+
+预测函数的broadcast数量直接来自已准备输入，删除Encoder末尾重复FP32转换。修正数据格式文档遗漏的72-token条件、Dataset表格中的单后继描述；移除失效的旧scene组件计时。测试使用真实构造的零权重和非默认horizons，不再删head或修改既有head契约；优化器检查包含正权重future head，gate测试从实际bias维度取切片，完整检查逐帧身体/场景布局以及effective_config对过期输入配方的覆盖。
+
+本轮验证：compileall、git diff --check、20项InterAct配置测试通过；`check_scene_tokenizer`、`check_interaction`、`check_interact_representation` 在CPU/CUDA通过，包含FP32/BF16 autocast、非默认horizons、lambda=0及缓存/RTC。两个生产文件的定向类型检查通过：
+
+```bash
+python -m mypy --follow-imports=silent --ignore-missing-imports --cache-dir=/tmp/scene12_mypy dexmani_policy/agents/obs_encoder/pointcloud/scene_tokenizer.py dexmani_policy/agents/policies/interact_dex.py
+```
+
+通过现有checkpoint API重新加载前次正式smoke的raw/EMA，72-token context、离线未来力、普通/RTC推理均通过。生产权重键、参数数量、训练配方和推理输出保持一致。前次4+2 smoke产物及optimizer/scheduler/normalizer恢复记录保留；本轮未追加训练，也未重跑全套合成Trainer，避免把既有记录写成新运行结果。

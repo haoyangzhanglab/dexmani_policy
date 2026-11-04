@@ -329,6 +329,9 @@ def check_training(root, device="cpu"):
                 else:
                     raise AssertionError("Accepted missing selected tactile history")
                 runtime.close()
+                if method == "interact_dex":
+                    with torch.no_grad():
+                        assert restored._encode_obs(original).shape[1:] == (36, 192)
                 if method == "interact_dex" and mode == "limits":
                     output = restored.predict_action(obs)["future_actions"]
                     assert output.shape == (1, cfg.horizon - cfg.n_obs_steps + 1, 19)
@@ -336,11 +339,20 @@ def check_training(root, device="cpu"):
                     torch.testing.assert_close(restored.normalizer.state_dict(), model.normalizer.state_dict(), rtol=0, atol=0)
             with patch("dexmani_policy.training.trainer.fit_normalizer", side_effect=AssertionError("Refit on resume")):
                 resumed = prepare_resume(cfg.workspace.output_dir, device=str(device))
+            if method == "interact_dex":
+                assert saved.effective_config["agent"]["scene_num_queries"] == 12
+                torch.testing.assert_close(resumed.optimizer.state_dict()["state"], saved.optimizer_state["state"], check_device=False)
+                assert resumed.optimizer.state_dict()["param_groups"] == saved.optimizer_state["param_groups"]
+                assert resumed.scheduler.state_dict() == saved.scheduler_state
             assert run_reproducible_training(resumed, max_updates=1) == 3
             continuous_cfg = config(method, selected_source, root / f"continuous-{case}", mode, kind, device,
                                     future_force_loss_weight=weight)
             continuous = build_trainer(continuous_cfg)
             assert run_reproducible_training(continuous, max_updates=3) == 3
+            if method == "interact_dex":
+                torch.testing.assert_close(continuous.optimizer.state_dict()["state"], resumed.optimizer.state_dict()["state"])
+                assert continuous.optimizer.state_dict()["param_groups"] == resumed.optimizer.state_dict()["param_groups"]
+                assert continuous.scheduler.state_dict() == resumed.scheduler.state_dict()
             for expected, actual in ((continuous.model, resumed.model), (continuous.ema_model, resumed.ema_model)):
                 expected_state, actual_state = expected.state_dict(), actual.state_dict()
                 torch.testing.assert_close(expected_state, actual_state, rtol=1e-6, atol=1e-7)

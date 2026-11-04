@@ -323,3 +323,22 @@ def test_interact_horizon_exceeds_action_window():
 
     with pytest.raises(ValueError, match="available future actions"):
         InterActDex(16, 4, 4, 19, XHandForceEncoder(), future_force_horizons=[14])
+
+
+@pytest.mark.parametrize("queries", [12, 6])
+def test_interact_scene_config(queries):
+    import hydra
+    from dexmani_policy.training.common.config import assemble_effective_config
+    cfg = load_policy_config("interact_dex", [
+        f"agent.scene_num_queries={queries}", "workspace.output_dir=/tmp/scene-config-check",
+        "agent.hidden_dim=32", "agent.n_layers=1", "agent.n_head=4",
+    ])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    # The model's actual quantity must override a stale input recipe.
+    cfg.agent.scene_num_queries = 6 if queries == 12 else 12
+    effective = assemble_effective_config(cfg, {"deployment_metadata": {}}, model)
+    assert effective.agent.scene_num_queries == queries
+    restored = hydra.utils.instantiate(effective.agent, _convert_="all")
+    restored.load_state_dict(model.state_dict(), strict=True)
+    assert restored.obs_encoder.scene_tokenizer.num_queries == queries
+    assert not {"context_tokens", "scene_tokenizer"} & set(effective.agent)
