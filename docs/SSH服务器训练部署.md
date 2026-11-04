@@ -1,103 +1,103 @@
-# DexMani Policy · SSH 服务器训练部署
+# SSH 服务器训练部署
 
-所有脚本从本地仓库执行，显式传入 SSH host 和绝对远端路径，不修改脚本中的机器配置。本地需要 Bash、SSH、rsync；远端需要 Bash、rsync、tmux 和完整训练环境。
+以下命令从本地仓库根目录执行。本地需要 Bash、SSH、rsync；远端需要 Bash、rsync、tmux，以及已安装项目依赖的 Python 环境。示例中的主机、用户、端口、密钥与路径均需替换为实际信息。
 
-## 数据与来源准备
+## 连接与路径
+
+可在本地 `~/.ssh/config` 中配置别名；已有可用配置时直接复用：
+
+```sshconfig
+Host dexserver
+    HostName server.example.com
+    User user
+    Port 22
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+在同一个本地 Bash 会话中设置路径并确认连接：
 
 ```bash
 HOST=dexserver
 REPO=/home/user/dexmani_policy
 DATA_ROOT=/data/project
-RUN=/data/project/experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42
+RUN=/data/project/experiments/train/dp3/pick_apple/run01
 PYTHON=/home/user/miniconda3/envs/policy/bin/python
 
-ssh "$HOST" 'mkdir -p /data/project/robot_data /data/project/data'
+ssh "$HOST"
+```
+
+确认后用 `exit` 回到本地。`REPO` 是远端源码与日志的存放位置，`DATA_ROOT` 下存放 `robot_data/` 和 `data/`，`RUN` 指定本次实验目录，`PYTHON` 指向远端训练环境的解释器。
+
+## 同步数据与初始化权重
+
+```bash
+printf -v REMOTE_DIRS '%q ' "$DATA_ROOT/robot_data" "$DATA_ROOT/data"
+ssh "$HOST" "mkdir -p -- $REMOTE_DIRS"
 bash scripts/remote/sync_data.sh --host "$HOST" \
   --local robot_data --remote "$DATA_ROOT/robot_data" --dry-run
 bash scripts/remote/sync_data.sh --host "$HOST" \
   --local robot_data --remote "$DATA_ROOT/robot_data"
 bash scripts/remote/sync_data.sh --host "$HOST" \
-  --local data --remote "$DATA_ROOT/data" --checksum
+  --local data --remote "$DATA_ROOT/data"
 ```
 
-每次同步一个明确目录，默认上传；`--pull` 反转方向，`--checksum` 改用内容比较，`--dry-run` 预览。同步不删除目标独有文件。训练使用的数据版本不就地修改；重新导出或修改加工配方时使用新路径。
+同步前先用 `--dry-run` 预览；可加 `--checksum` 按内容比较。每次指定一个目录，目标独有文件会保留。
 
-外部初始权重和必要配套文件随 `data/pretrained/<model>/` 上传，包括 HF 模型的配置与权重；使用这些本地目录时无需另行准备全局 HF 缓存，来源设置见 [数据说明](../data/README.md)。从完整 checkpoint 续训或推理不需要初始来源文件。
+新训练按所选策略准备[初始化权重](../data/README.md)。项目自产的编码器或码本需另外同步，并在训练参数中使用对应的远端绝对路径。完整 checkpoint 续训不需要初始化文件。
+
+训练期间保持数据内容和顺序不变；重新导出数据时使用新路径和新实验目录。
 
 ## 启动与原目录续训
 
 ```bash
 REMOTE=(--host "$HOST" --repo "$REPO" --data-root "$DATA_ROOT" \
   --run "$RUN" --python "$PYTHON" --gpu 0)
+
 bash scripts/remote/train_remote.sh "${REMOTE[@]}" --dry-run -- \
-  dp3 task_name=pick_apple
+  dp3 task_name=pick_apple training.seed=42
 bash scripts/remote/train_remote.sh "${REMOTE[@]}" -- \
   dp3 task_name=pick_apple training.seed=42
-
-# 中断后从同一 RUN/checkpoints/latest.pt 直接恢复保存配方。
-bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
-  --num-workers 4 --max-updates 100
 ```
 
-每次启动保留一个新的 `$REPO/outputs/remote_sources/<session>/` 源码副本，代码同步不覆盖已有副本。副本中的 `robot_data/`、`data/` 指向显式 `DATA_ROOT`，run 单独由绝对路径指定。自产初始化文件使用明确的远端绝对路径，例如 `initialization.encoder=/data/project/experiments/pretrain/afro/pick_apple/2026-11-03_14-30-00_seed42/encoder.pt` 或 `initialization.codebook=/data/project/experiments/pretrain/vqvae/pick_apple/2026-11-03_14-30-00_seed42/codebook.npz`。这些文件须已在远端准备好，launcher 不自动上传或改写路径。
+启动脚本自动创建 `REPO` 所需目录并同步本地源码，每次保留独立副本；数据和初始化权重使用前一步准备的远端目录。默认在 tmux 后台运行，`--fg` 可切换为前台。启动脚本的 `--dry-run` 只打印命令，不连接或同步远端。
 
-`--gpu` 指定一个物理 GPU，通过 `CUDA_VISIBLE_DEVICES` 映射为进程内 `cuda:0`；脚本不查询或自动选择设备。默认后台 `tmux -L dexmani_policy`，输出 Host、Source、Run、Session 和 Log；`--fg` 前台执行。`--dry-run` 只打印已构造命令，不连接远端、不复制源码。训练返回错误可在控制台或 Log 中查看，不以 session 消失推断 checkpoint 完整。
+`--gpu` 设置启动侧的 GPU 可见性。当前后台脚本复用 tmux 服务，已有服务时，新进程可能沿用旧的 GPU 设置。需要明确切换 GPU 时，在启动或续训命令的 `--` 前加 `--fg`；前台路径直接使用本次设置，输出在当前终端查看，SSH 连接需保持。
 
-fresh 的方法名和 Hydra overrides 放在 `--` 后；`--run` 同时绑定 `hydra.run.dir` 和 `workspace.output_dir`，覆盖参数中的其他输出目录。resume 只接受正式恢复 CLI 的运行参数。参数含空格、引号或特殊字符时整体引用。源码和实验产物不自动删除。
+新训练的方法名及配置覆盖放在 `--` 后，输出统一写入新的 `RUN` 目录。一个实验目录同时只启动一个训练进程。
 
-需要单独上传代码时，为明确的新空目录执行：
+中断后确认原进程已退出，使用相同 `RUN` 恢复：
 
 ```bash
-bash scripts/remote/sync_code.sh --host "$HOST" --dest /home/user/source_snapshot --dry-run
-bash scripts/remote/sync_code.sh --host "$HOST" --dest /home/user/source_snapshot
+bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
+  --num-workers 4
 ```
 
-源同步排除数据、实验、缓存和运行产物，无删除传播；目标父目录须存在。
+续训从 `RUN/checkpoints/latest.pt` 恢复保存的训练配方与状态，不再次传入方法名或模型配置。需要限制本次执行时可追加 `--max-updates 100`；它只限制本次调用，不改变实验总预算。
 
 ## 监控与停止
 
-使用 launcher 打印的确切 session 和 Log 路径：
+后台训练的输出写入启动时打印的 Log，使用 `tail` 查看；tmux 用于管理会话。用实际 Session 和 Log 替换以下占位符：
 
 ```bash
 ssh "$HOST" 'tmux -L dexmani_policy list-sessions'
-ssh -t "$HOST" 'tmux -L dexmani_policy attach -t <session>'
-ssh "$HOST" 'tail -F -- "/absolute/repo/logs/<session>.log"'
+ssh "$HOST" 'tail -F -- "/absolute/path/to/<session>.log"'
 ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 ```
 
-收到一次 SIGINT 后，Trainer 在 update 边界保存并退出；重复中断或强杀可能使最近更新未保存。恢复前确认目标 run 与日志状态。
+退出 `tail` 只结束日志查看；停止训练使用上面的 `send-keys` 命令发送一次 `Ctrl-C`，等待当前更新结束并保存。重复中断或强杀可能丢失最近更新。恢复前检查日志与 checkpoint。
 
-## 下载完成的 run
+## 取回实验结果
+
+仅下载已停止或完成的实验：
 
 ```bash
+LOCAL_RUN=experiments/train/dp3/pick_apple/run01
 bash scripts/remote/sync_down.sh --host "$HOST" \
-  --remote-run "$RUN" --local-run experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42 --dry-run
+  --remote-run "$RUN" --local-run "$LOCAL_RUN" --dry-run
 bash scripts/remote/sync_down.sh --host "$HOST" \
-  --remote-run "$RUN" --local-run experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42
+  --remote-run "$RUN" --local-run "$LOCAL_RUN"
 ```
 
-只同步已停止或完成的指定 run，远端是本次下载的来源，用户通过 `--local-run` 指定本地目标。一次普通 rsync 排除临时 `.dexmani-publish-*` 文件，按默认的大小与修改时间判断增量更新；`config.yaml` 与其他普通文件一样同步，已有文件可以更新。symlink 原样保留，不解引用复制外部目标，也不删除本地独有文件。
+同步完整实验目录，传输成功后再使用。已有同名文件可能更新，本地独有文件会保留；链接按原样复制，外部链接目标或其他实验目录需自行同步。运行中查看进度使用远端日志。
 
-保留 rsync 默认的临时文件传输方式，失败直接退出。`--dry-run` 仅预览，不修改本地目标。全部传输成功后再使用下载的 run，不支持同步期间读取完整快照；运行中查看日志用 tail。
-
-`sync_down.sh` 只同步指定 run。run 内的相对 latest 链接和选模路径随完整目录搬迁保持有效；外部 checkpoint、链接目标和结果目录需自行同步并维护相对位置。
-
-本地同步回归无需 SSH 服务器，运行 `python -m dexmani_policy.test_tools.remote_checks`（需要本地 rsync）。
-
-选模保存 `selection_result.json`，记录胜者文件与实际 weights、NFE、执行长度，不自动发布 best 指针。部署默认 latest；使用胜者时显式给出文件及记录的推理参数，Real 的执行长度在其运行配置设置。下载后直接评测或显式选模：
-
-```bash
-python -m dexmani_policy.evaluate --checkpoint <run>/checkpoints/latest.pt \
-  --weights ema --inference-steps 10 --episodes 100 --seed 1024
-python -m dexmani_policy.eval_pipeline \
-  --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
-  --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
-  --output-dir <run>/eval/<new-evaluation>
-```
-
-训练默认使用 offline W&B，实验下载默认不拉取 W&B；需要 offline run 时给 `sync_down.sh` 加 `--with-wandb`。在本地安装 W&B 的 `policy` 环境中直接同步所需 run，上传凭据与网络由该环境提供：
-
-```bash
-conda activate policy
-wandb sync "experiments/train/dp3/pick_apple/2026-11-03_14-30-00_seed42/wandb/<offline-run目录>"
-```
+下载后的选模与测试遵循[仿真评测机制](仿真评测机制.md)。使用选模胜者时，同时保留其 checkpoint、权重选择、推理步数与执行长度。
