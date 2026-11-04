@@ -1,10 +1,7 @@
-import time
-
 import numpy as np
 
 from dexmani_policy.common.checkpoint import restore_policy
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int
-
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS
 
 _OBSERVATION_SHAPES = {
     "joint_state": (19,),
@@ -95,11 +92,11 @@ class PolicyRuntime:
             or not 0 <= delay_steps <= len(prefix) <= self.info.future_steps
         ):
             raise ValueError("Invalid physical RTC prefix")
-        return dict(
-            rtc_prefix=self._prepare_numeric_tensor(prefix, "physical RTC prefix"),
-            delay_steps=delay_steps,
-            rtc_guidance_cap=rtc_guidance_cap,
-        )
+        return {
+            "rtc_prefix": self._prepare_numeric_tensor(prefix, "physical RTC prefix"),
+            "delay_steps": delay_steps,
+            "rtc_guidance_cap": rtc_guidance_cap,
+        }
 
     def predict(self, observation, *, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         import torch
@@ -118,31 +115,17 @@ class PolicyRuntime:
             raise ValueError("Nonfinite physical policy prediction")
         return np.ascontiguousarray(prediction)
 
-    def warmup(self, observation, *, samples=5, rtc_delay=0, rtc_guidance_cap=None):
-        positive_int(samples, "samples")
-        future_steps = self.info.future_steps
-        if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
-            raise ValueError(f"rtc_delay must be an integer in [0, {future_steps}]")
-
-        def measure(**kwargs):
-            durations = []
-            for _ in range(samples):
-                start = time.perf_counter_ns()
-                self.predict(observation, **kwargs)
-                durations.append((time.perf_counter_ns() - start) / 1e9)
-            return tuple(durations)
-
+    def warmup(self, observation, *, rtc_delay=0, rtc_guidance_cap=None):
+        if rtc_guidance_cap is not None and (
+            type(rtc_delay) is not int or not 0 <= rtc_delay <= self.info.future_steps
+        ):
+            raise ValueError("rtc_delay must be an integer within the future window")
         generator_state = self.generator.get_state()
         try:
-            # Exclude initialization and reuse its physical prediction for RTC warmup.
             prefix = self.predict(observation)
-            bootstrap = measure()
-            steady = bootstrap
             if rtc_guidance_cap is not None:
-                kwargs = dict(rtc_prefix=prefix, delay_steps=rtc_delay, rtc_guidance_cap=rtc_guidance_cap)
-                self.predict(observation, **kwargs)
-                steady = measure(**kwargs)
-            return {"bootstrap": bootstrap, "steady": steady}
+                self.predict(observation, rtc_prefix=prefix, delay_steps=rtc_delay,
+                             rtc_guidance_cap=rtc_guidance_cap)
         finally:
             self.generator.set_state(generator_state)
 

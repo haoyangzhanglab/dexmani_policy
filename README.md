@@ -69,3 +69,16 @@ python -m dexmani_policy.test_tools.smoke_test dp3 --device cpu \
 | [触觉与交互建模](docs/触觉与交互建模.md) | 当前触觉如何融合，未来力在 AdapTac 和 InterAct-Dex 中分别起什么作用？ |
 | [仿真评测机制](docs/仿真评测机制.md) | 如何闭环执行、选模，并进行独立测试？ |
 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 如何连接服务器、同步数据、远程训练和取回结果？ |
+
+## 真机部署接口
+
+`inspect_policy(POLICY, weights=None, inference_steps=None)` 接受 checkpoint 文件或实验目录；目录只读取 `checkpoints/latest.pt`。支持 `~`，相对路径基于调用时工作目录，不使用项目根目录或 checkpoint selector。
+
+```python
+from dexmani_policy.deployment import inspect_policy, load_policy
+
+info = inspect_policy("/path/to/checkpoints/latest.pt", weights="ema")
+runtime = load_policy(info, device="cuda:0", seed=0)
+```
+
+`PolicyInfo.future_steps` 是物理未来动作长度。`predict` 返回反归一化、无历史及辅助维度的动作；RTC 接收同一表示的未消费前缀。`warmup(observation)` 只预测一次；传入 `rtc_guidance_cap` 时再使用首预测预热一次 RTC，cap=0 同样生效。预热恢复 RNG，不返回计时统计；调用方负责每段 `reset_episode()` 和最终 `close()`。
