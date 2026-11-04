@@ -2,7 +2,7 @@
 
 import argparse
 import tempfile
-from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 
 from dexmani_policy.common.checkpoint import load_checkpoint
@@ -12,13 +12,24 @@ from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.resume import prepare_resume
 
 
-@contextmanager
-def smoke_output(output_dir):
-    if output_dir is None:
-        with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as temporary:
-            yield Path(temporary)
-    else:
-        yield output_dir.resolve()
+def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int) -> tuple[int, int]:
+    positive_int(max_updates, "max_updates")
+    positive_int(resume_updates, "resume_updates")
+    cfg.workspace.output_dir = str(directory)
+    cfg.workspace.wandb_cfg = None
+    if cfg.training.loop.total_train_steps <= max_updates:
+        raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
+    step = run_training(cfg, max_updates=max_updates)
+    assert step == max_updates, "Fresh update count mismatch"
+    trainer = prepare_resume(directory)
+    assert trainer is not None
+    assert trainer.global_step == step, "Resume source mismatch"
+    final = run_trainer(trainer, max_updates=resume_updates)
+    expected = min(step + resume_updates, cfg.training.loop.total_train_steps)
+    assert final == expected, "Resume update count mismatch"
+    saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
+    assert saved.global_step == final, "Resumed checkpoint mismatch"
+    return step, final
 
 
 def main(argv=None):
@@ -30,27 +41,16 @@ def main(argv=None):
     parser.add_argument("--max-updates", type=int, default=4)
     parser.add_argument("--resume-updates", type=int, default=2)
     args = parser.parse_args(argv)
-    positive_int(args.max_updates, "max_updates")
-    positive_int(args.resume_updates, "resume_updates")
     set_project_root()
-    with smoke_output(args.output_dir) as directory:
+    output = nullcontext(args.output_dir) if args.output_dir is not None else tempfile.TemporaryDirectory(prefix="dexmani-smoke-")
+    with output as directory:
+        directory = Path(directory).expanduser().resolve()
         cfg = load_policy_config(args.config, args.override)
-        cfg.workspace.output_dir = str(directory)
-        cfg.workspace.wandb_cfg = None
         if args.device is not None:
             cfg.training.device = args.device
-        if cfg.training.loop.total_train_steps <= args.max_updates:
-            raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
-        step = run_training(cfg, max_updates=args.max_updates)
-        assert step == args.max_updates, "Fresh update count mismatch"
-        trainer = prepare_resume(directory, device=args.device)
-        assert trainer is not None
-        assert trainer.global_step == step, "Resume source mismatch"
-        final = run_trainer(trainer, max_updates=args.resume_updates)
-        expected = min(step + args.resume_updates, cfg.training.loop.total_train_steps)
-        assert final == expected, "Resume update count mismatch"
-        saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
-        assert saved.global_step == final, "Resumed checkpoint mismatch"
+        step, final = run_smoke(
+            cfg, directory, max_updates=args.max_updates, resume_updates=args.resume_updates,
+        )
         print(f"PASS {args.config}: fresh={step}, resumed={final}; run={directory}", flush=True)
 
 

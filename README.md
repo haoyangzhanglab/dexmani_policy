@@ -36,6 +36,26 @@
 
 仿真由 `dexmani_sim` 提供环境；真实观测构建、硬件控制与执行调度由独立的 `dexmani_real` 项目负责。本仓库负责策略学习与推理。
 
+## 快速检查
+
+在 `policy` 环境从仓库根目录运行最小 CPU 检查，无需真实数据或预训练权重：
+
+```bash
+python -m dexmani_policy.test_tools.core_checks
+```
+
+使用 CUDA 时加 `--device cuda:0`。检查覆盖 DP3 的数据采样、归一化、短训练、保存恢复，以及删除原数据后的 checkpoint 加载与推理，并核对恢复的归一化参数。数据与训练产物均在临时目录中自动清理。
+
+对已有示教数据，可使用指定配置做短训练与恢复检查，默认先训练 4 步，再恢复训练至多 2 步（不超过配置的训练总步数）：
+
+```bash
+python -m dexmani_policy.test_tools.smoke_test dp3 --device cpu \
+  --override zarr_path=/path/to/dataset.zarr \
+  --override training.use_compile=false
+```
+
+通过 `--max-updates` 和 `--resume-updates` 调整两阶段的步数，配置的训练总步数须大于第一阶段步数。通过 `--output-dir` 指定新的训练目录以保留产物；未指定时自动清理。其他策略可替换配置名，并提供各自需要的数据和初始权重。
+
 ## 阅读导航
 
 建议先读项目架构，再按研究问题阅读手部动作表示、观测预训练或触觉与交互建模；核对数据与实验结果时查阅数据格式和评测机制。远程操作集中在 SSH 文档。
