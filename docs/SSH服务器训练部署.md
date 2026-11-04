@@ -1,6 +1,6 @@
 # SSH 服务器训练部署
 
-以下命令从本地仓库根目录执行。本地需要 Bash、SSH、rsync；远端需要 Bash、rsync、tmux，以及已安装项目依赖的 Python 环境。示例中的主机、用户和绝对路径均需替换为实际信息。
+以下命令从本地仓库根目录执行。本地需要 Bash、SSH、rsync；远端需要 Bash、rsync、tmux，以及已安装项目依赖的 Python 环境。示例中的主机、用户、端口、密钥与路径均需替换为实际信息。
 
 ## 连接与路径
 
@@ -31,7 +31,8 @@ ssh "$HOST"
 ## 同步数据与初始化权重
 
 ```bash
-ssh "$HOST" 'mkdir -p /data/project/robot_data /data/project/data'
+printf -v REMOTE_DIRS '%q ' "$DATA_ROOT/robot_data" "$DATA_ROOT/data"
+ssh "$HOST" "mkdir -p -- $REMOTE_DIRS"
 bash scripts/remote/sync_data.sh --host "$HOST" \
   --local robot_data --remote "$DATA_ROOT/robot_data" --dry-run
 bash scripts/remote/sync_data.sh --host "$HOST" \
@@ -40,7 +41,7 @@ bash scripts/remote/sync_data.sh --host "$HOST" \
   --local data --remote "$DATA_ROOT/data"
 ```
 
-同步前先用 `--dry-run` 预览；可加 `--checksum` 按内容比较。每次指定一个目录，目标独有文件会保留。若修改了 `DATA_ROOT`，上面的远端建目录命令也需相应修改。
+同步前先用 `--dry-run` 预览；可加 `--checksum` 按内容比较。每次指定一个目录，目标独有文件会保留。
 
 新训练按所选策略准备[初始化权重](../data/README.md)。项目自产的编码器或码本需另外同步，并在训练参数中使用对应的远端绝对路径。完整 checkpoint 续训不需要初始化文件。
 
@@ -58,9 +59,9 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" -- \
   dp3 task_name=pick_apple training.seed=42
 ```
 
-启动脚本自动同步本地源码，每次保留独立副本；数据和初始化权重使用前一步准备的远端目录。`--gpu` 指定远端物理 GPU 编号，默认在 tmux 后台运行，加 `--fg` 可前台运行。launcher 的 `--dry-run` 只打印命令，不连接或同步远端。
+启动脚本自动创建 `REPO` 所需目录并同步本地源码，每次保留独立副本；数据和初始化权重使用前一步准备的远端目录。`--gpu` 指定远端物理 GPU 编号，默认在 tmux 后台运行，加 `--fg` 可前台运行。启动脚本的 `--dry-run` 只打印命令，不连接或同步远端。
 
-新训练的方法名及配置覆盖放在 `--` 后，输出统一写入 `RUN`。一个实验目录同时只启动一个训练进程。
+新训练的方法名及配置覆盖放在 `--` 后，输出统一写入新的 `RUN` 目录。一个实验目录同时只启动一个训练进程。
 
 中断后确认原进程已退出，使用相同 `RUN` 恢复：
 
@@ -73,16 +74,15 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 
 ## 监控与停止
 
-启动后记下输出的 Session 和 Log，用实际值替换以下占位符：
+后台训练的输出写入启动时打印的 Log，使用 `tail` 查看；tmux 用于管理会话。用实际 Session 和 Log 替换以下占位符：
 
 ```bash
 ssh "$HOST" 'tmux -L dexmani_policy list-sessions'
-ssh -t "$HOST" 'tmux -L dexmani_policy attach -t "<session>"'
 ssh "$HOST" 'tail -F -- "/absolute/path/to/<session>.log"'
 ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 ```
 
-在 tmux 中按 `Ctrl-b`、再按 `d` 可退出查看而保留训练。停止时发送一次 `Ctrl-C`，等待当前更新结束并保存；重复中断或强杀可能丢失最近更新。恢复前检查日志与 checkpoint。
+退出 `tail` 只结束日志查看；停止训练使用上面的 `send-keys` 命令发送一次 `Ctrl-C`，等待当前更新结束并保存。重复中断或强杀可能丢失最近更新。恢复前检查日志与 checkpoint。
 
 ## 取回实验结果
 
