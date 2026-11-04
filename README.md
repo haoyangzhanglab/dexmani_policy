@@ -189,7 +189,7 @@ python -m dexmani_policy.test_tools.decoder_checks --device cpu
 python -c 'import torch; from dexmani_policy.test_tools.training_checks import check_interact_prefix_resume; torch.set_num_threads(4); check_interact_prefix_resume(torch.device("cuda:0"))'
 ```
 
-已有有限验证与未验证范围见[实施记录](docs/interact_dex_implementation_task.md)。定向检查验证实现契约，不代表闭环收益；完整训练、真实任务闭环、完整宽度吞吐/峰值显存及默认 CUDA Inductor 编译尚未验证。
+定向检查验证实现契约，不代表闭环收益；完整训练、真实任务闭环、完整宽度吞吐/峰值显存及默认 CUDA Inductor 编译尚未验证。
 
 ## AdapTac 触觉实验
 
