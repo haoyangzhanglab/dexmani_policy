@@ -111,11 +111,85 @@ bash scripts/training/train.sh sat 'task_name=<task>' \
 
 ## InterAct-Dex 身体表征与未来力监督
 
-InterAct-Dex 保留 Sparse3D、HandStateEncoder、原始点级局部几何及空间/因果历史编码，共享一次 Sparse3D，返回 `InterActFeatures(interaction[B,T,6,192], scene[B,T,12,192])`；scene 由12个 FPS 空间 query 经一次共同原点 3D RoPE cross-attention 读取全部 patches。Policy 按帧拼接两类 token，默认 condition `[B,72,192]`。一次几何 cross-attention 中，只有五指前三个 head 可读取零 K/V null；五指通过共享 `Linear(67,384)` 残差 FiLM 融合已归一化的 aggregate force，腕部由后续空间注意力接收全手信息。
+InterAct-Dex 共享一次 Sparse3D 编码，输出 `InterActFeatures(interaction[B,T,6,192], scene[B,T,12,192])`，Policy 按帧拼为默认 `[B,72,192]` 条件。普通 DiT-X 默认768D、8层、8 heads、10步 Euler，返回 `future_actions[B,13,19]`。几何、身体历史及触觉 FiLM 的实现见[项目架构](docs/项目架构.md#handscenefusion-触觉融合与历史)。
 
-普通 DiTX 保持768D、8层、8 heads和10步 Euler，输出 `future_actions[B,13,19]`。共享 `272→128→3` future head 从同一次观测编码的最新五指表征及有序动作前缀预测 h={1,2,4} 的力增量。前缀用原始 action 减当前 joint_state 后只乘 action scale；力目标只对原始力差乘 force scale。两种 mask 分离，不旋转力、不重复归一化。默认 lambda=0.1 尚未经闭环调优；lambda=0 不构造头、不读取未来标签，未来误差为 N.A.。在线推理不执行未来头，eval 模式仍支持离线受力评测。
+`agent.future_force_mode` 选择唯一辅助头，默认 `encoder`；`agent.future_force_time_weighting` 默认为 `none`。
 
-本结构从 fresh training 开始，使用整策略 EMA；恢复要求保存的实际配置和 strict state_dict。模型、数据契约见[项目架构](docs/项目架构.md#handscenefusion-触觉融合与历史)；实际参数、检查命令、真实数据4+2步 smoke 及后续预算见[实施记录](docs/interact_dex_implementation_task.md#12-最终交付与实施记录)。有限验证不代表速度、成功率或泛化提升。
+| 模式 | 读取输入 | 监督范围 |
+| --- | --- | --- |
+| `encoder` | 最新五指192D特征，加原始 action 减当前 joint_state 后仅乘 action scale 的有序前缀及 mask | 一次预测全部配置跨度，先在各跨度内平均有效样本，再平均有监督跨度 |
+| `action_prefix` | 共享 DiT-X 最后合法动作 token 的 hidden | 每批抽一个有有效标签的跨度，只预测该跨度 |
+
+encoder 的共享头默认 `272→128→3`；action_prefix 使用 `LayerNorm(D) → Linear(D,128) → SiLU → Linear(128,15)`。末层均零初始化，首步上游辅助梯度可能为零。action_prefix 的梯度经读取头、合法前缀 hidden 和共享 DiT-X 回传观测编码器。
+
+action_prefix 每个 minibatch 仅在有有效标签的跨度中均匀抽一个 h。默认 s=3，h=1/2/4 分别使用长度4/5/7；三个历史动作位置保留。辅助输入在进入第一层 self-attention **之前**截短，复用主动作分支的 xt、tau 和观测条件；不能把完整 forward 的 hidden 截短用于预测。每批至多增加一次短前缀 forward 和小 MLP，全无效批次跳过辅助计算。两种模式的权重0均不构造头、不读标签，配置组装选择普通 Dataset。在线推理不执行辅助分支，`eval()` 支持离线诊断。
+
+目标仍是 `(raw_future_force - raw_current_force) * force.scale`。`soft_flow` 要求实际 uniform 采样且 alpha=1，权重为 `w=0.5+1.5*tau²`。每样本五指三轴平均 SmoothL1 后，按 `sum(valid*w*ell)/max(1,sum(valid))` 归约；不除以权重和或 batch 权重均值。tau 越大越接近干净动作。主动作 arm/hand loss 各占0.5，总损失再加 `future_force_loss_weight * force_loss`；以下配方固定辅助权重0.1。
+
+以下五条命令分别启动完整100k-step实验，按需单独执行。使用同一数据、训练/数据 seed、预算和默认增强，输出目录须尚不存在。切换 force mode 必须 fresh training，不迁移权重或放宽严格加载。
+
+```bash
+DEXMANI_TASK=pick_apple_messy
+train_force() {
+  bash scripts/training/train.sh interact_dex \
+    "task_name=$DEXMANI_TASK" training.seed=42 dataset.seed=42 \
+    agent.future_force_loss_weight=0.1 agent.time_shift_alpha=1.0 \
+    "agent.future_force_mode=$1" "future_force_horizons=$2" \
+    "agent.future_force_time_weighting=$3" \
+    "hydra.run.dir=experiments/train/interact-dex/$DEXMANI_TASK/$4"
+}
+train_force action_prefix '[4]' none prefix_h4_none
+train_force action_prefix '[1,2,4]' none prefix_multi_none
+train_force action_prefix '[4]' soft_flow prefix_h4_soft
+train_force action_prefix '[1,2,4]' soft_flow prefix_multi_soft
+train_force encoder '[4]' none encoder_h4
+
+# 闭环评测；不同版本保持相同 seeds、weights、NFE 和执行长度
+bash scripts/eval/evaluate.sh --checkpoint <run>/checkpoints/latest.pt \
+  --weights ema --inference-steps 10 --action-steps 4 --episodes 100 --seed 1024
+bash scripts/eval/eval_pipeline.sh \
+  --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
+  --weights ema --inference-steps 10 --action-steps 4 \
+  --selection-episodes 25 --test-episodes 100 --seed 1024
+```
+
+action_prefix 日志的键均加 `train/` 前缀。`future_force_selected_h{h}` 是每批的选中标记，梯度累积时成为选中频率；全无效时所有标记为0且 `future_force_skipped=1`。`future_force_valid_fraction` 是所选跨度的有效比例。`loss_future_force_unweighted` 是该跨度未加权误差，`loss_future_force` 是实际辅助优化项，`loss_future_force_weighted` 已乘外层 `future_force_loss_weight`。它们不是每批完整遍历三个跨度的平均。
+
+离线诊断固定同一验证窗口顺序、batch size、模型 weights、force normalizer、seed，关闭增强，使用 `eval()`。先固定生成每个 batch 的 noise 和 uniform tau，再在所有版本及跨度间复用；不要通过反复调用随机 `compute_loss` 比较。下面的片段用于已加载的 action_prefix `model` 和标签顺序匹配的 raw `batch`。`noise` 与 `tau` 在模型循环之外用固定 seed 生成：`noise=torch.randn_like(batch["action"])`、`tau=torch.rand(batch["action"].shape[0], device=noise.device)`，随后在模型间复用。
+
+```python
+model.eval()
+with torch.no_grad():
+    condition = model._encode_obs(batch['obs'])
+    actions = model.normalizer['action'].normalize(batch['action'])
+    xt = (1 - tau[:, None, None]) * noise + tau[:, None, None] * actions
+    for index, h in enumerate(model.future_force_horizons):
+        prediction = model._predict_prefix_force(xt, tau, condition, h)
+        errors, valid = model._future_force_errors(prediction, batch, index)
+        # 跨 batch 累加 numerator/count 后相除，不平均各 batch 均值。
+        numerator = (errors * valid).sum().item()
+        count = valid.sum().item()
+        print(h, numerator, count)
+```
+
+batch 标签顺序必须与该模型的 `future_force_horizons` 对齐。所有前缀版本共同报告 h=4 未加权误差与有效数，多跨度版本另报告 h=1、2；无有效标签报告 N.A.。诊断允许逐跨度 forward，不改变训练每批仅一次的规则。最终依据是共同闭环协议下的成功率、失败类型和实际训练/推理成本；更低的加权训练 loss 不能证明收益。`soft_flow` 仍是待验证优化假设，无额外闭环收益时直接改为 `none`，保留多跨度实验。
+
+定向检查（policy 环境）：
+
+```bash
+python -m pytest dexmani_policy/test_tools/config_checks.py -k interact -q
+python -c 'import torch; from dexmani_policy.test_tools.training_checks import check_interact_prefix, check_interact_representation; torch.set_num_threads(4); torch.manual_seed(7); check_interact_prefix(torch.device("cpu")); check_interact_representation(torch.device("cpu"))'
+# 将上一行 cpu 改为 cuda:0 可运行同样的 GPU 检查。
+python -m dexmani_policy.test_tools.decoder_checks --device cpu
+```
+
+正式入口的合成短训恢复检查：
+
+```bash
+python -c 'import torch; from dexmani_policy.test_tools.training_checks import check_interact_prefix_resume; torch.set_num_threads(4); check_interact_prefix_resume(torch.device("cuda:0"))'
+```
+
+已有有限验证与未验证范围见[实施记录](docs/interact_dex_implementation_task.md)。定向检查验证实现契约，不代表闭环收益；完整训练、真实任务闭环、完整宽度吞吐/峰值显存及默认 CUDA Inductor 编译尚未验证。
 
 ## AdapTac 触觉实验
 

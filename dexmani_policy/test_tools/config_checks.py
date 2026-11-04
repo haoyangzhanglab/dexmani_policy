@@ -342,3 +342,28 @@ def test_interact_scene_config(queries):
     restored.load_state_dict(model.state_dict(), strict=True)
     assert restored.obs_encoder.scene_tokenizer.num_queries == queries
     assert not {"context_tokens", "scene_tokenizer"} & set(effective.agent)
+
+
+@pytest.mark.parametrize("mode,weighting,alpha", [
+    ("encoder", "soft_flow", 1), ("action_prefix", "soft_flow", 2),
+    ("unknown", "none", 1), ("action_prefix", "unknown", 1),
+])
+def test_interact_prefix_invalid(mode, weighting, alpha):
+    import hydra
+    cfg = load_policy_config("interact_dex", [
+        f"agent.future_force_mode={mode}", f"agent.future_force_time_weighting={weighting}",
+        f"agent.time_shift_alpha={alpha}", "agent.hidden_dim=32", "agent.n_layers=1", "agent.n_head=4",
+    ])
+    with pytest.raises(hydra.errors.InstantiationException, match="future_force|soft_flow"):
+        hydra.utils.instantiate(cfg.agent, _convert_="all")
+
+
+def test_interact_default_force_mode():
+    import hydra
+    cfg = load_policy_config("interact_dex", ["agent.hidden_dim=32", "agent.n_layers=1", "agent.n_head=4"])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    del cfg.agent.future_force_mode
+    del cfg.agent.future_force_time_weighting
+    defaults = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    defaults.load_state_dict(model.state_dict(), strict=True)
+    assert defaults.future_force_mode == "encoder" and defaults.future_force_time_weighting == "none"

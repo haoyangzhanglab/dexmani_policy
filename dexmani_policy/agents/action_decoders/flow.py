@@ -70,9 +70,10 @@ class RectifiedFlow(nn.Module):
         actions: torch.Tensor,
         *,
         dim_groups: dict[str, tuple[int, int, float]] | None = None,
+        training_pair: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        xt, t, target_v = self.sample_training_pair(actions)
+        xt, t, target_v = self.sample_training_pair(actions) if training_pair is None else training_pair
         pred_v = self.model(x=xt, timestep=t, context=cond)
         pred_v_fp32 = pred_v.float()
         target_v_fp32 = target_v.float()

@@ -1236,13 +1236,217 @@ def check_interact_representation(device):
             assert variant._predict_future_force(features.interaction[:, -1, 1:6], action_condition).shape == (2, 2, 5, 3)
 
 
+def check_interact_prefix(device):
+    cfg = load_policy_config("interact_dex", [
+        "agent.future_force_mode=action_prefix", "agent.future_force_time_weighting=soft_flow",
+        "agent.p_drop_attn=0", "agent.pc_dim=3", "agent.num_points=32", "agent.pc_encoder_config.channels=24",
+        "agent.pc_encoder_config.num_patches=12", "agent.pc_encoder_config.group_size=8",
+        "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_heads=4",
+        "agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=4",
+        "agent.fps_random_config.use_random=false", "agent.num_inference_steps=2",
+    ])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all").to(device).eval()
+    dims = dict(action=19, joint_state=19, point_cloud=3, eef_pose=9, fingertip_xyz=3, finger_tactile_force=3)
+    shapes = dict(action=(19,), joint_state=(19,), finger_tactile_force=(5, 3))
+    model.configure_normalizer(dims, shapes)
+    model.to(device)
+    model.normalizer["action"].scale.fill_(2)
+    model.normalizer["action"].offset.fill_(7)
+    model.normalizer["joint_state"].offset.fill_(-9)
+    obs = dict(joint_state=torch.randn(2, 4, 19, device=device),
+               point_cloud=torch.randn(2, 4, 32, 3, device=device) * .03,
+               eef_pose=torch.zeros(2, 4, 9, device=device),
+               fingertip_xyz=torch.randn(2, 4, 5, 3, device=device) * .02,
+               finger_tactile_force=torch.randn(2, 4, 5, 3, device=device))
+    obs["eef_pose"][..., 3] = 1
+    obs["eef_pose"][..., 7] = 1
+    batch = dict(obs=obs, action=torch.randn(2, 16, 19, device=device),
+                 future_force=torch.randn(2, 3, 5, 3, device=device),
+                 future_force_valid=torch.tensor([[True, True, False], [True, False, False]], device=device))
+    backbone = model.action_decoder.model
+    assert model.future_force_head[-1].weight.count_nonzero() == 0
+    assert model.future_force_head[-1].bias.count_nonzero() == 0
+    with torch.no_grad():
+        model.future_force_head[-1].weight.normal_(std=.1)
+        for block in backbone.ditx_blocks:
+            block.adaln_modulation[-1].bias.chunk(9)[2].fill_(1)
+            block.adaln_modulation[-1].bias.chunk(9)[5].fill_(1)
+    condition = model._encode_obs(obs)
+    training_pair = model.action_decoder.sample_training_pair(model.normalizer["action"].normalize(batch["action"]))
+    xt, tau, _ = training_pair
+    for h in (1, 2, 4):
+        lengths = []
+        hook = backbone.ditx_blocks[0].self_attn.register_forward_pre_hook(lambda m, a: lengths.append(a[0].shape[1]))
+        prediction = model._predict_prefix_force(xt, tau, condition, h)
+        hook.remove()
+        assert lengths == [3 + h] and prediction.shape == (2, 1, 5, 3)
+        changed = xt.clone()
+        changed[:, 3 + h:] += 10
+        torch.testing.assert_close(model._predict_prefix_force(changed, tau, condition, h), prediction, rtol=0, atol=0)
+        changed[:, 0] += 2
+        assert not torch.allclose(model._predict_prefix_force(changed, tau, condition, h), prediction)
+    model.normalizer["finger_tactile_force"].scale.fill_(2)
+    model.normalizer["finger_tactile_force"].offset.fill_(7)
+    horizons = (1, 2, 4)
+    raw_deltas = torch.tensor(horizons, device=device, dtype=torch.float32)
+    aligned_labels = {
+        **batch,
+        "future_force": obs["finger_tactile_force"][:, -1:] + raw_deltas[None, :, None, None],
+        "future_force_valid": torch.ones(2, 3, dtype=torch.bool, device=device),
+    }
+    for index, h in enumerate(horizons):
+        errors, valid = model._future_force_errors(torch.zeros(2, 1, 5, 3, device=device), aligned_labels, index)
+        torch.testing.assert_close(errors, errors.new_full((2, 1), 2 * h - .5))
+        assert valid.shape == errors.shape and valid.all()
+    for detach in (False, True):
+        model.zero_grad(set_to_none=True)
+        hidden = backbone.forward_prefix_features(xt[:, :4], tau, model._encode_obs(obs))[:, -1]
+        prediction = model.future_force_head(hidden.detach() if detach else hidden).reshape(2, 1, 5, 3)
+        force_loss, _, _ = model._compute_prefix_force_loss(prediction, batch, 0, tau)
+        force_loss.backward()
+        assert model.future_force_head[-1].weight.grad.abs().sum() > 0
+        assert (backbone.input_embedder.weight.grad is None) == detach
+        if detach:
+            assert all(p.grad is None for p in backbone.parameters())
+            assert all(p.grad is None for p in model.obs_encoder.parameters())
+        else:
+            assert backbone.input_embedder.weight.grad.abs().sum() > 0
+            assert model.obs_encoder.scene_tokenizer.query_projection.weight.grad.abs().sum() > 0
+        assert all(p.grad is None for p in backbone.final_layer.parameters())
+        assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    probe = torch.tensor([1., 2.5], device=device)[:, None, None, None].expand(2, 1, 5, 3).clone().requires_grad_()
+    labels = dict(obs=obs, future_force=obs["finger_tactile_force"][:, -1:].clone(),
+                  future_force_valid=torch.ones(2, 1, dtype=torch.bool, device=device))
+    times = torch.tensor([0., 1.], device=device)
+    weighted, plain, _ = model._compute_prefix_force_loss(probe, labels, 0, times)
+    torch.testing.assert_close(weighted, weighted.new_tensor(2.125))
+    torch.testing.assert_close(plain, plain.new_tensor(1.25))
+    labels["future_force_valid"][0] = False
+    labels["future_force"][0] = float("nan")
+    weighted, _, _ = model._compute_prefix_force_loss(probe, labels, 0, times)
+    torch.testing.assert_close(weighted, weighted.new_tensor(4.))
+    model.future_force_time_weighting = "none"
+    plain, _, _ = model._compute_prefix_force_loss(probe, labels, 0, times)
+    torch.testing.assert_close(plain, plain.new_tensor(2.))
+    labels["future_force_valid"].zero_()
+    zero, _, _ = model._compute_prefix_force_loss(probe, labels, 0, times)
+    zero.backward()
+    assert zero == 0 and probe.grad.count_nonzero() == 0
+    model.future_force_time_weighting = "soft_flow"
+    for horizons in ([4], [1, 2, 4]):
+        model.future_force_horizons = tuple(horizons)
+        indices = [(1, 2, 4).index(h) for h in horizons]
+        example = {**batch, "future_force": batch["future_force"][:, indices],
+                   "future_force_valid": torch.ones(2, len(horizons), dtype=torch.bool, device=device)}
+        with patch.object(model.normalizer["action"], "normalize", wraps=model.normalizer["action"].normalize) as normalize, \
+             patch.object(model.obs_encoder, "forward", wraps=model.obs_encoder.forward) as encode, \
+             patch.object(model.action_decoder, "sample_training_pair", wraps=model.action_decoder.sample_training_pair) as sample, \
+             patch.object(model.action_decoder, "compute_loss", wraps=model.action_decoder.compute_loss) as main, \
+             patch.object(backbone, "forward_prefix_features", wraps=backbone.forward_prefix_features) as prefix:
+            loss, metrics = model.compute_loss(example)
+            assert normalize.call_count == encode.call_count == sample.call_count == main.call_count == prefix.call_count == 1
+            pair = main.call_args.kwargs["training_pair"]
+            prefix_x, prefix_tau, prefix_context = prefix.call_args.args
+            torch.testing.assert_close(prefix_x, pair[0][:, :prefix_x.shape[1]], rtol=0, atol=0)
+            assert prefix_tau is pair[1] and prefix_context is main.call_args.args[0]
+            torch.testing.assert_close(loss, metrics["loss_action"] + metrics["loss_future_force_weighted"])
+        example["future_force_valid"].zero_()
+        with patch.object(backbone, "forward_prefix_features", side_effect=AssertionError("invalid prefix")):
+            loss, metrics = model.compute_loss(example)
+            assert metrics["future_force_skipped"] == 1 and torch.isfinite(loss)
+    only_h2 = {**aligned_labels, "future_force_valid": torch.tensor([[False, True, False]] * 2, device=device)}
+    changed_labels = {**only_h2, "future_force": only_h2["future_force"].clone()}
+    changed_labels["future_force"][:, (0, 2)] = float("nan")
+    with patch.object(model.action_decoder, "sample_training_pair", return_value=training_pair):
+        _, expected = model.compute_loss(only_h2)
+        _, actual = model.compute_loss(changed_labels)
+    assert actual["future_force_selected_h2"] == 1
+    assert actual["future_force_selected_h1"] == actual["future_force_selected_h4"] == 0
+    torch.testing.assert_close(actual["loss_future_force"], expected["loss_future_force"])
+    torch.testing.assert_close(actual["loss_future_force_unweighted"], expected["loss_future_force_unweighted"])
+    with patch.object(backbone, "forward_prefix_features", side_effect=AssertionError("online prefix")), \
+         patch.object(model.future_force_head, "forward", side_effect=AssertionError("online head")):
+        for cap in (0., 2.):
+            result = model.predict_action(obs, rtc_prefix=batch["action"][:, :3], delay_steps=1, rtc_guidance_cap=cap)
+            assert result["future_actions"].shape == (2, 13, 19)
+    model.action_decoder.t_sample_mode = "beta"
+    try:
+        model.compute_loss(batch)
+    except ValueError as error:
+        assert "uniform" in str(error)
+    else:
+        raise AssertionError("Accepted nonuniform soft_flow")
+    model.action_decoder.t_sample_mode = "uniform"
+    model.train()
+    model.zero_grad(set_to_none=True)
+    optimizer = build_optimizer(model, **cfg.optimizer)
+    with torch.autocast(device.type, dtype=torch.bfloat16):
+        loss, _ = model.compute_loss(batch)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    for mode in ("encoder", "action_prefix"):
+        disabled = hydra.utils.instantiate(cfg.agent, future_force_mode=mode, future_force_time_weighting="none",
+                                          future_force_loss_weight=0., _convert_="all").to(device)
+        disabled.configure_normalizer(dims, shapes)
+        disabled.to(device)
+        assert disabled.future_force_head is None
+        disabled.compute_loss(dict(obs=obs, action=batch["action"]))
+
+
+def check_interact_prefix_resume(device):
+    from dexmani_policy.test_tools.tactile_normalization_checks import config, run_reproducible_training
+    from dexmani_policy.training.common.config import assemble_policy_config
+    with tempfile.TemporaryDirectory(prefix="dexmani-prefix-resume-") as temporary:
+        root = Path(temporary)
+        source = root / "source.zarr"
+        group = make_source(source, [20, 40, 60])
+        rng = np.random.default_rng(7)
+        del group["data/point_cloud"]
+        group.create_dataset("data/point_cloud", data=rng.normal(size=(60, 16, 6)).astype("f4"))
+        pose = np.zeros((60, 9), dtype="f4")
+        pose[:, 3] = pose[:, 7] = 1
+        group.create_dataset("data/eef_pose", data=pose)
+        group.create_dataset("data/fingertip_xyz", data=rng.normal(size=(60, 5, 3)).astype("f4"))
+        def recipe(output):
+            cfg = config("interact_dex", source, output, device=str(device))
+            cfg.horizon, cfg.n_obs_steps = 8, 4
+            cfg.future_force_horizons = [1, 2, 4]
+            cfg.agent.future_force_mode = "action_prefix"
+            cfg.agent.future_force_time_weighting = "soft_flow"
+            return assemble_policy_config(cfg)
+        trainer = build_trainer(recipe(root / "resume"))
+        run_reproducible_training(trainer, max_updates=2)
+        resumed = prepare_resume(root / "resume", device=str(device))
+        with patch.object(resumed.model, "_predict_prefix_force", wraps=resumed.model._predict_prefix_force) as resumed_prefix:
+            run_reproducible_training(resumed, max_updates=1)
+        continuous = build_trainer(recipe(root / "continuous"))
+        with patch.object(continuous.model, "_predict_prefix_force", wraps=continuous.model._predict_prefix_force) as continuous_prefix:
+            run_reproducible_training(continuous, max_updates=3)
+        resumed_horizons = [call.args[3] for call in resumed_prefix.call_args_list]
+        continuous_horizons = [call.args[3] for call in continuous_prefix.call_args_list]
+        assert resumed_horizons and continuous_horizons[-len(resumed_horizons):] == resumed_horizons
+        for expected, actual in ((continuous.model, resumed.model), (continuous.ema_model, resumed.ema_model)):
+            torch.testing.assert_close(expected.state_dict(), actual.state_dict(), rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(continuous.optimizer.state_dict()["state"], resumed.optimizer.state_dict()["state"])
+        assert continuous.optimizer.state_dict()["param_groups"] == resumed.optimizer.state_dict()["param_groups"]
+        assert continuous.scheduler.state_dict() == resumed.scheduler.state_dict()
+        saved = load_checkpoint(root / "resume/checkpoints/latest.pt")
+        assert saved.effective_config["agent"]["future_force_mode"] == "action_prefix"
+        assert saved.effective_config["agent"]["future_force_time_weighting"] == "soft_flow"
+        for ema in (False, True):
+            restore_policy(root / "resume/checkpoints/latest.pt", use_ema=ema, device=device)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
     args = parser.parse_args()
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_interact_representation, check_evaluation, check_sim_construction, check_flow_recipes, check_policy_roundtrips, check_configs, check_training_resume, check_nonfinite_group, check_training_lifecycle,):
+    for check in (check_interact_prefix_resume, check_interact_prefix, check_interact_representation, check_evaluation, check_sim_construction, check_flow_recipes, check_policy_roundtrips, check_configs, check_training_resume, check_nonfinite_group, check_training_lifecycle,):
         check(args.device)
         print(f"PASS {check.__name__} ({args.device})", flush=True)
 

@@ -32,6 +32,8 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.interact_dex.InterActDex
+  future_force_mode: encoder
+  future_force_time_weighting: none
   future_force_loss_weight: 0.1
   pc_dim: 6
   num_points: 1024

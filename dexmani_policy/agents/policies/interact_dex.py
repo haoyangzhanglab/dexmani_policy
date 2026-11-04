@@ -109,7 +109,15 @@ class InterActDex(Policy):
         future_force_loss_weight: float = 0.0,
         future_force_horizons: Sequence[int] = (1, 2, 4),
         time_shift_alpha: float = 1.0,
+        future_force_mode: str = "encoder",
+        future_force_time_weighting: str = "none",
     ) -> None:
+        if future_force_mode not in {"encoder", "action_prefix"}:
+            raise ValueError("future_force_mode must be encoder or action_prefix")
+        if future_force_time_weighting not in {"none", "soft_flow"}:
+            raise ValueError("future_force_time_weighting must be none or soft_flow")
+        if future_force_time_weighting == "soft_flow" and future_force_mode != "action_prefix":
+            raise ValueError("soft_flow requires action_prefix")
         future_force_loss_weight = float(future_force_loss_weight)
         if not math.isfinite(future_force_loss_weight) or future_force_loss_weight < 0:
             raise ValueError("future_force_loss_weight must be finite and non-negative")
@@ -163,12 +171,23 @@ class InterActDex(Policy):
             n_action_steps=n_action_steps,
             action_dim=action_dim,
         )
+        self.future_force_mode = future_force_mode
+        self.future_force_time_weighting = future_force_time_weighting
+        self._validate_force_time_weighting()
         self.future_force_loss_weight = future_force_loss_weight
         self.future_force_horizons = future_force_horizons
-        self.future_force_head = nn.Sequential(
-            nn.Linear(obs_encoder.out_dim + max(future_force_horizons) * (action_dim + 1), 128),
-            nn.SiLU(), nn.Linear(128, 3),
-        ) if future_force_loss_weight > 0 else None
+        self.future_force_head: nn.Sequential | None = None
+        if future_force_loss_weight > 0:
+            if future_force_mode == "encoder":
+                self.future_force_head = nn.Sequential(
+                    nn.Linear(obs_encoder.out_dim + max(future_force_horizons) * (action_dim + 1), 128),
+                    nn.SiLU(), nn.Linear(128, 3),
+                )
+            else:
+                self.future_force_head = nn.Sequential(
+                    nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 128),
+                    nn.SiLU(), nn.Linear(128, 15),
+                )
         if self.future_force_head is not None:
             nn.init.zeros_(self.future_force_head[-1].weight)
             nn.init.zeros_(self.future_force_head[-1].bias)
@@ -178,6 +197,8 @@ class InterActDex(Policy):
         return {
             **super().effective_config,
             "time_shift_alpha": self.action_decoder.time_shift_alpha,
+            "future_force_mode": self.future_force_mode,
+            "future_force_time_weighting": self.future_force_time_weighting,
             "future_force_loss_weight": self.future_force_loss_weight,
             "future_force_horizons": list(self.future_force_horizons),
         }
@@ -213,25 +234,59 @@ class InterActDex(Policy):
         ), -1)
         return self.future_force_head(features.to(self.future_force_head[0].weight.dtype))
 
-    def _compute_future_force_loss(
-        self, prediction: torch.Tensor, batch: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        force = batch["future_force"]
-        valid = batch["future_force_valid"]
+    def _validate_force_time_weighting(self) -> None:
+        if self.future_force_time_weighting == "soft_flow" and (
+            self.action_decoder.t_sample_mode != "uniform" or self.action_decoder.time_shift_alpha != 1.0
+        ):
+            raise ValueError("soft_flow requires t_sample_mode=uniform and time_shift_alpha=1.0")
 
+    def _predict_prefix_force(
+        self, xt: torch.Tensor, tau: torch.Tensor, condition: torch.Tensor, horizon: int,
+    ) -> torch.Tensor:
+        assert self.future_force_head is not None, "Future force prediction requires a positive loss weight"
+        length = self.action_start_index + horizon
+        hidden = self.action_decoder.model.forward_prefix_features(xt[:, :length], tau, condition)
+        return self.future_force_head(hidden[:, -1]).reshape(-1, 1, 5, 3)
+
+    def _future_force_errors(
+        self, prediction: torch.Tensor, batch: dict, horizon_index: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        force, valid = batch["future_force"], batch["future_force_valid"]
+        if horizon_index is not None:
+            force = force[:, horizon_index:horizon_index + 1]
+            valid = valid[:, horizon_index:horizon_index + 1]
+        if prediction.shape != force.shape or valid.shape != force.shape[:2]:
+            raise ValueError("Future force prediction, labels and validity must align exactly")
         with torch.autocast(device_type=force.device.type, enabled=False):
             current = batch["obs"]["finger_tactile_force"][:, -1:].float()
             delta = torch.where(valid[..., None, None], force.float() - current, 0.0)
             target = delta * self.normalizer["finger_tactile_force"].scale
-        element_loss = F.smooth_l1_loss(
-            prediction.float(), target.float(), reduction="none", beta=1.0,
-        )
-        mask = valid.float()
+            errors = F.smooth_l1_loss(prediction.float(), target, reduction="none", beta=1.0)
+        return errors.mean(dim=(-1, -2)), valid.float()
+
+    def _compute_future_force_loss(
+        self, prediction: torch.Tensor, batch: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        errors, mask = self._future_force_errors(prediction, batch)
         counts = mask.sum(dim=0)
-        per_horizon = (element_loss.mean(dim=(-1, -2)) * mask).sum(dim=0) / counts.clamp_min(1)
+        per_horizon = (errors * mask).sum(dim=0) / counts.clamp_min(1)
         active = (counts > 0).to(per_horizon)
-        future_force_loss = (per_horizon * active).sum() / active.sum().clamp_min(1)
-        return future_force_loss, mask
+        return (per_horizon * active).sum() / active.sum().clamp_min(1), mask
+
+    def _compute_prefix_force_loss(
+        self, prediction: torch.Tensor, batch: dict, horizon_index: int, tau: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        errors, mask = self._future_force_errors(prediction, batch, horizon_index)
+        ell, valid = errors[:, 0], mask[:, 0]
+        self._validate_force_time_weighting()
+        if tau.shape != ell.shape:
+            raise ValueError("Flow times must have shape [B]")
+        weights = (
+            0.5 + 1.5 * tau.float().square()
+            if self.future_force_time_weighting == "soft_flow" else torch.ones_like(ell)
+        )
+        denominator = valid.sum().clamp_min(1)
+        return (valid * weights * ell).sum() / denominator, (valid * ell).sum() / denominator, valid
 
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs,
@@ -240,16 +295,33 @@ class InterActDex(Policy):
         condition = self._pack_action_context(features)
         actions = self.normalizer["action"].normalize(batch["action"])
         kwargs["dim_groups"] = self.loss_groups
+        training_pair = self.action_decoder.sample_training_pair(actions)
         action_loss, metrics = self.action_decoder.compute_loss(
-            condition, actions, log_metrics=log_metrics, **kwargs,
+            condition, actions, training_pair=training_pair, log_metrics=log_metrics, **kwargs,
         )
         if self.future_force_head is None:
             return action_loss, metrics
-        action_condition = self._prepare_future_action_condition(
-            batch["action"], batch["obs"]["joint_state"][:, -1],
-        )
-        prediction = self._predict_future_force(features.interaction[:, -1, 1:6], action_condition)
-        future_force_loss, mask = self._compute_future_force_loss(prediction, batch)
+        if self.future_force_mode == "action_prefix":
+            active = batch["future_force_valid"].any(dim=0).nonzero().flatten()
+            selected = None
+            future_force_loss = unweighted = action_loss * 0
+            mask = actions.new_zeros(actions.shape[0])
+            if active.numel():
+                selected = active[torch.randint(active.numel(), (), device=active.device)].item()
+                xt, tau, _ = training_pair
+                prediction = self._predict_prefix_force(xt, tau, condition, self.future_force_horizons[selected])
+                future_force_loss, unweighted, mask = self._compute_prefix_force_loss(prediction, batch, selected, tau)
+            if log_metrics:
+                metrics.update({f"future_force_selected_h{h}": float(i == selected)
+                                for i, h in enumerate(self.future_force_horizons)})
+                metrics["future_force_skipped"] = float(selected is None)
+                metrics["loss_future_force_unweighted"] = unweighted.detach()
+        else:
+            action_condition = self._prepare_future_action_condition(
+                batch["action"], batch["obs"]["joint_state"][:, -1],
+            )
+            prediction = self._predict_future_force(features.interaction[:, -1, 1:6], action_condition)
+            future_force_loss, mask = self._compute_future_force_loss(prediction, batch)
         weighted_loss = self.future_force_loss_weight * future_force_loss
         loss = action_loss + weighted_loss
         if log_metrics:

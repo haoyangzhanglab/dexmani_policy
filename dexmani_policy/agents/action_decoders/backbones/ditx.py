@@ -244,6 +244,23 @@ class DiTX(nn.Module):
     ) -> torch.Tensor:
         if x.ndim != 3 or x.shape[1] != self.horizon:
             raise ValueError("actions must have shape [B, horizon, action_dim]")
+        hidden = self._forward_hidden(x, timestep, context, context_kv=context_kv)
+        if self.action_io is None:
+            return self.final_layer(hidden)
+        return self.action_io.decode_velocity(hidden)
+
+    def forward_prefix_features(
+        self, x: torch.Tensor, timestep: torch.Tensor | float, context: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.action_io is not None:
+            raise ValueError("Prefix features require ordinary action embeddings")
+        if x.ndim != 3 or not 1 <= x.shape[1] <= self.horizon or x.shape[2] != self.action_dim:
+            raise ValueError("prefix actions must have shape [B, L, action_dim], 1 <= L <= horizon")
+        return self._forward_hidden(x, timestep, context)
+
+    def _forward_hidden(
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
+    ) -> torch.Tensor:
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
         context_c = self.embed_context(context) if context_kv is None else None
@@ -252,7 +269,7 @@ class DiTX(nn.Module):
 
         if self.action_io is None:
             x = self.input_embedder(x)
-            x = x + self.input_pos_embed.to(dtype=x.dtype)
+            x = x + self.input_pos_embed[:, :x.shape[1]].to(dtype=x.dtype)
         else:
             x = self.action_io.encode(x)
         for index, block in enumerate(self.ditx_blocks):
@@ -260,9 +277,7 @@ class DiTX(nn.Module):
                 x, time_c, context_c,
                 context_kv=None if context_kv is None else context_kv[index],
             )
-        if self.action_io is None:
-            return self.final_layer(x)
-        return self.action_io.decode_velocity(x)
+        return x
 
 
 class ConsistencyDiTX(nn.Module):
