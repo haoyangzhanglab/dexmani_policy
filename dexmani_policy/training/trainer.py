@@ -146,7 +146,7 @@ class PolicyTrainer:
             self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
             cfg.training.loop.total_train_steps,
         )
-        self.cfg = cfg if checkpoint is not None else assemble_effective_config(cfg, data_description, model)
+        self.cfg = assemble_effective_config(cfg, data_description, model)
         self.total_train_steps = cfg.training.loop.total_train_steps
         self.log_interval_steps = cfg.training.loop.log_interval_steps
         self.gradient_accumulation_steps = cfg.training.loop.gradient_accumulation_steps

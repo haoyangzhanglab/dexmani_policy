@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES
-from dexmani_policy.common.image_util import preprocess_rgb_eval
+from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
+from dexmani_policy.common.inference import prepare_observations, predict_actions
 from dexmani_policy.common.io_util import close_resources
 
 
@@ -55,34 +55,21 @@ class SimRunner:
         return {name: buffer[indices] for name, buffer in self.obs_buffer.items()}
 
     def get_obs_batch(self, device, *, normalization_dims) -> dict[str, torch.Tensor]:
-        batch = {}
-        for name, observation in self.get_stacked_obs().items():
-            value = (
-                preprocess_rgb_eval(observation, **self.rgb_preprocessing)
-                if name == "rgb" else observation
-            )
-            if name in POINT_CLOUD_FIELDS:
-                value = np.ascontiguousarray(value[..., :normalization_dims[name]])
-            dtype = None if name == "rgb" else torch.float32
-            batch[name] = torch.as_tensor(value, device=device, dtype=dtype).unsqueeze(0)
-        return batch
+        return prepare_observations(
+            self.get_stacked_obs(), normalization_dims=normalization_dims,
+            n_obs_steps=self.n_obs_steps, rgb_preprocessing=self.rgb_preprocessing, device=device,
+        )
 
     def reset(self):
         self.obs_buffer.clear()
         self.obs_cursor = 0
 
-    @torch.no_grad()
     def predict_action_chunk(
         self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int, generator=None
     ) -> np.ndarray:
-        with torch.autocast(device_type=next(agent.parameters()).device.type, enabled=False):
-            result = agent.predict_action(
-                obs_dict=obs_batch, inference_steps=inference_steps, generator=generator
-            )
-        actions = result["future_actions"][0].cpu().numpy()
-        if not np.isfinite(actions).all():
-            raise ValueError("Nonfinite physical policy prediction")
-        return np.ascontiguousarray(actions[:action_steps])
+        return predict_actions(
+            agent, obs_batch, inference_steps=inference_steps, generator=generator,
+        )[:action_steps]
 
     def _run_episode(
         self,

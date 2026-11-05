@@ -5,7 +5,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int, validate_action_window
+from dexmani_policy.common.config import positive_int, validate_action_window
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 
@@ -43,7 +43,7 @@ def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float)
 
 class Policy(nn.Module):
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
-    supported_execution_modes: tuple[str, ...] = ("sync", "async")
+    supports_rtc: bool = False
     loss_groups: dict[str, tuple[int, int, float]] | None = None
 
     def __init__(
@@ -96,8 +96,6 @@ class Policy(nn.Module):
     def _preprocess_obs(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
-            if key in POINT_CLOUD_FIELDS:
-                value = value[..., : self.normalization_dims[key]]
             if key in self.normalizer.fields:
                 value = self.normalizer[key].normalize(value)
             result[key] = value.flatten(0, 1)
@@ -162,7 +160,7 @@ class Policy(nn.Module):
         action_shape = (condition.shape[0], self.horizon, self.action_dim)
         kwargs = {}
         if rtc_prefix is not None:
-            if "rtc" not in self.supported_execution_modes:
+            if not self.supports_rtc:
                 raise NotImplementedError("This policy does not support RTC")
             field = self.normalizer["action"]
             scale = field.scale[: self.control_action_dim]
@@ -182,14 +180,6 @@ class Policy(nn.Module):
 
     def _action_output(self, prediction: torch.Tensor) -> dict[str, torch.Tensor]:
         return {"future_actions": prediction[:, self.action_start_index :, : self.control_action_dim]}
-
-    @property
-    def inference_metadata(self) -> dict:
-        return {
-            "action_start_index": self.action_start_index,
-            "control_action_dim": self.control_action_dim,
-            "supported_execution_modes": list(self.supported_execution_modes),
-        }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
         self.action_decoder.model = cast(nn.Module, torch.compile(self.action_decoder.model, **compile_kwargs))

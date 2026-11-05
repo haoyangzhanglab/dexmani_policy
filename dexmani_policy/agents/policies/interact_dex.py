@@ -18,7 +18,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.scene_tokenizer import SceneTo
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
-from dexmani_policy.common.config import validate_future_force_horizons
+from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, validate_future_force_horizons
 
 
 class InterActFeatures(NamedTuple):
@@ -81,7 +81,7 @@ class InterActDexEncoder(nn.Module):
 
 
 class InterActDex(Policy):
-    supported_execution_modes = ("sync", "async", "rtc")
+    supports_rtc = True
     supported_action_keys = ("action",)
     loss_groups = {"arm": (0, 7, 0.5), "hand": (7, 19, 0.5)}
 
@@ -202,6 +202,12 @@ class InterActDex(Policy):
             "future_force_loss_weight": self.future_force_loss_weight,
             "future_force_horizons": list(self.future_force_horizons),
         }
+
+    def configure_normalizer(self, feature_dims, feature_shapes) -> None:
+        fields = TACTILE_FEATURE_SHAPES.keys() & feature_dims.keys()
+        if fields != {"finger_tactile_force"}:
+            raise ValueError(f"InterActDex requires aggregate finger_tactile_force, got {sorted(fields)}")
+        super().configure_normalizer(feature_dims, feature_shapes)
 
     def _encode_features(self, obs: dict) -> InterActFeatures:
         return self.obs_encoder(self._preprocess_obs(obs))

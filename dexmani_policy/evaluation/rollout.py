@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from dexmani_policy.common.checkpoint import _restore_policy, load_checkpoint
+from dexmani_policy.common.checkpoint import restore_policy, load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.io_util import write_json
@@ -57,7 +57,7 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     if render_mode == "human" and not os.environ.get("DISPLAY"):
         raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
     set_seed(seed)
-    agent = _restore_policy(cfg, state_dict, device)
+    agent = restore_policy(cfg, state_dict, device)
     del state_dict
     action_steps = positive_int(agent.n_action_steps if action_steps is None else action_steps, "action_steps")
     if action_steps > agent.future_steps:

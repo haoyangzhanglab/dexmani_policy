@@ -10,7 +10,7 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class SAT(Policy):
-    supported_execution_modes = ("sync", "async", "rtc")
+    supports_rtc = True
     supported_action_keys = ("action",)
 
     def __init__(

@@ -11,7 +11,7 @@ import torch
 import zarr
 
 from dexmani_policy.common.config import set_project_root
-from dexmani_policy.deployment import inspect_policy, load_policy
+from dexmani_policy.deployment import load_policy
 from dexmani_policy.test_tools.smoke_test import run_smoke
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import build_dataset, fit_normalizer
@@ -80,8 +80,7 @@ def main(argv=None):
         observation = {key: source[f"data/{key}"][:2] for key in cfg.dataset.sensor_modalities}
         # Deployment must use the checkpoint alone, including its fitted affine.
         shutil.rmtree(root / "source.zarr")
-        info = inspect_policy(run)
-        with closing(load_policy(info, device=args.device)) as runtime:
+        with closing(load_policy(run, device=args.device)) as runtime:
             torch.testing.assert_close(
                 runtime.agent.normalizer.state_dict(), normalizer_state, rtol=0, atol=0, check_device=False,
             )

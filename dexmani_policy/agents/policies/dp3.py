@@ -60,7 +60,7 @@ class DP3Encoder(nn.Module):
 
 
 class DP3(Policy):
-    supported_execution_modes = ("sync", "async", "rtc")
+    supports_rtc = True
 
     def __init__(
         self,

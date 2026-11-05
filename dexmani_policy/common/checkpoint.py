@@ -43,16 +43,7 @@ def policy_state_dict(model) -> dict:
     return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
 
 
-def restore_policy(checkpoint_path: str | Path, *, use_ema: bool, device: "str | torch.device") -> "Policy":
-    checkpoint = load_checkpoint(checkpoint_path)
-    cfg = checkpoint.effective_config
-    state_dict = checkpoint.ema_model_state if use_ema else checkpoint.model_state
-    # Drop training state and unselected weights before constructing the model.
-    del checkpoint
-    return _restore_policy(cfg, state_dict, device)
-
-
-def _restore_policy(
+def restore_policy(
     effective_config: dict[str, Any], state_dict: dict[str, Any] | None,
     device: "str | torch.device",
 ) -> "Policy":

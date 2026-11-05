@@ -159,8 +159,10 @@ def train(method, argv=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    if not resuming and set(cfg.normalization) != dataset.normalization_fields.keys():
-        raise ValueError(f"Normalization must declare {tuple(dataset.normalization_fields)}")
+    missing = dataset.normalization_fields.keys() - cfg.normalization.keys()
+    if missing:
+        raise ValueError(f"Missing normalization for inputs: {sorted(missing)}")
+    cfg.normalization = {key: cfg.normalization[key] for key in dataset.normalization_fields}
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:

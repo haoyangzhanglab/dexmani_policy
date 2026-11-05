@@ -34,7 +34,9 @@
 
 部分方法需要外部视觉权重或独立预训练产物。来源与用途见[data 说明](data/README.md)，方法机制见[手部动作表示](docs/手部动作表示.md)和[观测预训练](docs/观测预训练.md)。完整策略 checkpoint 保存模型、构造配置和最终归一化统计，推理无需原训练数据或初始权重文件。
 
-恢复直接加载 checkpoint 中的 affine 数值，不根据历史 normalization 标签重新拟合或解释。触觉训练支持 `limits`、`gaussian`、`rms` 和 `max_abs`，默认仍为 `limits`；触觉 `identity` 暂不支持。
+恢复直接加载 checkpoint 中的 affine 数值，不根据历史 normalization 标签重新拟合或解释。触觉训练支持 `identity`、`limits`、`gaussian`、`rms` 和 `max_abs`，默认仍为 `limits`；identity 保存对应形状的单位 affine，未来力损失也使用该数值。normalization 可包含未使用字段，仅校验和拟合实际观测与动作；缺少所用字段仍报错。InterAct-Dex 接受满足实际实例的输入、token 数与输出维度且配置可重建的触觉编码器；模型配置 normalizer 时检查数据字段与编码器输入匹配。
+
+resume 更换数据路径时，部署周期与预处理 recipe 按当前数据刷新，恢复的模型结构、raw/EMA 权重、affine、optimizer、scheduler 和 RNG 仍沿用 checkpoint。仿真触觉表示接触力 N；Real 的 SDK 通道、尺度和坐标须按其实际含义使用，同名同形状不能证明跨域等价。
 
 仿真由 `dexmani_sim` 提供环境；真实观测构建、硬件控制与执行调度由独立的 `dexmani_real` 项目负责。本仓库负责策略学习与推理。
 
@@ -74,13 +76,13 @@ python -m dexmani_policy.test_tools.smoke_test dp3 --device cpu \
 
 ## 真机部署接口
 
-`inspect_policy(POLICY, weights=None, inference_steps=None)` 接受 checkpoint 文件或实验目录；目录只读取 `checkpoints/latest.pt`。支持 `~`，相对路径基于调用时工作目录，不使用项目根目录或 checkpoint selector。
+`load_policy(POLICY, *, weights=None, inference_steps=None, device="cuda:0", seed=0)` 一次读取 checkpoint 并返回带 `.info` 的 runtime。接受 checkpoint 文件或实验目录；目录只读取 `checkpoints/latest.pt`。支持 `~`，相对路径基于调用时工作目录。weights 和 inference_steps 缺省时沿用保存配置。
 
 ```python
-from dexmani_policy.deployment import inspect_policy, load_policy
+from dexmani_policy.deployment import load_policy
 
-info = inspect_policy("/path/to/checkpoints/latest.pt", weights="ema")
-runtime = load_policy(info, device="cuda:0", seed=0)
+runtime = load_policy("/path/to/checkpoints/latest.pt", weights="ema", device="cuda:0", seed=0)
+info = runtime.info
 ```
 
-`PolicyInfo.future_steps` 是物理未来动作长度。`predict` 返回反归一化、无历史及辅助维度的动作；RTC 接收同一表示的未消费前缀。`warmup(observation)` 只预测一次；传入 `rtc_guidance_cap` 时再使用首预测预热一次 RTC，cap=0 同样生效。预热恢复 RNG，不返回计时统计；调用方负责每段 `reset_episode()` 和最终 `close()`。
+`PolicyInfo.future_steps` 是物理未来动作长度，`supports_rtc` 表示模型的实际 RTC 能力；sync/async 由执行端调度。SimRunner 和部署共用观测准备与动作输出边界，`predict` 返回连续 NumPy `float32 [future_steps, control_action_dim]`，已反归一化并由模型裁掉历史及辅助维度；Sim 执行端再取前缀。RTC 接收同一物理表示的未消费前缀。`warmup(observation)` 只预测一次；传入 `rtc_guidance_cap` 时再使用首预测预热一次 RTC，cap=0 同样生效。预热恢复 RNG，不返回计时统计；调用方负责每段 `reset_episode()` 和最终 `close()`。

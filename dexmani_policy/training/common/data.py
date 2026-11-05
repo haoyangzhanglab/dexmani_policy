@@ -15,6 +15,7 @@ from dexmani_policy.common.normalizer import (
 
 def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affine=None):
     """Assemble the train affine once, inheriting complete fields before fitting the rest."""
+    spec = {key: spec[key] for key in feature_dims}
     expected_shapes = normalization_feature_shapes(feature_dims)
     initial_state = {} if initial_state is None else initial_state
     normalizer = LinearNormalizer({
@@ -27,8 +28,8 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affi
         if key in normalizer.fields:
             continue
         if mode == "identity":
-            if key == "action":
-                # Action consumers always use an affine, including the identity.
+            if key == "action" or key in TACTILE_FEATURE_SHAPES:
+                # Action and tactile loss paths read affine buffers directly.
                 shape = expected_shapes[key]
                 normalizer.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
             else:

@@ -6,11 +6,7 @@ from typing import TYPE_CHECKING, cast
 import hydra
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.config import (
-    PROJECT_ROOT,
-    TACTILE_FEATURE_SHAPES,
-    positive_int,
-)
+from dexmani_policy.common.config import PROJECT_ROOT, positive_int
 
 if TYPE_CHECKING:
     from dexmani_policy.agents.policies.base import Policy
@@ -47,14 +43,6 @@ def assemble_policy_config(cfg):
         if action_key not in ("action", "action_ee"):
             raise ValueError("action_key must be action or action_ee")
         method = cfg.policy_name
-        # InterAct-Dex consumes aggregate force; dense tactile presets belong to AdapTac.
-        if method == "interact-dex" and OmegaConf.select(cfg, "agent.tactile_encoder._target_") != (
-            "dexmani_policy.agents.obs_encoder.xhand_tactile.XHandForceEncoder"
-        ):
-            raise ValueError(
-                "InterAct-Dex only supports aggregate force; use tactile=force. "
-                "AdapTac supports tactile=force, tactile=taxel and tactile=patch."
-            )
         auxiliary = method == "r3d" and cfg.use_aux_ee
         if auxiliary and action_key != "action":
             raise ValueError("R3D auxiliary targets require joint action")
@@ -71,8 +59,6 @@ def assemble_policy_config(cfg):
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         if method == "interact-dex":
-            if any("interaction_horizon" in section for section in (cfg, cfg.agent, cfg.dataset)):
-                raise ValueError("interaction_horizon is obsolete; use future_force_horizons")
             cfg.agent.future_force_horizons = cfg.future_force_horizons
             if float(cfg.agent.get("future_force_loss_weight", 0.0)) == 0:
                 cfg.dataset._target_ = "dexmani_policy.datasets.demonstration.DemonstrationDataset"
@@ -109,14 +95,13 @@ def prepare_training(cfg):
 
 
 def validate_normalization(cfg):
-    spec = cfg.normalization
     expected = set(cfg.dataset.sensor_modalities) | {"action"}
-    if set(spec) != expected:
-        raise ValueError(f"Normalization must declare dataset inputs and action: {sorted(expected)}")
+    missing = expected - cfg.normalization.keys()
+    if missing:
+        raise ValueError(f"Missing normalization for inputs and action: {sorted(missing)}")
+    spec = {key: cfg.normalization[key] for key in expected}
     for key, mode in spec.items():
-        allowed = {"limits", "gaussian", "rms", "max_abs"}
-        if key not in TACTILE_FEATURE_SHAPES:
-            allowed.add("identity")
+        allowed = {"identity", "limits", "gaussian", "rms", "max_abs"}
         if mode not in allowed:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected {sorted(allowed)}")
 
@@ -135,15 +120,6 @@ def validate_normalization(cfg):
 
 
 def validate_config(cfg):
-    if cfg.policy_name in {"adaptac", "interact-dex"}:
-        fields = TACTILE_FEATURE_SHAPES.keys() & set(cfg.dataset.sensor_modalities)
-        normalized = TACTILE_FEATURE_SHAPES.keys() & set(cfg.normalization)
-        encoder = hydra.utils.get_class(cfg.agent.tactile_encoder._target_)
-        if fields != {encoder.input_key} or normalized != fields:
-            raise ValueError(
-                f"{cfg.policy_name} requires one tactile field matching encoder input_key={encoder.input_key!r}; "
-                f"dataset={sorted(fields)}, normalization={sorted(normalized)}"
-            )
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
@@ -166,7 +142,7 @@ def assemble_effective_config(cfg, data_description, model):
     with open_dict(effective):
         effective.pop("max_updates", None)
         effective.normalization_dims = model.normalization_dims
-        effective.policy_metadata = model.inference_metadata
+        effective.pop("policy_metadata", None)
         effective.deployment_metadata = data_description["deployment_metadata"]
         effective.agent.update(model.effective_config)
     OmegaConf.resolve(effective)

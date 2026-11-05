@@ -78,7 +78,7 @@ class AdapTacEncoder(nn.Module):
 
 
 class AdapTac(Policy):
-    supported_execution_modes = ("sync", "async", "rtc")
+    supports_rtc = True
     supported_action_keys = ("action",)
 
     def __init__(
@@ -161,6 +161,12 @@ class AdapTac(Policy):
             dropout=fusion_dropout,
         )
         self.force_loss_weight = force_loss_weight
+
+    def configure_normalizer(self, feature_dims, feature_shapes) -> None:
+        fields = TACTILE_FEATURE_SHAPES.keys() & feature_dims.keys()
+        if fields != {self.force_key}:
+            raise ValueError(f"AdapTac requires tactile input {self.force_key!r}, got {sorted(fields)}")
+        super().configure_normalizer(feature_dims, feature_shapes)
 
     def _preprocess_obs(self, obs_dict: dict) -> dict:
         encoder = self.obs_encoder.tactile_encoder

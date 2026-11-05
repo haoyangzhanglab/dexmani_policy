@@ -34,7 +34,7 @@ class CordViPEncoder(nn.Module):
 
 
 class CordViP(Policy):
-    supported_execution_modes = ("sync", "async", "rtc")
+    supports_rtc = True
     supported_action_keys = ("action",)
 
     def __init__(

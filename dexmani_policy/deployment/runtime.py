@@ -1,30 +1,30 @@
 import numpy as np
 
-from dexmani_policy.common.checkpoint import restore_policy
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS
-
-_OBSERVATION_SHAPES = {
-    "joint_state": (19,),
-    "eef_pose": (9,),
-    **FIELD_FEATURE_SHAPES,
-}
+from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
+from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
+from dexmani_policy.deployment.metadata import _resolve_checkpoint, policy_info
 
 
-def _contiguous_numpy(value, dtype=None):
-    with np.errstate(over="ignore"):
-        value = np.asarray(value, dtype=dtype, order="C")
-    # NumPy considers negative strides on singleton axes contiguous; Torch rejects them.
-    if any(stride < 0 for stride in value.strides):
-        value = value.copy(order="C")
-    return value
-
-
-def load_policy(info, *, device="cuda:0", seed=0):
+def load_policy(path, *, weights=None, inference_steps=None, device="cuda:0", seed=0):
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
-    agent = restore_policy(
-        info.checkpoint_path, use_ema=info.weights == "ema", device=device
-    )
+    path = _resolve_checkpoint(path)
+    checkpoint = load_checkpoint(path)
+    cfg = checkpoint.effective_config
+    defaults = cfg["eval"]
+    if weights is None:
+        if type(defaults["use_ema"]) is not bool:
+            raise ValueError("Saved use_ema must be boolean")
+        weights = "ema" if defaults["use_ema"] else "raw"
+    if weights not in {"ema", "raw"}:
+        raise ValueError("weights must be ema or raw")
+    steps = positive_int(defaults["inference_steps"] if inference_steps is None else inference_steps, "inference_steps")
+    state = checkpoint.ema_model_state if weights == "ema" else checkpoint.model_state
+    del checkpoint
+    agent = restore_policy(cfg, state, device)
+    del state
+    info = policy_info(path, cfg, agent, weights=weights, inference_steps=steps)
     return PolicyRuntime(agent, info, seed=seed)
 
 
@@ -38,46 +38,6 @@ class PolicyRuntime:
 
     def reset_episode(self):
         self.generator.manual_seed(self.generator.initial_seed())
-
-    def _prepare_numeric_tensor(self, value, label):
-        import torch
-
-        value = _contiguous_numpy(value, dtype=np.float32)
-        if not np.isfinite(value).all():
-            raise ValueError(f"Nonfinite {label}")
-        return torch.from_numpy(value).unsqueeze(0).to(self.generator.device)
-
-    def prepare_observations(self, observation):
-        from dexmani_policy.common.image_util import preprocess_rgb_eval
-
-        tensors = {}
-        for name in self.info.observation_fields:
-            value = np.asarray(observation[name])
-            if value.ndim < 2 or value.dtype.kind not in "buif":
-                raise ValueError(f"Policy history {name} requires numeric (T, ...) input")
-            if len(value) < self.info.n_obs_steps:
-                raise ValueError(f"Policy history {name} requires at least {self.info.n_obs_steps} frames")
-            value = value[-self.info.n_obs_steps :]
-            if name in _OBSERVATION_SHAPES and value.shape[1:] != _OBSERVATION_SHAPES[name]:
-                raise ValueError(f"Policy history {name} requires trailing shape {_OBSERVATION_SHAPES[name]}")
-            if name in POINT_CLOUD_FIELDS:
-                if value.ndim != 3 or value.shape[1] == 0:
-                    raise ValueError(f"{name} requires shape (T, N>0, C)")
-                channels = self.agent.normalization_dims[name]
-                if value.shape[-1] < channels:
-                    raise ValueError(f"{name} has fewer channels than the saved input recipe")
-                value = value[..., :channels]
-            if name == "rgb":
-                if value.ndim != 4 or value.shape[-1] != 3 or min(value.shape[1:3]) == 0 or value.dtype != np.uint8:
-                    raise ValueError("RGB input requires shape (T, H, W, 3) and dtype uint8")
-                tensor = preprocess_rgb_eval(_contiguous_numpy(value), **self.info.rgb_preprocessing)
-                tensors[name] = tensor.unsqueeze(0).to(self.generator.device)
-            else:
-                tensors[name] = self._prepare_numeric_tensor(
-                    value, f"policy observation after preprocessing: {name}",
-                )
-
-        return tensors
 
     def _prepare_rtc(self, rtc_prefix, delay_steps, rtc_guidance_cap):
         if rtc_prefix is None:
@@ -93,27 +53,22 @@ class PolicyRuntime:
         ):
             raise ValueError("Invalid physical RTC prefix")
         return {
-            "rtc_prefix": self._prepare_numeric_tensor(prefix, "physical RTC prefix"),
+            "rtc_prefix": prepare_numeric_tensor(prefix, device=self.generator.device, label="physical RTC prefix"),
             "delay_steps": delay_steps,
             "rtc_guidance_cap": rtc_guidance_cap,
         }
 
     def predict(self, observation, *, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
-        import torch
-
-        tensors = self.prepare_observations(observation)
+        tensors = prepare_observations(
+            observation, normalization_dims=self.agent.normalization_dims,
+            n_obs_steps=self.agent.n_obs_steps, rgb_preprocessing=self.info.rgb_preprocessing,
+            device=self.generator.device,
+        )
         kwargs = self._prepare_rtc(rtc_prefix, delay_steps, rtc_guidance_cap)
-
-        with torch.inference_mode(), torch.autocast(device_type=self.generator.device.type, enabled=False):
-            result = self.agent.predict_action(
-                tensors, inference_steps=self.info.inference_steps, generator=self.generator, **kwargs
-            )
-
-        # Return the full physical future window, excluding auxiliary predictions.
-        prediction = result["future_actions"][0].to(device="cpu", dtype=torch.float64).numpy()
-        if not np.isfinite(prediction).all():
-            raise ValueError("Nonfinite physical policy prediction")
-        return np.ascontiguousarray(prediction)
+        return predict_actions(
+            self.agent, tensors, inference_steps=self.info.inference_steps,
+            generator=self.generator, **kwargs,
+        )
 
     def warmup(self, observation, *, rtc_delay=0, rtc_guidance_cap=None):
         if rtc_guidance_cap is not None and (

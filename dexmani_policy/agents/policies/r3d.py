@@ -47,7 +47,7 @@ class R3DEncoder(nn.Module):
 
 
 class R3D(Policy):
-    supported_execution_modes = ("sync", "async", "rtc")
+    supports_rtc = True
     joint_dim = 19
     ee_dim = 9
 
