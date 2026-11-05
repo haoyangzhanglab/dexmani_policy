@@ -18,7 +18,6 @@ class PolicyInfo:
     checkpoint_path: Path
     weights: str
     inference_steps: int
-    policy_name: str
     task_name: str
     observation_fields: tuple[str, ...]
     n_obs_steps: int
@@ -48,7 +47,6 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         checkpoint_path=path,
         weights=weights,
         inference_steps=inference_steps,
-        policy_name=cfg["policy_name"],
         task_name=cfg["task_name"],
         observation_fields=fields,
         n_obs_steps=agent.n_obs_steps,

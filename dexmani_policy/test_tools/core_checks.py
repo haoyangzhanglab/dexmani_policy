@@ -12,6 +12,7 @@ import zarr
 
 from dexmani_policy.common.config import set_project_root
 from dexmani_policy.deployment import load_policy
+from dexmani_policy.deployment.metadata import policy_info
 from dexmani_policy.test_tools.smoke_test import run_smoke
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import build_dataset, fit_normalizer
@@ -81,6 +82,15 @@ def main(argv=None):
         # Deployment must use the checkpoint alone, including its fitted affine.
         shutil.rmtree(root / "source.zarr")
         with closing(load_policy(run, device=args.device)) as runtime:
+            info = policy_info(
+                runtime.info.checkpoint_path,
+                {"task_name": cfg.task_name, "action_key": cfg.action_key},
+                runtime.agent, weights=runtime.info.weights,
+                inference_steps=runtime.info.inference_steps,
+            )
+            snapshot = info.to_dict()
+            assert "policy_name" not in snapshot
+            assert snapshot == runtime.info.to_dict()
             torch.testing.assert_close(
                 runtime.agent.normalizer.state_dict(), normalizer_state, rtol=0, atol=0, check_device=False,
             )

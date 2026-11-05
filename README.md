@@ -85,4 +85,6 @@ runtime = load_policy("/path/to/checkpoints/latest.pt", weights="ema", device="c
 info = runtime.info
 ```
 
+`PolicyInfo` 保留部署使用的输入字段、动作表示、观测与预测长度、RTC 能力、控制周期和预处理参数；`task_name` 继续用于 Raw 任务标签。`policy_name` 仍用于训练配置、模型选择和 checkpoint，不进入 `PolicyInfo` 或 `to_dict()` 快照。
+
 `PolicyInfo.future_steps` 是物理未来动作长度，`supports_rtc` 表示模型的实际 RTC 能力；sync/async 由执行端调度。SimRunner 和部署共用观测准备与动作输出边界，`predict` 返回连续 NumPy `float32 [future_steps, control_action_dim]`，已反归一化并由模型裁掉历史及辅助维度；Sim 执行端再取前缀。RTC 接收同一物理表示的未消费前缀。`warmup(observation)` 只预测一次；传入 `rtc_guidance_cap` 时再使用首预测预热一次 RTC，cap=0 同样生效。预热恢复 RNG，不返回计时统计；调用方负责每段 `reset_episode()` 和最终 `close()`。
