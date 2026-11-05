@@ -142,7 +142,6 @@ def assemble_effective_config(cfg, data_description, model):
     with open_dict(effective):
         effective.pop("max_updates", None)
         effective.normalization_dims = model.normalization_dims
-        effective.pop("policy_metadata", None)
         effective.deployment_metadata = data_description["deployment_metadata"]
         effective.agent.update(model.effective_config)
     OmegaConf.resolve(effective)

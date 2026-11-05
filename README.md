@@ -76,12 +76,14 @@ python -m dexmani_policy.test_tools.smoke_test dp3 --device cpu \
 
 ## 真机部署接口
 
-`load_policy(POLICY, *, weights=None, inference_steps=None, device="cuda:0", seed=0)` 一次读取 checkpoint 并返回带 `.info` 的 runtime。接受 checkpoint 文件或实验目录；目录只读取 `checkpoints/latest.pt`。支持 `~`，相对路径基于调用时工作目录。weights 和 inference_steps 缺省时沿用保存配置。
+`load_policy(POLICY, *, weights=None, inference_steps=None, device="cuda:0", seed=0)` 一次读取 checkpoint 并返回带 `.info` 的 runtime。接受 checkpoint 文件或实验目录；目录只读取 `checkpoints/latest.pt`。支持 `~`，相对路径基于调用时工作目录。
+
+`weights` 和 `inference_steps` 分别优先使用显式参数；未提供时才读取 checkpoint 配置中的 `eval.use_ema` 和 `eval.inference_steps`。两者均显式提供时不要求保存 `eval`；需要的默认字段缺失时直接报错。`weights` 只接受 `"raw"` 或 `"ema"`，`inference_steps` 必须是正整数；选择 EMA 而 checkpoint 未保存 EMA 权重时也会报错。
 
 ```python
 from dexmani_policy.deployment import load_policy
 
-runtime = load_policy("/path/to/checkpoints/latest.pt", weights="ema", device="cuda:0", seed=0)
+runtime = load_policy("/path/to/checkpoints/latest.pt", weights="ema", inference_steps=10, device="cuda:0", seed=0)
 info = runtime.info
 ```
 

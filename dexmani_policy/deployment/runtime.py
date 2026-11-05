@@ -12,7 +12,7 @@ def load_policy(path, *, weights=None, inference_steps=None, device="cuda:0", se
     path = _resolve_checkpoint(path)
     checkpoint = load_checkpoint(path)
     cfg = checkpoint.effective_config
-    defaults = cfg["eval"]
+    defaults = cfg.get("eval", {})
     if weights is None:
         if type(defaults["use_ema"]) is not bool:
             raise ValueError("Saved use_ema must be boolean")
