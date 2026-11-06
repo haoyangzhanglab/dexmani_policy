@@ -60,7 +60,117 @@ class GlobalTransformerBlock(nn.Module):
         return tokens + self.ffn_gain.to(tokens.dtype) * self.ffn(self.norm2(tokens))
 
 
-class PointTransformerEncoder(nn.Module):
+class PointPatchEncoder(nn.Module):
+    """Encode local geometry and absolute position at FPS patch centers."""
+
+    def __init__(
+        self,
+        input_channels: int = 6,
+        channels: int = 192,
+        num_patches: int = 128,
+        group_size: int = 32,
+        geometry_scale: float = 0.10,
+        fps_random_config: dict | None = None,
+    ):
+        super().__init__()
+        self.effective_config = dict(
+            channels=channels, num_patches=num_patches, group_size=group_size,
+            geometry_scale=geometry_scale,
+        )
+        if input_channels not in (3, 6):
+            raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
+        sizes = (channels, num_patches, group_size)
+        if any(type(value) is not int or value <= 0 for value in sizes):
+            raise ValueError("sizes must be positive integers")
+        if not math.isfinite(geometry_scale) or geometry_scale <= 0:
+            raise ValueError("geometry_scale must be finite and positive")
+
+        self.input_channels = input_channels
+        self.channels = channels
+        self.num_patches = num_patches
+        self.group_size = group_size
+        self.fps_random_config = dict(fps_random_config or {})
+
+        self.patch_embedding = PointPatchEmbedding(input_channels, channels, geometry_scale)
+        self.position_embedding = build_mlp([3, 128, channels], normalize=False)
+
+    def encode_patches(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Sample once and encode local geometry and absolute position."""
+        xyz = pointcloud[..., :3].float().contiguous()
+        with torch.autocast(device_type=pointcloud.device.type, enabled=False):
+            centers, _, neighbors = sample_point_patches(
+                xyz,
+                self.num_patches,
+                self.group_size,
+                self.fps_random_config,
+                self.training,
+            )
+
+        relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)
+        attributes = index_points(pointcloud[..., 3 : self.input_channels], neighbors)
+        tokens = self.patch_embedding(relative_xyz, attributes)
+        # Preserve absolute metric position alongside relative geometry.
+        position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
+        tokens = tokens + position.to(tokens.dtype)
+        return {
+            "tokens": tokens,
+            "xyz": centers,
+            "neighbor_indices": neighbors,
+            "relative_xyz": relative_xyz,
+        }
+
+    def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
+        return self.encode_patches(pointcloud)
+
+    @property
+    def out_dim(self) -> int:
+        return self.channels
+
+
+def _encode_global(
+    tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+    blocks: nn.ModuleList, norm: nn.LayerNorm,
+) -> torch.Tensor:
+    for block in blocks:
+        tokens = block(tokens, cos, sin)
+    return norm(tokens)
+
+
+class GlobalPointTransformer(nn.Module):
+    """Contextualize spatial tokens using metric 3D RoPE."""
+
+    def __init__(
+        self, channels: int = 384, depth: int = 2, num_heads: int = 8,
+        mlp_ratio: float = 2.0, rope_scale: float = 0.05, rope_base: float = 100.0,
+    ):
+        super().__init__()
+        self.effective_config = dict(
+            channels=channels, depth=depth, num_heads=num_heads,
+            mlp_ratio=mlp_ratio, rope_scale=rope_scale, rope_base=rope_base,
+        )
+        if any(type(value) is not int or value <= 0 for value in (channels, depth, num_heads)):
+            raise ValueError("sizes must be positive integers")
+        if channels % num_heads:
+            raise ValueError("channels must be divisible by num_heads")
+        if int(channels * mlp_ratio) < 1:
+            raise ValueError("mlp_ratio must produce a positive hidden dimension")
+        self.channels = channels
+        self.rope = RotaryPositionEmbedding3D(channels // num_heads, rope_scale, rope_base)
+        self.blocks = nn.ModuleList(
+            [GlobalTransformerBlock(channels, num_heads, mlp_ratio) for _ in range(depth)]
+        )
+        self.norm = nn.LayerNorm(channels)
+
+    def forward(self, tokens: torch.Tensor, xyz: torch.Tensor) -> torch.Tensor:
+        cos, sin = self.rope(xyz)
+        return _encode_global(tokens, cos, sin, self.blocks, self.norm)
+
+    @property
+    def out_dim(self) -> int:
+        return self.channels
+
+
+class PointTransformerEncoder(PointPatchEncoder):
     """Encode finite, unpadded metric point clouds into sparse contextual tokens."""
 
     def __init__(
@@ -77,74 +187,29 @@ class PointTransformerEncoder(nn.Module):
         rope_base: float = 100.0,
         fps_random_config: dict | None = None,
     ):
-        config = locals().copy()
-        super().__init__()
-        self.effective_config = {
-            key: value for key, value in config.items()
-            if key not in {"self", "input_channels", "fps_random_config", "__class__"}
-        }
-        if input_channels not in (3, 6):
-            raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
-        sizes = (channels, num_patches, group_size, depth, num_heads)
-        if any(type(value) is not int or value <= 0 for value in sizes):
-            raise ValueError("sizes must be positive integers")
-        if channels % num_heads:
-            raise ValueError("channels must be divisible by num_heads")
-        if int(channels * mlp_ratio) < 1:
-            raise ValueError("mlp_ratio must produce a positive hidden dimension")
-        if not math.isfinite(geometry_scale) or geometry_scale <= 0:
-            raise ValueError("geometry_scale must be finite and positive")
-
-        self.input_channels = input_channels
-        self.channels = channels
-        self.num_patches = num_patches
-        self.group_size = group_size
-        self.fps_random_config = dict(fps_random_config or {})
-
-        self.patch_embedding = PointPatchEmbedding(input_channels, channels, geometry_scale)
-        self.position_embedding = build_mlp([3, 128, channels], normalize=False)
-        self.rope = RotaryPositionEmbedding3D(channels // num_heads, rope_scale, rope_base)
-        self.blocks = nn.ModuleList(
-            [GlobalTransformerBlock(channels, num_heads, mlp_ratio) for _ in range(depth)]
+        super().__init__(
+            input_channels=input_channels, channels=channels, num_patches=num_patches,
+            group_size=group_size, geometry_scale=geometry_scale,
+            fps_random_config=fps_random_config,
         )
-        self.norm = nn.LayerNorm(channels)
+        global_encoder = GlobalPointTransformer(
+            channels, depth, num_heads, mlp_ratio, rope_scale, rope_base,
+        )
+        self.effective_config.update(global_encoder.effective_config)
+        # Keep the original flat parameter paths for pure point-cloud checkpoints.
+        self.rope = global_encoder.rope
+        self.blocks = global_encoder.blocks
+        self.norm = global_encoder.norm
 
     def encode_global(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         """Apply global attention to tokens with shared spatial RoPE."""
-        for block in self.blocks:
-            tokens = block(tokens, cos, sin)
-        return self.norm(tokens)
+        return _encode_global(tokens, cos, sin, self.blocks, self.norm)
 
     def encode_patches(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Sample once and encode local geometry, absolute position and shared 3D RoPE."""
-        xyz = pointcloud[..., :3].float().contiguous()
-        with (
-            torch.no_grad(),
-            torch.autocast(device_type=pointcloud.device.type, enabled=False),
-        ):
-            centers, _, neighbors = sample_point_patches(
-                xyz,
-                self.num_patches,
-                self.group_size,
-                self.fps_random_config,
-                self.training,
-            )
-            cos, sin = self.rope(centers)
-
-        relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)
-        attributes = index_points(pointcloud[..., 3 : self.input_channels], neighbors)
-        tokens = self.patch_embedding(relative_xyz, attributes)
-        # Preserve absolute metric position as content alongside relative geometry/RoPE.
-        position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
-        tokens = tokens + position.to(tokens.dtype)
-        return {
-            "tokens": tokens,
-            "xyz": centers,
-            "neighbor_indices": neighbors,
-            "relative_xyz": relative_xyz,
-            "rope_cos": cos,
-            "rope_sin": sin,
-        }
+        patches = super().encode_patches(pointcloud)
+        with torch.no_grad():
+            patches["rope_cos"], patches["rope_sin"] = self.rope(patches["xyz"])
+        return patches
 
     def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
         patches = self.encode_patches(pointcloud)
@@ -152,7 +217,3 @@ class PointTransformerEncoder(nn.Module):
             "tokens": self.encode_global(patches["tokens"], patches["rope_cos"], patches["rope_sin"]),
             "xyz": patches["xyz"],
         }
-
-    @property
-    def out_dim(self) -> int:
-        return self.channels

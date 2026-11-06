@@ -5,50 +5,50 @@ from typing import NamedTuple
 import torch
 
 
-class PointProjection(NamedTuple):
-    """align_corners=False grids [BT,N,2] and FP32 confidence [BT,N]."""
+class ImageProjection(NamedTuple):
+    """FP32 align_corners=False grids [BT,N,2] and Bool validity [BT,N]."""
 
     grid_xy: torch.Tensor
-    confidence: torch.Tensor
+    valid: torch.Tensor
 
 
 @torch.no_grad()
-def projection_from_pixels(
-    pixels: torch.Tensor, confidence: torch.Tensor, image_hw: tuple[int, int]
-) -> PointProjection:
+def pixels_to_grid(
+    pixels: torch.Tensor, valid: torch.Tensor, image_hw: tuple[int, int]
+) -> ImageProjection:
     """Normalize pixel centers to FP32 grids with support in [-1,1)."""
     height, width = image_hw
     if min(height, width) <= 0:
         raise ValueError("image dimensions must be positive (height, width)")
 
     with torch.autocast(device_type=pixels.device.type, enabled=False):
-        pixels, confidence = pixels.float(), confidence.float()
+        pixels = pixels.float()
         size = pixels.new_tensor((width, height))
         valid = (
             ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1)
-            & torch.isfinite(confidence)
+            & valid
         )
         grid = (pixels + 0.5).div_(size).mul_(2).sub_(1)
         # A valid pixel just inside the right edge can round to exactly +1.
         grid.clamp_(-1, 1 - torch.finfo(torch.float32).eps / 2)
-        return PointProjection(
+        return ImageProjection(
             torch.where(valid[..., None], grid, 0.0),
-            torch.where(valid, confidence.clamp(0, 1), 0.0),
+            valid,
         )
 
 
 @torch.no_grad()
-def project_points(
-    points_source: torch.Tensor,
+def project_to_image(
+    points_world: torch.Tensor,
     intrinsics: torch.Tensor,
-    T_camera_from_source: torch.Tensor,
+    T_camera_from_world: torch.Tensor,
     image_transform: torch.Tensor,
     image_hw: tuple[int, int],
-) -> PointProjection:
-    """Project source-frame XYZ [BT,N,3] through cameras [BT,...] into FP32 grids."""
-    with torch.autocast(device_type=points_source.device.type, enabled=False):
-        points = points_source.float()
-        transform = T_camera_from_source.float()
+) -> ImageProjection:
+    """Project world XYZ [BT,N,3] through OpenCV cameras into the processed image."""
+    with torch.autocast(device_type=points_world.device.type, enabled=False):
+        points = points_world.float()
+        transform = T_camera_from_world.float()
         # Explicit FP32 products avoid TF32 rounding at image boundaries.
         camera = (points[:, :, None, :] * transform[..., None, :3, :3]).sum(-1)
         camera.add_(transform[..., None, :3, 3])
@@ -72,5 +72,4 @@ def project_points(
             & (depth > 0)
             & (denominator[..., 0] != 0)
         )
-        weight = valid.float()
-        return projection_from_pixels(pixels, weight, image_hw)
+        return pixels_to_grid(pixels, valid, image_hw)

@@ -28,8 +28,6 @@ class DexLatent(Policy):
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
-        fusion_stage: str = "post_global",
-        semantic_pool_sigma: float | None = None,
         n_layers: int = 8,
         hidden_dim: int = 256,
         n_head: int = 8,
@@ -52,8 +50,6 @@ class DexLatent(Policy):
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
             rgb_backbone_name=rgb_backbone_name,
-            fusion_stage=fusion_stage,
-            semantic_pool_sigma=semantic_pool_sigma,
         )
         backbone = DiTX(
             horizon=horizon,

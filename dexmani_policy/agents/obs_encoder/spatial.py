@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import math
 from typing import Literal
 
 import torch
 from torch import nn
 
-from .pointcloud.feature_alignment import FeatureAlignment
+from .pointcloud.camera_projection import project_to_image
 from .pointcloud.ops import preprocess_point_cloud
-from .pointcloud.point_transformer import PointTransformerEncoder
-from .pointcloud.projection import project_points
+from .pointcloud.point_transformer import GlobalPointTransformer, PointPatchEncoder
+from .pointcloud.rgb_patch_fusion import RGBPatchFusion
 from .proprio import StateEncoder
 from .rgb.build import build_rgb_encoder
 
@@ -29,21 +28,11 @@ class SpatialObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
-        fusion_stage: str = "post_global",
-        semantic_pool_sigma: float | None = None,
     ) -> None:
         super().__init__()
-        if fusion_stage not in {"post_global", "pre_global"}:
-            raise ValueError("fusion_stage must be post_global or pre_global")
-        if semantic_pool_sigma is not None and (
-            not math.isfinite(semantic_pool_sigma) or semantic_pool_sigma <= 0
-        ):
-            raise ValueError("semantic_pool_sigma must be None or finite and positive")
         self.num_points = num_points
         self.n_obs_steps = n_obs_steps
         self.rgb_backbone_name = rgb_backbone_name
-        self.fusion_stage = fusion_stage
-        self.semantic_pool_sigma = semantic_pool_sigma
 
         fps_config = {
             "use_random": True, "use_random_start": True,
@@ -55,12 +44,21 @@ class SpatialObservationEncoder(nn.Module):
             **(rgb_backbone_config or {}),
         }
 
-        self.pc_encoder = PointTransformerEncoder(
-            input_channels=pc_dim, fps_random_config=fps_config, **(pc_encoder_config or {}),
+        patch_config = dict(pc_encoder_config or {})
+        global_config = {
+            key: patch_config.pop(key)
+            for key in ("depth", "num_heads", "mlp_ratio", "rope_scale", "rope_base")
+            if key in patch_config
+        }
+        self.patch_encoder = PointPatchEncoder(
+            input_channels=pc_dim, fps_random_config=fps_config, **patch_config,
         )
         self.rgb_encoder, self.image_processor = build_rgb_encoder(rgb_backbone_name, rgb_config)
-        self.alignment = FeatureAlignment(self.rgb_encoder.out_dim, self.pc_encoder.out_dim)
-        self.spatial_projection = nn.Linear(self.pc_encoder.out_dim, self.out_dim)
+        self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
+        self.global_encoder = GlobalPointTransformer(
+            channels=2 * self.patch_encoder.out_dim, **global_config,
+        )
+        self.output_projection = nn.Linear(self.global_encoder.out_dim, self.out_dim)
         self.state_encoder = StateEncoder(state_dim, self.out_dim)
 
         self.modality_embedding = nn.Parameter(torch.empty(1, 2, self.out_dim))
@@ -70,48 +68,39 @@ class SpatialObservationEncoder(nn.Module):
     @property
     def effective_config(self) -> dict:
         return {
-            "pc_encoder_config": self.pc_encoder.effective_config,
-            "fps_random_config": self.pc_encoder.fps_random_config,
+            "pc_encoder_config": {
+                **self.global_encoder.effective_config, **self.patch_encoder.effective_config,
+            },
+            "fps_random_config": self.patch_encoder.fps_random_config,
             "rgb_backbone_name": self.rgb_backbone_name,
             "rgb_backbone_config": {
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
             },
-            "fusion_stage": self.fusion_stage,
-            "semantic_pool_sigma": self.semantic_pool_sigma,
         }
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         points = preprocess_point_cloud(
             obs["point_cloud"], self.num_points,
-            self.pc_encoder.fps_random_config, training=self.training,
+            self.patch_encoder.fps_random_config, training=self.training,
         )
-        patches = self.pc_encoder.encode_patches(points)
+        patches = self.patch_encoder(points)
 
         rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
+        # Sampling coordinates assume the patch grid covers the whole processed image.
+        if any(size % self.rgb_encoder.patch_size for size in rgb.shape[-2:]):
+            raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
         patch_grid = tuple(size // self.rgb_encoder.patch_size for size in rgb.shape[-2:])
         image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
-        projection = project_points(
-            points[..., :3], obs["camera_intrinsic"].reshape(-1, 3, 3),
+        projection = project_to_image(
+            patches["xyz"], obs["camera_intrinsic"].reshape(-1, 3, 3),
             obs["camera_extrinsic"].reshape(-1, 3, 4),
             image_transform, (rgb.shape[-2], rgb.shape[-1]),
         )
 
-        member_weight = None
-        if self.semantic_pool_sigma is not None:
-            with torch.no_grad():
-                distance_squared = patches["relative_xyz"].float().square().sum(-1)
-                member_weight = torch.exp(-distance_squared / (2 * self.semantic_pool_sigma**2))
+        tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
+        tokens = self.global_encoder(tokens, patches["xyz"])
 
-        tokens = patches["tokens"]
-        if self.fusion_stage == "post_global":
-            tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
-        tokens = self.alignment(
-            tokens, image_grid, projection, patches["neighbor_indices"], member_weight=member_weight,
-        )
-        if self.fusion_stage == "pre_global":
-            tokens = self.pc_encoder.encode_global(tokens, patches["rope_cos"], patches["rope_sin"])
-
-        spatial = self.spatial_projection(tokens)
+        spatial = self.output_projection(tokens)
         state = self.state_encoder(obs["joint_state"]).unsqueeze(1)
         spatial = spatial + self.modality_embedding[:, :1].to(spatial.dtype)
         state = state + self.modality_embedding[:, 1:].to(state.dtype)

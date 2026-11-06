@@ -60,9 +60,6 @@ agent:
     tune_mode: freeze
     image_size: [224, 224]
 
-  fusion_stage: pre_global
-  semantic_pool_sigma: 0.04
-
   n_layers: 6
   hidden_dim: 768
   n_head: 8
