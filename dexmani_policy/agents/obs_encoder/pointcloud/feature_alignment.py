@@ -5,8 +5,8 @@ import math
 import torch
 from torch import nn
 
-from .projection import PointProjection
 from .ops import index_points
+from .projection import PointProjection
 
 
 @torch.no_grad()
@@ -44,13 +44,8 @@ def build_patch_correspondence(
             ((1 - dx) * (1 - dy), dx * (1 - dy), (1 - dx) * dy, dx * dy),
             dim=-1,
         )
-        supported_confidence = confidence * bilinear.sum(-1)
-        reliability = supported_confidence
-        active = (supported_confidence > 0).to(bilinear.dtype)
-        mass = active[..., None] * bilinear  # [BT,N,4]
-        total_mass = mass.sum(dim=-1, keepdim=True)
-        point_weight = mass / torch.where(total_mass > 0, total_mass, 1)
-        point_valid = total_mass[..., 0] > 0
+        # Bilinear corner weights sum to one, including clamped image borders.
+        point_valid = confidence > 0
         member_valid = index_points(point_valid, neighbor_idx)
         if member_weight is None:
             supported = member_valid.float()
@@ -67,11 +62,11 @@ def build_patch_correspondence(
             coverage = count / torch.where(total > 0, total, 1)
 
         member_prior = supported / torch.where(count > 0, count, 1)[..., None]
-        member_confidence = index_points(reliability, neighbor_idx)
+        member_confidence = index_points(confidence, neighbor_idx)
         quality_confidence = (member_confidence * member_prior).sum(-1)
 
         member_idx = index_points(token_idx, neighbor_idx)
-        member_edges = index_points(point_weight, neighbor_idx)
+        member_edges = index_points(bilinear, neighbor_idx)
         pool_weight = coordinates.new_zeros(batch, neighbor_idx.shape[1], grid_h * grid_w)
         # Scatter accumulates repeated corners/members without [BT,M,K,Di] features.
         pool_weight.scatter_add_(
@@ -119,7 +114,7 @@ class FeatureAlignment(nn.Module):
         *,
         member_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Fuse a uniform image grid with tokens; projection/neighbors share Sparse3D point order."""
+        """Fuse a uniform image grid with tokens; projection/neighbors share the encoder input point order."""
         geometry = build_patch_correspondence(
             neighbor_idx,
             projection,

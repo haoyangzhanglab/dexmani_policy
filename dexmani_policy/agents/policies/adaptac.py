@@ -18,7 +18,7 @@ from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
     VisuoTactileAttention,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.point_transformer import PointTransformerEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
@@ -38,7 +38,7 @@ class AdapTacEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.num_points = num_points
-        self.pc_encoder = Sparse3DEncoder(
+        self.pc_encoder = PointTransformerEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
         self.visual_projection = nn.Linear(self.pc_encoder.out_dim, feature_dim)

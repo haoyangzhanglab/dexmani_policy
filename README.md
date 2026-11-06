@@ -50,6 +50,15 @@ python -m dexmani_policy.test_tools.core_checks
 
 使用 CUDA 时加 `--device cuda:0`。检查覆盖 DP3 的数据采样、归一化、短训练、保存恢复，以及删除原数据后的 checkpoint 加载与推理，并核对恢复的归一化参数。数据与训练产物均在临时目录中自动清理。
 
+共享 PointTransformerEncoder 的前向、反向、空间对齐、FPS 行为及五个调用策略的接口检查：
+
+```bash
+python -m dexmani_policy.test_tools.point_transformer_checks --device cpu
+python -m dexmani_policy.test_tools.point_transformer_checks --device cuda:0
+```
+
+检查使用真实 PyTorch3D 算子及合成输入，核对 Hydra 合成配置与模型默认值，并以 `grid_sample` 对照 RGB 邻域聚合数值和无图像支持时的行为。RGB 和动作网络使用缩小的真实结构，无需预训练权重；CUDA 检查同时覆盖编码器 BF16 autocast。
+
 对已有示教数据，可使用指定配置做短训练与恢复检查，默认先训练 4 步，再恢复训练至多 2 步（不超过配置的训练总步数）：
 
 ```bash

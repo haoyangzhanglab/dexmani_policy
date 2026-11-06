@@ -1,4 +1,4 @@
-"""Sparse, spatially anchored 3D tokens from points in a common metric frame."""
+"""Lightweight, spatially anchored 3D tokens from points in a common metric frame."""
 
 from __future__ import annotations
 
@@ -14,53 +14,19 @@ from .ops import index_points, sample_point_patches
 from .rope import RotaryPositionEmbedding3D
 
 
-class GeometricPatchEmbedding(nn.Module):
-    """Member features, Gaussian pooling on shared kNN support, and geometric moments."""
-
+class PointPatchEmbedding(nn.Module):
     def __init__(self, input_channels: int, channels: int, geometry_scale: float):
         super().__init__()
         self.geometry_scale = geometry_scale
-        self.register_buffer("wavelengths", torch.logspace(math.log10(0.02), math.log10(0.32), 8))
-        self.register_buffer("pool_sigmas", torch.tensor([0.04, 0.12]))
-        self.member_mlp = build_mlp([input_channels + 1 + 48, 64, 128], activate_last=True)
-        # Max, two weighted means, covariance upper triangle, and patch radius.
-        self.projection = build_mlp([3 * 128 + 7, channels, channels])
+        self.point_mlp = build_mlp([input_channels, 64, 64], activate_last=True)
+        self.projection = nn.Linear(64, channels)
 
-    def forward(self, relative_xyz: torch.Tensor, attributes: torch.Tensor):
-        # Geometry, phases, moments and weighted sums accumulate in FP32.
-        with torch.autocast(device_type=relative_xyz.device.type, enabled=False):
-            relative_xyz = relative_xyz.float()
-            scaled = relative_xyz / self.geometry_scale
-            distance = torch.linalg.vector_norm(relative_xyz, dim=-1, keepdim=True)
-            angles = relative_xyz.unsqueeze(-1) * (2 * math.pi / self.wavelengths.float())
-            fourier = torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(-2)
-            features = torch.cat(
-                (scaled, distance / self.geometry_scale, fourier, attributes.float()),
-                dim=-1,
-            )
-
-            weights = (-0.5 * (distance / self.pool_sigmas.float()).square()).softmax(dim=2)
-
-            centered = scaled - scaled.mean(dim=2, keepdim=True)
-            covariance = centered.transpose(-1, -2) @ centered / centered.size(2)
-            covariance = torch.stack(
-                tuple(
-                    covariance[..., i, j]
-                    for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
-                ),
-                dim=-1,
-            )
-            radius = distance.amax(dim=2)
-            moments = torch.cat((covariance, radius / self.geometry_scale), dim=-1)
-
-        member = self.member_mlp(features.to(self.member_mlp[0].weight.dtype))
-
-        with torch.autocast(device_type=member.device.type, enabled=False):
-            weighted = torch.einsum("bmks,bmkd->bmsd", weights, member.float()).flatten(-2)
-            # Concatenate in FP32 to avoid mixed-dtype addmm in Torch 2.4 Inductor.
-            pooled = torch.cat((member.amax(dim=2).float(), weighted, moments), dim=-1)
-
-        return self.projection(pooled.to(member.dtype))
+    def forward(self, relative_xyz: torch.Tensor, attributes: torch.Tensor) -> torch.Tensor:
+        points = torch.cat(
+            (relative_xyz.float() / self.geometry_scale, attributes.float()), dim=-1,
+        )
+        features = self.point_mlp(points.to(self.point_mlp[0].weight.dtype))
+        return self.projection(features.amax(dim=2))
 
 
 class GlobalTransformerBlock(nn.Module):
@@ -81,7 +47,7 @@ class GlobalTransformerBlock(nn.Module):
         self.attention_gain = nn.Parameter(torch.full((channels,), 0.1))
         self.ffn_gain = nn.Parameter(torch.full((channels,), 0.1))
 
-    def forward(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         b, m, d = tokens.shape
         qkv = self.qkv(self.norm1(tokens)).reshape(b, m, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
@@ -94,16 +60,16 @@ class GlobalTransformerBlock(nn.Module):
         return tokens + self.ffn_gain.to(tokens.dtype) * self.ffn(self.norm2(tokens))
 
 
-class Sparse3DEncoder(nn.Module):
+class PointTransformerEncoder(nn.Module):
     """Encode finite, unpadded metric point clouds into sparse contextual tokens."""
 
     def __init__(
         self,
         input_channels: int = 6,
-        channels: int = 384,
-        num_patches: int = 96,
+        channels: int = 192,
+        num_patches: int = 128,
         group_size: int = 32,
-        depth: int = 4,
+        depth: int = 2,
         num_heads: int = 8,
         mlp_ratio: float = 2.0,
         geometry_scale: float = 0.10,
@@ -124,8 +90,6 @@ class Sparse3DEncoder(nn.Module):
             raise ValueError("sizes must be positive integers")
         if channels % num_heads:
             raise ValueError("channels must be divisible by num_heads")
-        if (channels // num_heads) % 6:
-            raise ValueError("channels // num_heads must be divisible by 6")
         if int(channels * mlp_ratio) < 1:
             raise ValueError("mlp_ratio must produce a positive hidden dimension")
         if not math.isfinite(geometry_scale) or geometry_scale <= 0:
@@ -137,7 +101,7 @@ class Sparse3DEncoder(nn.Module):
         self.group_size = group_size
         self.fps_random_config = dict(fps_random_config or {})
 
-        self.patch_embedding = GeometricPatchEmbedding(input_channels, channels, geometry_scale)
+        self.patch_embedding = PointPatchEmbedding(input_channels, channels, geometry_scale)
         self.position_embedding = build_mlp([3, 128, channels], normalize=False)
         self.rope = RotaryPositionEmbedding3D(channels // num_heads, rope_scale, rope_base)
         self.blocks = nn.ModuleList(
@@ -145,8 +109,8 @@ class Sparse3DEncoder(nn.Module):
         )
         self.norm = nn.LayerNorm(channels)
 
-    def encode_global(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-        """Compile global attention; keep sampling and local feature extraction eager."""
+    def encode_global(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        """Apply global attention to tokens with shared spatial RoPE."""
         for block in self.blocks:
             tokens = block(tokens, cos, sin)
         return self.norm(tokens)

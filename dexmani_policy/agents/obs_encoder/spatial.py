@@ -10,8 +10,8 @@ from torch import nn
 
 from .pointcloud.feature_alignment import FeatureAlignment
 from .pointcloud.ops import preprocess_point_cloud
+from .pointcloud.point_transformer import PointTransformerEncoder
 from .pointcloud.projection import project_points
-from .pointcloud.sparse3d_encoder import Sparse3DEncoder
 from .proprio import StateEncoder
 from .rgb.build import build_rgb_encoder
 
@@ -50,14 +50,13 @@ class SpatialObservationEncoder(nn.Module):
             "use_shuffle_output": False,
             **(fps_random_config or {}),
         }
-        pc_config = {"channels": 192, "depth": 2, "num_heads": 8, **(pc_encoder_config or {})}
         rgb_config = {
             "tune_mode": "freeze",
             **(rgb_backbone_config or {}),
         }
 
-        self.pc_encoder = Sparse3DEncoder(
-            input_channels=pc_dim, fps_random_config=fps_config, **pc_config,
+        self.pc_encoder = PointTransformerEncoder(
+            input_channels=pc_dim, fps_random_config=fps_config, **(pc_encoder_config or {}),
         )
         self.rgb_encoder, self.image_processor = build_rgb_encoder(rgb_backbone_name, rgb_config)
         self.alignment = FeatureAlignment(self.rgb_encoder.out_dim, self.pc_encoder.out_dim)

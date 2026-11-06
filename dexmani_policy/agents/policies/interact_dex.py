@@ -15,7 +15,7 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_interaction import (
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.scene_tokenizer import SceneTokenizer
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.point_transformer import PointTransformerEncoder
 from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
 from dexmani_policy.agents.policies.base import Policy, parameter_groups
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, validate_future_force_horizons
@@ -42,7 +42,7 @@ class InterActDexEncoder(nn.Module):
         super().__init__()
         self.n_obs_steps = n_obs_steps
         self.num_points = num_points
-        self.pc_encoder = Sparse3DEncoder(
+        self.pc_encoder = PointTransformerEncoder(
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
         self.scene_tokenizer = SceneTokenizer(

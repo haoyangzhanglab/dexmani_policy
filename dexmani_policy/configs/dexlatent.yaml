@@ -46,7 +46,7 @@ agent:
 
   pc_encoder_config:
     channels: 192
-    num_patches: 96
+    num_patches: 128
     group_size: 32
     depth: 2
     num_heads: 8
