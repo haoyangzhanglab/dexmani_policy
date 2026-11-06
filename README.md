@@ -59,6 +59,14 @@ python -m dexmani_policy.test_tools.point_transformer_checks --device cuda:0
 
 检查使用真实 PyTorch3D 算子及合成输入，核对 Hydra 合成配置与模型默认值，并验证相机投影、Patch Center 双线性采样、无效语义置零和梯度。策略检查使用缩小的真实 RGB/动作网络，另检查默认 DINOv2-Small 的 token shape，无需预训练权重；覆盖 YAML/Hydra 构建、训练有效配置组装和包含归一化状态的 checkpoint 严格保存恢复，CUDA 检查同时覆盖融合编码器 BF16 autocast。
 
+本地标定数据的 Patch Center 投影可视化（需要 Matplotlib 及 SAT 配置所指的 DINOv2 架构 config.json，不加载模型权重）：
+
+```bash
+python -m dexmani_policy.test_tools.visualize_patch_projection
+```
+
+默认读取 `robot_data/*.zarr`，每个任务抽取首、中、末三个回合的首、中、末帧，使用 eval 模式确定性的实际 FPS 中心。输出到 `outputs/patch_projection/`，包含 RGB 叠加图、224×224 特征网格图、逐中心 CSV 和统计 JSON。可用 `--datasets PATH ... --output DIR` 指定输入和输出。数据需要 RGB、XYZRGB 点云、相机标定、毫米深度和分割标签；标签在 RGB patch 足迹中的占比只衡量空间混合，不是 DINO 语义准确率或置信度。
+
 对已有示教数据，可使用指定配置做短训练与恢复检查，默认先训练 4 步，再恢复训练至多 2 步（不超过配置的训练总步数）：
 
 ```bash
