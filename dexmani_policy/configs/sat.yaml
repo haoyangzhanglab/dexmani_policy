@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# SAT 动作表示 + DiTX 的本地适配；保留共享 spatial observation 和标准 flow。
+# SAT 动作表示 + DiTX 的本地适配；保留共享 RGB–point observation 和标准 flow。
 
 policy_name: sat
 

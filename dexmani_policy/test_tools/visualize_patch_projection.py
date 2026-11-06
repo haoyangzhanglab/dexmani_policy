@@ -147,7 +147,7 @@ def main():
             frame = inspect_frame(root["data"], frame_id, encoder, processor, config, patch_size)
             ax = axes.flat[index]
             overlay(ax, frame)
-            ax.set_title(f"episode {episode}, frame {frame_id} | valid {frame['valid'].sum()}/128")
+            ax.set_title(f"episode {episode}, frame {frame_id} | valid {frame['valid'].sum()}/{len(frame['valid'])}")
             for patch in range(len(frame["valid"])):
                 row = dict(task=dataset.stem, episode=episode, frame=frame_id, patch=patch,
                            valid=bool(frame["valid"][patch]),

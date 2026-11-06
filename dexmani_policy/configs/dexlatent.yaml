@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# DexLatent：共享 spatial observation，普通 DiTX 预测 arm7 + frozen hand latent32。
+# DexLatent：共享 RGB–point observation，普通 DiTX 预测 arm7 + frozen hand latent32。
 
 policy_name: dexlatent
 

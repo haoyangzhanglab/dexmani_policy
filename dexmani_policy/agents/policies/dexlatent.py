@@ -7,7 +7,7 @@ import torch
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.dexlatent import DexLatentHandPrior
-from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
+from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
 
 
@@ -41,7 +41,7 @@ class DexLatent(Policy):
     ) -> None:
         if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DexLatent requires two observations and 19D joint actions/state")
-        obs_encoder = SpatialObservationEncoder(
+        obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=19,
             num_points=num_points,

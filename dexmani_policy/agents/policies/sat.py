@@ -5,7 +5,7 @@ from typing import Literal
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
-from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
+from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
 
 
@@ -39,7 +39,7 @@ class SAT(Policy):
     ) -> None:
         if n_obs_steps != 2 or action_dim != 19 or hidden_dim % 4:
             raise ValueError("SAT requires n_obs_steps=2, joint action_dim=19 and hidden_dim divisible by 4")
-        obs_encoder = SpatialObservationEncoder(
+        obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,

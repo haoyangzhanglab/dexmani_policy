@@ -57,7 +57,9 @@ python -m dexmani_policy.test_tools.point_transformer_checks --device cpu
 python -m dexmani_policy.test_tools.point_transformer_checks --device cuda:0
 ```
 
-检查使用真实 PyTorch3D 算子及合成输入，核对 Hydra 合成配置与模型默认值，并验证相机投影、Patch Center 双线性采样、无效语义置零和梯度。策略检查使用缩小的真实 RGB/动作网络，另检查默认 DINOv2-Small 的 token shape，无需预训练权重；覆盖 YAML/Hydra 构建、训练有效配置组装和包含归一化状态的 checkpoint 严格保存恢复，CUDA 检查同时覆盖融合编码器 BF16 autocast。
+检查使用真实 PyTorch3D 算子及合成输入，核对 Hydra 合成配置与模型默认值，并验证相机投影、Patch Center 双线性采样、无效语义置零和梯度。策略检查使用缩小的真实 RGB/动作网络，另检查默认 DINOv2-Small 的 token shape，无需预训练权重；覆盖 YAML/Hydra 构建、训练有效配置组装和包含归一化状态的 checkpoint 严格保存恢复。
+
+默认 RGB–Point 观测条件为 [B,258,384]，额外核对 Joint Token 的独立性、Frame-major 顺序和 DiTX 逐帧时间编码。三个 RGB–Point 策略均检查真实动作损失反传，以及训练后固定种子推理的严格恢复一致性；CUDA 检查同时覆盖融合编码器和策略反传的 BF16 autocast。
 
 本地标定数据的 Patch Center 投影可视化（需要 Matplotlib 及 SAT 配置所指的 DINOv2 架构 config.json，不加载模型权重）：
 

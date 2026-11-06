@@ -1,4 +1,4 @@
-"""Spatial observation tokens with aligned RGB semantics and proprioception."""
+"""RGB–point observation tokens with late joint-state conditioning."""
 
 from __future__ import annotations
 
@@ -15,9 +15,7 @@ from .proprio import StateEncoder
 from .rgb.build import build_rgb_encoder
 
 
-class SpatialObservationEncoder(nn.Module):
-    out_dim = 256
-
+class RGBPointObservationEncoder(nn.Module):
     def __init__(
         self,
         pc_dim: int = 3,
@@ -39,11 +37,6 @@ class SpatialObservationEncoder(nn.Module):
             "use_shuffle_output": False,
             **(fps_random_config or {}),
         }
-        rgb_config = {
-            "tune_mode": "freeze",
-            **(rgb_backbone_config or {}),
-        }
-
         patch_config = dict(pc_encoder_config or {})
         global_config = {
             key: patch_config.pop(key)
@@ -53,17 +46,17 @@ class SpatialObservationEncoder(nn.Module):
         self.patch_encoder = PointPatchEncoder(
             input_channels=pc_dim, fps_random_config=fps_config, **patch_config,
         )
-        self.rgb_encoder, self.image_processor = build_rgb_encoder(rgb_backbone_name, rgb_config)
+        self.rgb_encoder, self.image_processor = build_rgb_encoder(rgb_backbone_name, rgb_backbone_config)
         self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
         self.global_encoder = GlobalPointTransformer(
             channels=2 * self.patch_encoder.out_dim, **global_config,
         )
-        self.output_projection = nn.Linear(self.global_encoder.out_dim, self.out_dim)
-        self.state_encoder = StateEncoder(state_dim, self.out_dim)
+        self.out_dim = self.global_encoder.out_dim
+        self.joint_encoder = StateEncoder(state_dim, self.out_dim)
 
-        self.modality_embedding = nn.Parameter(torch.empty(1, 2, self.out_dim))
-        nn.init.normal_(self.modality_embedding, std=0.02)
-        self.output_norm = nn.LayerNorm(self.out_dim)
+        self.token_type_embedding = nn.Parameter(torch.empty(1, 2, self.out_dim))
+        nn.init.normal_(self.token_type_embedding, std=0.02)
+        self.token_norm = nn.LayerNorm(self.out_dim)
 
     @property
     def effective_config(self) -> dict:
@@ -98,11 +91,9 @@ class SpatialObservationEncoder(nn.Module):
         )
 
         tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
-        tokens = self.global_encoder(tokens, patches["xyz"])
-
-        spatial = self.output_projection(tokens)
-        state = self.state_encoder(obs["joint_state"]).unsqueeze(1)
-        spatial = spatial + self.modality_embedding[:, :1].to(spatial.dtype)
-        state = state + self.modality_embedding[:, 1:].to(state.dtype)
-        frames = self.output_norm(torch.cat((spatial, state), dim=1))
+        spatial = self.global_encoder(tokens, patches["xyz"])
+        joint = self.joint_encoder(obs["joint_state"]).unsqueeze(1)
+        spatial = spatial + self.token_type_embedding[:, :1].to(spatial.dtype)
+        joint = joint + self.token_type_embedding[:, 1:].to(joint.dtype)
+        frames = self.token_norm(torch.cat((spatial, joint), dim=1))
         return frames.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)

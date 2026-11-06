@@ -9,7 +9,7 @@ from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.codebook import (
     HandStateCodebook, validate_hand_coordinates,
 )
-from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
+from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
 
 
@@ -47,7 +47,7 @@ class DQRISE(Policy):
     ) -> None:
         if (n_obs_steps, action_dim) != (2, 19):
             raise ValueError("DQ-RISE requires n_obs_steps=2 and joint action=7+12")
-        obs_encoder = SpatialObservationEncoder(
+        obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,

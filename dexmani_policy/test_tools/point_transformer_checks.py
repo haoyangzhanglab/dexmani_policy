@@ -11,6 +11,7 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from transformers import Dinov2Config
 
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.obs_encoder.pointcloud.camera_projection import (
     ImageProjection, pixels_to_grid, project_to_image,
 )
@@ -20,13 +21,10 @@ from dexmani_policy.agents.obs_encoder.pointcloud.point_transformer import (
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.rgb_patch_fusion import RGBPatchFusion
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
-from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
+from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder
 from dexmani_policy.agents.policies.adaptac import AdapTac
-from dexmani_policy.agents.policies.dexlatent import DexLatent
-from dexmani_policy.agents.policies.dqrise import DQRISE
 from dexmani_policy.agents.policies.interact_dex import InterActDex
-from dexmani_policy.agents.policies.sat import SAT
 from dexmani_policy.common.checkpoint import (
     Checkpoint, load_checkpoint, policy_state_dict, restore_policy, save_checkpoint,
 )
@@ -216,11 +214,105 @@ def check_fusion(device):
     print(f"PASS RGB fusion/global: analytic sampling, masking, shapes, gradients, {precision}", flush=True)
 
 
-def make_obs(device, time, channels):
-    points = torch.rand(1, time, 1024, channels, device=device)
+def make_obs(device, time, channels, batch=1):
+    points = torch.rand(batch, time, 1024, channels, device=device)
     points[..., :2] = (points[..., :2] - 0.5) * 0.3
     points[..., 2] = points[..., 2] * 0.2 + 0.8
-    return dict(point_cloud=points, joint_state=torch.rand(1, time, 19, device=device))
+    return dict(point_cloud=points, joint_state=torch.rand(batch, time, 19, device=device))
+
+
+def make_rgb_obs(device, batch=1):
+    obs = make_obs(device, 2, 3, batch=batch)
+    obs.update(
+        rgb=torch.rand(batch, 2, 3, 56, 56, device=device),
+        camera_intrinsic=torch.tensor(
+            [[40., 0., 27.5], [0., 40., 27.5], [0., 0., 1.]], device=device,
+        ).expand(batch, 2, 3, 3).reshape(batch, 2, 9),
+        camera_extrinsic=torch.eye(3, 4, device=device).expand(batch, 2, 3, 4).reshape(batch, 2, 12),
+    )
+    return obs
+
+
+@torch.no_grad()
+def check_joint_and_temporal(device):
+    encoder = RGBPointObservationEncoder(rgb_backbone_config=dict(
+        image_size=[56, 56], architecture=Dinov2Config(
+            hidden_size=48, num_hidden_layers=1, num_attention_heads=4,
+            image_size=56, patch_size=14, mlp_ratio=2,
+        ).to_dict(),
+    )).to(device).eval()
+    obs = {key: value.flatten(0, 1) for key, value in make_rgb_obs(device, batch=2).items()}
+    captured = {}
+    def capture(name):
+        def hook(module, args, output):
+            captured[name] = output
+        return hook
+    hooks = [getattr(encoder, name).register_forward_hook(capture(name)) for name in (
+        'patch_encoder', 'rgb_fusion', 'global_encoder', 'joint_encoder', 'token_norm',
+    )]
+    output = encoder(obs)
+    for hook in hooks:
+        hook.remove()
+    assert encoder.out_dim == 384 and not hasattr(encoder, 'output_projection')
+    assert captured['patch_encoder']['tokens'].shape == (4, 128, 192)
+    assert captured['rgb_fusion'].shape == captured['global_encoder'].shape == (4, 128, 384)
+    assert captured['joint_encoder'].unsqueeze(1).shape == (4, 1, 384)
+    assert captured['token_norm'].shape == (4, 129, 384)
+    assert output.shape == (2, 258, 384)
+    frames = output.reshape(2, 2, 129, 384)
+    torch.testing.assert_close(frames.flatten(0, 1), captured['token_norm'], rtol=0, atol=0)
+    expected_joint = encoder.token_norm(
+        captured['joint_encoder'] + encoder.token_type_embedding[:, 1],
+    ).reshape(2, 2, 384)
+    torch.testing.assert_close(frames[:, :, -1], expected_joint)
+    for index in range(2):
+        one = encoder({key: value[2 * index:2 * index + 2] for key, value in obs.items()})
+        torch.testing.assert_close(one, output[index:index + 1])
+    changed_obs = {**obs, 'joint_state': obs['joint_state'].clone()}
+    changed_obs['joint_state'][1].add_(1.)
+    changed = encoder(changed_obs).reshape(2, 2, 129, 384)
+    torch.testing.assert_close(changed[:, :, :-1], frames[:, :, :-1], rtol=0, atol=0)
+    assert not torch.allclose(changed[0, 1, -1], frames[0, 1, -1])
+    torch.testing.assert_close(changed[0, 0], frames[0, 0], rtol=0, atol=0)
+    torch.testing.assert_close(changed[1], frames[1], rtol=0, atol=0)
+
+    model = DiTX(horizon=8, action_dim=19, n_obs_steps=2, obs_token_dim=encoder.out_dim,
+                 n_layers=1).to(device).eval()
+    assert model.context_embedder.in_features == 384 and model.context_embedder.out_features == 768
+    assert torch.count_nonzero(model.context_frame_pos_embed) == 0
+    projected = model.context_embedder(output).reshape(2, 2, 129, 768)
+    model.context_frame_pos_embed[:, 0].fill_(0.25)
+    model.context_frame_pos_embed[:, 1].fill_(-0.5)
+    context = model.embed_context(output).reshape(2, 2, 129, 768)
+    torch.testing.assert_close(context, projected + model.context_frame_pos_embed.unsqueeze(2))
+    model.context_frame_pos_embed[:, 1].add_(0.75)
+    changed = model.embed_context(output).reshape(2, 2, 129, 768)
+    torch.testing.assert_close(changed[:, 0], context[:, 0], rtol=0, atol=0)
+    torch.testing.assert_close(changed[:, 1], context[:, 1] + 0.75)
+    print('PASS RGB–point shapes, late joint conditioning, frame-major packing and DiTX temporal identity', flush=True)
+
+
+@torch.enable_grad()
+def check_policy_gradients(policy, obs, mixed):
+    policy.train()
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
+    batch = dict(obs=obs, action=torch.rand(1, 8, 19, device=obs['joint_state'].device) * 2 - 1)
+    # Zero-initialized output heads and AdaLN gates open through ordinary updates.
+    for step in range(3):
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast('cuda', dtype=torch.bfloat16) if mixed else nullcontext():
+            loss, _ = policy.compute_loss(batch, log_metrics=False)
+        assert torch.isfinite(loss)
+        loss.backward()
+        for module in (policy.obs_encoder.patch_encoder, policy.obs_encoder.rgb_fusion,
+                       policy.obs_encoder.global_encoder, policy.obs_encoder.joint_encoder,
+                       policy.obs_encoder.token_norm, policy.action_decoder.model.context_embedder):
+            gradients = [p.grad for p in module.parameters() if p.requires_grad]
+            assert all(g is not None and torch.isfinite(g).all() for g in gradients)
+            if step == 2:
+                assert any(g.abs().max() > 0 for g in gradients)
+        optimizer.step()
+    policy.eval()
 
 
 @torch.no_grad()
@@ -232,32 +324,39 @@ def check_policies(device):
     ).to_dict())
     base = dict(horizon=8, n_obs_steps=2, n_action_steps=2, action_dim=19)
     dit = dict(n_layers=1, hidden_dim=96, n_head=4, timestep_embed_dim=32)
-    for policy_class, extra in ((SAT, {}), (DQRISE, {'num_codes': 4}), (DexLatent, {})):
-        name = {SAT: "sat", DQRISE: "dqrise", DexLatent: "dexlatent"}[policy_class]
-        cfg = load_policy_config(name)
+    for name, extra in (('sat', {}), ('dqrise', {'num_codes': 4}), ('dexlatent', {})):
+        cfg = load_policy_config(name, ['horizon=8', 'n_action_steps=2'])
         with open_dict(cfg):
-            cfg.agent.update({**base, **dit, **extra, "rgb_backbone_config": rgb_config})
+            cfg.agent.update({**dit, **extra, "rgb_backbone_config": rgb_config})
         policy = hydra.utils.instantiate(cfg.agent, _convert_="all")
         feature_dims = dict(point_cloud=3, rgb=3, camera_intrinsic=9,
                             camera_extrinsic=12, joint_state=19, action=19)
         feature_shapes = {key: (width,) for key, width in feature_dims.items()}
         feature_shapes["rgb"] = (1, 1, 1)
+        if name == 'dexlatent':
+            feature_shapes['hand_latent'] = (32,)
         policy.configure_normalizer(feature_dims, feature_shapes)
+        if name == 'dqrise':
+            policy.hand_codebook.sorted_hand_poses.copy_(torch.linspace(-1., 1., 48).reshape(4, 12))
         # Nonidentity proprioception exercises restoration of saved affine values.
         policy.normalizer["joint_state"].scale.fill_(2.)
         policy.normalizer["joint_state"].offset.fill_(-0.5)
         policy = policy.to(device).eval()
-        obs = make_obs(device, 2, 3)
-        obs['rgb'] = torch.rand(1, 2, 3, 56, 56, device=device)
-        obs['camera_intrinsic'] = torch.tensor(
-            [[40., 0., 27.5], [0., 40., 27.5], [0., 0., 1.]], device=device,
-        ).expand(1, 2, 3, 3).reshape(1, 2, 9)
-        obs['camera_extrinsic'] = torch.eye(3, 4, device=device).expand(1, 2, 3, 4).reshape(1, 2, 12)
+        obs = make_rgb_obs(device)
+
+        def check_normalized_joint(module, args):
+            torch.testing.assert_close(args[0], (obs['joint_state'] * 2 - 0.5).flatten(0, 1))
+        hook = policy.obs_encoder.joint_encoder.register_forward_pre_hook(check_normalized_joint)
+        for mixed in ([False, True] if device.type == 'cuda' else [False]):
+            check_policy_gradients(policy, obs, mixed)
         condition = policy._encode_obs(obs)
-        assert condition.shape == (1, 258, 256) and torch.isfinite(condition).all()
+        prediction = policy.predict_action(obs, generator=torch.Generator(device=device).manual_seed(23))
+        hook.remove()
+        assert condition.shape == (1, 258, 384) and torch.isfinite(condition).all()
         encoder = policy.obs_encoder
         assert encoder.patch_encoder.out_dim == 192 and encoder.global_encoder.out_dim == 384
         assert not hasattr(encoder.patch_encoder, "blocks")
+        assert policy.action_decoder.model.context_embedder.in_features == encoder.out_dim == 384
         action_dim = getattr(policy, 'flow_action_dim', 19)
         action_input = torch.randn(1, 8, action_dim, device=device)
         time_input = torch.tensor([0.5], device=device)
@@ -266,6 +365,8 @@ def check_policies(device):
         with tempfile.TemporaryDirectory(prefix="fusion-checkpoint-") as directory:
             cfg.workspace.output_dir = directory
             effective = assemble_effective_config(cfg, {"deployment_metadata": {}}, policy)
+            assert effective.horizon == effective.agent.horizon == effective.dataset.horizon == policy.horizon
+            assert effective.n_action_steps == effective.agent.n_action_steps == policy.n_action_steps
             config = OmegaConf.to_container(effective, resolve=True)
             checkpoint = Checkpoint(
                 global_step=0, model_state=policy_state_dict(policy), ema_model_state=None,
@@ -275,13 +376,23 @@ def check_policies(device):
             path = save_checkpoint(Path(directory) / "model.pt", checkpoint)
             saved = load_checkpoint(path)
             restored = restore_policy(saved.effective_config, saved.model_state, device)
-            torch.testing.assert_close(restored.normalizer.state_dict(), policy.normalizer.state_dict())
+            assert restored.effective_config == policy.effective_config
+            torch.testing.assert_close(restored.state_dict(), policy.state_dict(), rtol=0, atol=0)
+            keys = saved.model_state.keys()
+            assert 'obs_encoder.token_type_embedding' in keys
+            assert any(key.startswith('obs_encoder.joint_encoder.') for key in keys)
+            assert not any(key.startswith('obs_encoder.' + old) for key in keys
+                           for old in ('output_projection.', 'state_encoder.', 'modality_embedding', 'output_norm.'))
             restored_condition = restored._encode_obs(obs)
             torch.testing.assert_close(restored_condition, condition)
             torch.testing.assert_close(
                 restored.action_decoder.model(action_input, time_input, restored_condition), output,
             )
-        print(f'PASS {policy_class.__name__}: fusion, observation/action forward, Hydra and strict checkpoint restore', flush=True)
+            torch.testing.assert_close(
+                restored.predict_action(obs, generator=torch.Generator(device=device).manual_seed(23)),
+                prediction, rtol=0, atol=0,
+            )
+        print(f'PASS {type(policy).__name__}: Hydra, normalization, action forward/backward, strict checkpoint and deterministic inference', flush=True)
 
     policy = InterActDex(
         **{**base, 'n_obs_steps': 4}, **dit, tactile_encoder=XHandForceEncoder(),
@@ -319,23 +430,19 @@ def check_policies(device):
 
 def check_rgb_gradients(device):
     for mode in ("freeze", "full"):
-        encoder = SpatialObservationEncoder(rgb_backbone_config=dict(
+        encoder = RGBPointObservationEncoder(rgb_backbone_config=dict(
             tune_mode=mode, image_size=[56, 56],
             architecture=Dinov2Config(hidden_size=48, num_hidden_layers=1,
                 num_attention_heads=4, image_size=56, patch_size=14, mlp_ratio=2).to_dict(),
         )).to(device).eval()
-        obs = make_obs(device, 2, 3)
-        obs.update(rgb=torch.rand(1, 2, 3, 56, 56, device=device),
-                   camera_intrinsic=torch.tensor([[40., 0., 27.5], [0., 40., 27.5], [0., 0., 1.]], device=device).expand(1, 2, 3, 3),
-                   camera_extrinsic=torch.eye(3, 4, device=device).expand(1, 2, 3, 4))
-        obs = {key: value.flatten(0, 1) for key, value in obs.items()}
+        obs = {key: value.flatten(0, 1) for key, value in make_rgb_obs(device).items()}
         context = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
         with context:
             output = encoder(obs)
             loss = (output * torch.randn_like(output)).float().mean()
         loss.backward()
         for module in (encoder.patch_encoder, encoder.rgb_fusion, encoder.global_encoder,
-                       encoder.output_projection, encoder.state_encoder):
+                       encoder.joint_encoder, encoder.token_norm):
             assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in module.parameters())
         rgb_gradients = [p.grad for p in encoder.rgb_encoder.parameters()]
         if mode == "freeze":
@@ -344,11 +451,11 @@ def check_rgb_gradients(device):
             assert any(g is not None and torch.isfinite(g).all() and g.abs().sum() > 0 for g in rgb_gradients)
     with torch.no_grad():
         encoder.image_processor.image_size = (56, 70)
-        assert encoder(obs).shape == (1, 258, 256)
+        assert encoder(obs).shape == (1, 258, 384)
         encoder.image_processor.image_size = (57, 56)
         with TestCase().assertRaisesRegex(ValueError, "divisible"):
             encoder(obs)
-    print("PASS spatial encoder: RGB gradients, rectangular grid, partial-patch rejection", flush=True)
+    print("PASS RGB–point encoder: RGB gradients, rectangular grid, partial-patch rejection", flush=True)
 
 
 @torch.no_grad()
@@ -357,12 +464,12 @@ def check_config_widths(device):
         hidden_size=384, num_hidden_layers=12, num_attention_heads=6,
         image_size=224, patch_size=14,
     ).to_dict())
-    encoder = SpatialObservationEncoder(rgb_backbone_config=rgb_config).to(device).eval()
+    encoder = RGBPointObservationEncoder(rgb_backbone_config=rgb_config).to(device).eval()
     rgb = torch.rand(2, 3, 224, 224, device=device)
     assert encoder.rgb_encoder(rgb)["patch_tokens"].shape == (2, 256, 384)
     custom = dict(channels=96, num_patches=64, group_size=16, depth=1, num_heads=4,
                   mlp_ratio=3., geometry_scale=0.2, rope_scale=0.1, rope_base=50.)
-    encoder = SpatialObservationEncoder(
+    encoder = RGBPointObservationEncoder(
         pc_encoder_config=custom, rgb_backbone_config=dict(architecture=Dinov2Config(
             hidden_size=48, num_hidden_layers=1, num_attention_heads=4,
         ).to_dict()),
@@ -371,7 +478,7 @@ def check_config_widths(device):
     assert encoder.patch_encoder.out_dim == 96 and encoder.global_encoder.out_dim == 192
     assert encoder.global_encoder.blocks[0].ffn[0].out_features == 576
     assert encoder.global_encoder.rope.scale == 0.1
-    clone = SpatialObservationEncoder(**encoder.effective_config).to(device).eval()
+    clone = RGBPointObservationEncoder(**encoder.effective_config).to(device).eval()
     clone.load_state_dict(encoder.state_dict(), strict=True)
     patches = encoder.patch_encoder(torch.rand(2, 1024, 3, device=device))
     assert patches["tokens"].shape == (2, 64, 96)
@@ -381,6 +488,11 @@ def check_config_widths(device):
                         torch.ones(2, 64, dtype=torch.bool, device=device)),
     )
     assert encoder.global_encoder(tokens, patches["xyz"]).shape == (2, 64, 192)
+    assert encoder.out_dim == encoder.joint_encoder.out_dim == 192
+    obs = {key: value.flatten(0, 1) for key, value in make_rgb_obs(device).items()}
+    output = encoder(obs)
+    assert output.shape == (1, 130, 192)
+    torch.testing.assert_close(clone(obs), output, rtol=0, atol=0)
     print("PASS default DINOv2-Small grid and nondefault config width reconstruction", flush=True)
 
 
@@ -397,6 +509,7 @@ def main():
     check_projection(device)
     check_fusion(device)
     check_rgb_gradients(device)
+    check_joint_and_temporal(device)
     check_policies(device)
 
 

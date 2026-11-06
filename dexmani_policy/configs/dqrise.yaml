@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# DQ-RISE：共享 dense observation，flow 预测 7 维手臂关节和 1 维连续码本索引。
+# DQ-RISE：共享 RGB–point observation，flow 预测 7 维手臂关节和 1 维连续码本索引。
 
 policy_name: dqrise
 
