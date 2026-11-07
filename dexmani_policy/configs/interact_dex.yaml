@@ -1,26 +1,28 @@
 defaults:
   - common
-  - tactile: force
   - _self_
 
 policy_name: interact-dex
 
 horizon: 16
-n_obs_steps: 4
-n_action_steps: 4
-future_force_horizons: [1, 2, 4]
+n_obs_steps: 3
+n_action_steps: 8
+future_force_horizon: ${n_action_steps}
 
 normalization:
   point_cloud: identity
   eef_pose: identity
   fingertip_xyz: identity
   joint_state: limits
+  finger_tactile_force: identity
 
 dataloader:
   batch_size: 128
   drop_last: true
 
 dataset:
+  _target_: dexmani_policy.datasets.variants.tactile.InterActDexDataset
+  future_force_horizon: ${future_force_horizon}
   sensor_modalities: [joint_state, point_cloud, eef_pose, fingertip_xyz, finger_tactile_force]
 
   augmentation_cfg:
@@ -32,12 +34,9 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.interact_dex.InterActDex
-  future_force_mode: encoder
-  future_force_time_weighting: none
   future_force_loss_weight: 0.1
   pc_dim: 6
   num_points: 1024
-  scene_num_queries: 12
 
   fps_random_config:
     use_random: true

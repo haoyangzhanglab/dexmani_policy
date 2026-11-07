@@ -20,7 +20,7 @@ import zarr
 from dexmani_policy.agents.obs_encoder.pointcloud.camera_projection import project_to_image
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.point_transformer import PointPatchEncoder
-from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
+from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
 from dexmani_policy.training.common.config import load_policy_config
 
 
@@ -47,7 +47,7 @@ def inspect_frame(data, frame, encoder, processor, config, patch_size):
     processed, transform = processor.process_images(tensor_rgb, return_transform=True)
     height, width = processed.shape[-2:]
     assert height % patch_size == 0 and width % patch_size == 0
-    raw = project_to_image(centers, intrinsic, extrinsic, torch.eye(3)[None], rgb.shape[:2])
+    raw = project_to_image(centers, intrinsic, extrinsic, torch.eye(3)[None], (rgb.shape[0], rgb.shape[1]))
     resized = project_to_image(centers, intrinsic, extrinsic, transform, (height, width))
     torch.testing.assert_close(raw.grid_xy, resized.grid_xy, atol=2e-6, rtol=0)
     assert torch.equal(raw.valid, resized.valid)
@@ -129,9 +129,9 @@ def main():
                     if key in ("channels", "num_patches", "group_size", "geometry_scale")}
     encoder = PointPatchEncoder(input_channels=3, fps_random_config=dict(config.fps_random_config),
                                 **local_config).eval()
-    processor = ImageProcessor.from_preset(config.rgb_backbone_name, dict(config.rgb_backbone_config))
-    architecture = json.loads((Path(recipe.initialization.rgb) / "config.json").read_text())
-    patch_size = architecture["patch_size"]
+    rgb_encoder, processor = build_rgb_encoder(config.rgb_backbone_name, dict(config.rgb_backbone_config))
+    patch_size = rgb_encoder.patch_size
+    del rgb_encoder
     rows, summary = [], {}
     for dataset in args.datasets:
         root = zarr.open_group(str(dataset), mode="r")

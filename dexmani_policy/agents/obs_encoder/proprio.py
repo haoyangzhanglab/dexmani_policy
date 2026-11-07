@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 
 import torch
@@ -31,25 +30,6 @@ class StateEncoder(nn.Module):
         return self.mlp(x)
 
 
-class FourierPositionEmbedding3D(nn.Module):
-    """Continuous XYZ Fourier features, axis-major sin/cos at frequencies 2**k."""
-
-    def __init__(self, num_frequencies: int = 8):
-        super().__init__()
-        if type(num_frequencies) is not int or num_frequencies <= 0:
-            raise ValueError("num_frequencies must be a positive integer")
-        self.out_dim = 6 * num_frequencies
-        self.register_buffer(
-            "frequencies",
-            2.0 ** torch.arange(num_frequencies, dtype=torch.float32),
-            persistent=False,
-        )
-
-    def forward(self, xyz: torch.Tensor) -> torch.Tensor:
-        angles = xyz.unsqueeze(-1) * self.frequencies.to(dtype=xyz.dtype)
-        return torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(start_dim=-2)
-
-
 def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
     """Decode consecutive rotation columns; caller supplies FP32 outside autocast."""
     a1, a2 = rotation_6d[..., :3], rotation_6d[..., 3:]
@@ -59,92 +39,27 @@ def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
     return torch.stack((b1, b2, b3), dim=-1)
 
 
-class HandStateEncoder(nn.Module):
-    """Encode aligned joints and measured world geometry; the wrist uses the EEF frame."""
+class HandGeometryEncoder(nn.Module):
+    """Base-frame wrist and anchors, wrist-local finger geometry; no joint inputs."""
 
-    def __init__(
-        self,
-        token_dim: int = 192,
-        hidden_dim: int = 128,
-        position_scale: float = 0.25,
-        hand_scale: float = 0.10,
-        num_frequencies: int = 2,
-    ) -> None:
+    def __init__(self):
         super().__init__()
-        if token_dim < 2 or hidden_dim < 1:
-            raise ValueError("token_dim >= 2 and hidden_dim >= 1 prevent degenerate features")
-        if type(num_frequencies) is not int or num_frequencies < 0:
-            raise ValueError("num_frequencies must be a nonnegative integer")
-        for name, scale in (
-            ("position_scale", position_scale),
-            ("hand_scale", hand_scale),
-        ):
-            if not math.isfinite(scale) or scale <= 0:
-                raise ValueError(f"{name} must be finite and positive")
+        self.wrist_mlp = nn.Sequential(nn.Linear(9, 128), nn.GELU(), nn.Linear(128, 192))
+        self.finger_mlp = nn.Sequential(nn.Linear(3, 128), nn.GELU(), nn.Linear(128, 192))
+        self.body_identity = nn.Parameter(torch.empty(1, 6, 192))
+        nn.init.normal_(self.body_identity, std=0.02)
+        self.norm = nn.LayerNorm(192)
 
-        self.position_scale = float(position_scale)
-        self.hand_scale = float(hand_scale)
-        self.position_pe = FourierPositionEmbedding3D(num_frequencies) if num_frequencies else None
-        position_dim = 3 + (self.position_pe.out_dim if self.position_pe is not None else 0)
-        self.position_mlp = nn.Sequential(
-            nn.Linear(position_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, token_dim),
-        )
-        self.arm_mlp = nn.Sequential(
-            nn.Linear(7 + 6, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, token_dim),
-        )
-        self.finger_mlp = nn.Sequential(
-            nn.Linear(3 + position_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, token_dim),
-        )
-        self.keypoint_embedding = nn.Parameter(torch.empty(1, 6, token_dim))
-        nn.init.normal_(self.keypoint_embedding, std=0.02)
-        self.output_norm = nn.LayerNorm(token_dim)
-
-    def _position_features(self, xyz: torch.Tensor, scale: float) -> torch.Tensor:
-        scaled = xyz / scale
-        if self.position_pe is None:
-            return scaled
-        return torch.cat((scaled, self.position_pe(math.pi * scaled)), -1)
-
-    def forward(
-        self,
-        joint_state: torch.Tensor,
-        eef_pose: torch.Tensor,
-        fingertip_xyz: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        """Consume flattened frames with raw meter positions and consecutive rotation columns."""
-        if joint_state.ndim != 2 or joint_state.shape[1] != 19:
-            raise ValueError("joint_state must have shape [N,19]")
+    def forward(self, eef_pose, fingertip_xyz):
+        if eef_pose.ndim != 2 or eef_pose.shape[-1] != 9:
+            raise ValueError("eef_pose must be [BT,9]")
+        if fingertip_xyz.shape != (eef_pose.shape[0], 5, 3):
+            raise ValueError("fingertip_xyz must be [BT,5,3]")
         with torch.autocast(device_type=eef_pose.device.type, enabled=False):
-            joints = joint_state.float()
-            anchors = torch.cat((eef_pose[:, None, :3].float(), fingertip_xyz.float()), 1)
-            rotation = _rotation_6d_to_matrix(eef_pose[:, 3:].float())
-            rot6d = torch.cat((rotation[..., :, 0], rotation[..., :, 1]), -1)
-            local_xyz = (anchors[:, 1:] - anchors[:, :1]) @ rotation
-            position_features = self._position_features(anchors, self.position_scale)
-            local_features = self._position_features(local_xyz, self.hand_scale)
-            finger_joints = torch.stack(
-                (joints[:, 7:10], joints[:, 10:13], F.pad(joints[:, 13:15], (0, 1)),
-                 F.pad(joints[:, 15:17], (0, 1)), F.pad(joints[:, 17:19], (0, 1))),
-                1,
-            )
-            arm_features = torch.cat((joints[:, :7], rot6d), -1)
-            finger_features = torch.cat((finger_joints, local_features), -1)
-
-        dtype = self.position_mlp[0].weight.dtype
-        position = self.position_mlp(position_features.to(dtype)).float()
-        shared_state = self.arm_mlp(arm_features.to(dtype)).float()[:, None]
-        finger_state = self.finger_mlp(finger_features.to(dtype)).float()
-        tokens = torch.cat((position[:, :1], position[:, 1:] + finger_state), 1)
-        # FP32 additions preserve small identity/residual updates under BF16 autocast.
-        tokens = tokens + shared_state + self.keypoint_embedding.float()
-        return {
-            "hand_tokens": self.output_norm(tokens.to(self.output_norm.weight.dtype)),
-            "anchor_xyz": anchors,
-            "rotation_world_from_eef": rotation,
-        }
+            pose = eef_pose.float()
+            rotation = _rotation_6d_to_matrix(pose[:, 3:])
+            local = (fingertip_xyz.float() - pose[:, None, :3]) @ rotation
+            wrist = torch.cat((pose[:, :3] / 0.25, rotation[:, :, 0], rotation[:, :, 1]), -1)
+            anchors = torch.cat((pose[:, None, :3], fingertip_xyz.float()), 1)
+        tokens = torch.cat((self.wrist_mlp(wrist)[:, None], self.finger_mlp(local / 0.10)), 1)
+        return {"tokens": self.norm(tokens.float() + self.body_identity), "anchors_base": anchors}

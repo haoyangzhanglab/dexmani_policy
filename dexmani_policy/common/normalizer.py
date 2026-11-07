@@ -3,7 +3,7 @@ from collections.abc import Iterable, Mapping
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
 
 
 def normalization_feature_shapes(dims):
@@ -14,20 +14,9 @@ def normalization_feature_shapes(dims):
 
 
 def normalizer_shapes_from_state(
-    state: Mapping[str, torch.Tensor], *, feature_dims: Mapping[str, int],
+    state: Mapping[str, torch.Tensor],
 ) -> dict[str, torch.Size]:
-    """Validate required tactile affine before rebuilding saved buffer shapes."""
-    required = TACTILE_FEATURE_SHAPES.keys() & feature_dims.keys()
-    for key in required:
-        for part in ("scale", "offset"):
-            name = f"normalizer.fields.{key}.{part}"
-            if name not in state:
-                raise ValueError(f"Missing required tactile affine: {name}")
-            value = state[name].float()
-            if tuple(value.shape) != TACTILE_FEATURE_SHAPES[key] or not torch.isfinite(value).all():
-                raise ValueError(f"Invalid tactile affine shape or nonfinite parameter: {name}")
-            if part == "scale" and not (value > 0).all():
-                raise ValueError(f"Tactile scale must be positive: {key}")
+    """Rebuild normalizer buffer shapes from saved state."""
     prefix, suffix = "normalizer.fields.", ".scale"
     return {
         key[len(prefix):-len(suffix)]: value.shape

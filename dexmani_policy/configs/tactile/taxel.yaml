@@ -5,4 +5,4 @@ agent:
 dataset:
   sensor_modalities: [joint_state, point_cloud, taxel_tactile_force]
 normalization:
-  taxel_tactile_force: limits
+  taxel_tactile_force: identity

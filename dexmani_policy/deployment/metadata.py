@@ -32,6 +32,7 @@ class PolicyInfo:
     pointcloud_config: dict | None
     hand_pointcloud_config: dict | None
     fingertip_link_names: tuple[str, ...] | None
+    hoi_pcd: dict | None = None
 
     def to_dict(self):
         result = {item.name: getattr(self, item.name) for item in fields(self)}
@@ -61,4 +62,5 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         pointcloud_config=deployment.get("pointcloud_config"),
         hand_pointcloud_config=deployment.get("hand_pointcloud_config"),
         fingertip_link_names=tuple(fingertip_links) if fingertip_links is not None else None,
+        hoi_pcd=deployment.get("hoi_pcd"),
     )

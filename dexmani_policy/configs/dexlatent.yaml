@@ -7,7 +7,7 @@ defaults:
 policy_name: dexlatent
 
 initialization:
-  rgb: data/pretrained/dinov2-small
+  rgb: data/pretrained/dinov3-small
   dexlatent: data/pretrained/dexlatent/checkpoint_epoch_1000.pt
 
 horizon: 16
@@ -55,7 +55,7 @@ agent:
     rope_scale: 0.05
     rope_base: 100.0
 
-  rgb_backbone_name: dino
+  rgb_backbone_name: dinov3
   rgb_backbone_config:
     tune_mode: freeze
     image_size: [224, 224]

@@ -25,7 +25,7 @@ class RGBPointObservationEncoder(nn.Module):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
-        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
     ) -> None:
         super().__init__()
         self.num_points = num_points

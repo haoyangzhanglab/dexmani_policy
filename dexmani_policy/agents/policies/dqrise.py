@@ -33,7 +33,7 @@ class DQRISE(Policy):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
-        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
         n_layers: int = 8,
         hidden_dim: int = 256,
         n_head: int = 8,

@@ -30,6 +30,11 @@ from dexmani_policy.training.common import training_signal_handlers
 
 class PolicyTrainer:
     def __init__(self, cfg, dataset, data_description, *, checkpoint=None):
+        if checkpoint is not None:
+            current_hoi = data_description.get("deployment_metadata", {}).get("hoi_pcd")
+            saved_hoi = checkpoint.effective_config.get("deployment_metadata", {}).get("hoi_pcd")
+            if current_hoi != saved_hoi:
+                raise ValueError("Resume data/model mismatch: HOI asset recipe")
         device = torch.device(cfg.training.device)
         codebook = hand_affine = None
         if checkpoint is None and cfg.policy_name == "dqrise":
@@ -49,7 +54,7 @@ class PolicyTrainer:
         model.configure_normalizer(
             data_description["field_dims"] if checkpoint is None else cfg.normalization_dims,
             {} if checkpoint is None else normalizer_shapes_from_state(
-                checkpoint.model_state, feature_dims=cfg.normalization_dims,
+                checkpoint.model_state,
             ),
         )
         if checkpoint is None:
@@ -128,9 +133,6 @@ class PolicyTrainer:
             if ema_model is not None:
                 if checkpoint.ema_model_state is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
-                normalizer_shapes_from_state(
-                    checkpoint.ema_model_state, feature_dims=cfg.normalization_dims,
-                )
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
         model.to(device=device, dtype=torch.float32)
         if ema_model is not None:

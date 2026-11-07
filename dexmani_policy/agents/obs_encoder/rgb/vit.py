@@ -96,6 +96,8 @@ class ViTEncoder(nn.Module):
 
     def initialize_weights(self, source: str | None) -> None:
         if source is None:
+            if self.tune_mode != "full":
+                raise ValueError("Frozen or LoRA RGB training requires initialization.rgb")
             return
         backbone = self.backbone.get_base_model() if self.tune_mode == "lora" else self.backbone
         if self.kind == "dinov3":

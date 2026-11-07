@@ -58,9 +58,7 @@ def restore_policy(
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
 
     feature_dims = effective_config["normalization_dims"]
-    feature_shapes = normalizer_shapes_from_state(
-        state_dict, feature_dims=feature_dims,
-    )
+    feature_shapes = normalizer_shapes_from_state(state_dict)
     rng_state = get_rng_state()
     try:
         agent = hydra.utils.instantiate(effective_config["agent"], _convert_="all")
