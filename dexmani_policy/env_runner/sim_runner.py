@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
-from dexmani_policy.common.inference import prepare_observations, predict_actions
+from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
 from dexmani_policy.common.io_util import close_resources
 
 
@@ -65,10 +65,16 @@ class SimRunner:
         self.obs_cursor = 0
 
     def predict_action_chunk(
-        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int, generator=None
+        self, obs_batch, agent, inference_steps: int | None = None, *,
+        action_steps: int, generator=None, prev_action=None,
     ) -> np.ndarray:
+        kwargs = {}
+        if prev_action is not None:
+            kwargs["prev_action"] = prepare_numeric_tensor(
+                prev_action, device=next(agent.parameters()).device, label="previous executed action",
+            )
         return predict_actions(
-            agent, obs_batch, inference_steps=inference_steps, generator=generator,
+            agent, obs_batch, inference_steps=inference_steps, generator=generator, **kwargs,
         )[:action_steps]
 
     def _run_episode(
@@ -89,15 +95,18 @@ class SimRunner:
         generator = torch.Generator(device=device).manual_seed(episode_seed)
 
         task_done_step = None
+        prev_action = None
 
         while True:
             obs_batch = self.get_obs_batch(device=device, normalization_dims=agent.normalization_dims)
             action_chunk = self.predict_action_chunk(
                 obs_batch, agent, inference_steps=inference_steps,
-                action_steps=action_steps, generator=generator,
+                action_steps=action_steps, generator=generator, prev_action=prev_action,
             )
             for action in action_chunk:
                 obs, _, done, truncated, info = env.step(action)
+                if agent.requires_prev_action:
+                    prev_action = info["executed_joint_action"].copy()
                 self.update_obs(obs)
 
                 if info["success_condition"] and task_done_step is None:
@@ -107,6 +116,8 @@ class SimRunner:
                     return bool(info["success"]), task_done_step
 
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
+        if agent.requires_prev_action and action_steps != agent.n_action_steps:
+            raise ValueError("ODE execution requires action_steps == n_action_steps")
         self.environment = {}
         unsupported = (TACTILE_FEATURE_SHAPES.keys() & set(self.sensor_modalities)) - {"finger_tactile_force"}
         if unsupported:

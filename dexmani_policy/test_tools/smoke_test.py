@@ -109,6 +109,7 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
         )
         snapshot = info.to_dict()
         assert "policy_name" not in snapshot
+        assert not info.requires_prev_action
         assert snapshot == runtime.info.to_dict()
         torch.testing.assert_close(
             runtime.agent.normalizer.state_dict(), normalizer_state, rtol=0, atol=0, check_device=False,

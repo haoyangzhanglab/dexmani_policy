@@ -1,6 +1,7 @@
 # ODE Action Head：Codex 实施任务书
 
-审查日期：2026-11-10。状态：**设计审查通过，待实现与运行验证**。
+审查日期：2026-11-10。状态：**实现已接入，CPU 与 GPU compile 定向验收通过**。
+本文件保留设计约定；当前使用与验收命令见 [README](README.md#ode-使用)。真实数据完整训练及真机闭环尚未验证。
 
 本任务是在 `dexmani_policy` 中接入 ODE Policy 的关节动作头。按根目录 `AGENTS.md` 的个人研究代码标准实施：正确、直观、易读易改，优先复用现有机制与官方算法代码，完成最小但完整的训练和执行闭环。
 
@@ -18,13 +19,12 @@
 
 本任务不扩展 `action_ee`、二值夹爪、手部 latent、RTC、异步/流式服务、多机器人控制协议或新的观测融合架构。不增加 `torchdiffeq`、adjoint、solver registry、policy factory、通用 adapter、自动调参或额外稳定性损失。不启动完整训练或大规模评测来代替针对性验证。
 
-## 2. 审查依据与开始前检查
+## 2. 官方来源
 
 本任务书基于以下版本：
 
 | 来源 | 已审查版本 |
 | --- | --- |
-| 本项目 | [`4e0caeb102a3429b89e0e9364662202def68deb0`](https://github.com/haoyangzhanglab/dexmani_policy/tree/4e0caeb102a3429b89e0e9364662202def68deb0) |
 | 官方主分支 | [`bcea95a299dc3fa8b2a571603a5e8b50e1c449e9`](https://github.com/NTUMARS/ODE-POLICY/tree/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9) |
 | 官方关节控制分支 | [`cc3e08b2cf95fe2b4545fa34a68c51bb9cec9d89`](https://github.com/NTUMARS/ODE-POLICY/tree/cc3e08b2cf95fe2b4545fa34a68c51bb9cec9d89) |
 | 论文 | [ODE Policy, arXiv:2611.01729v1](https://arxiv.org/abs/2611.01729v1) |
@@ -34,28 +34,26 @@
 - [ode_image_policy.py](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/ode_policy/policies/ode/ode_image_policy.py)：`_FiLMLayer`、`VectorField`、积分、loss、diversity head。
 - [PORTING.md](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/docs/PORTING.md)、[METHOD_NOTES.md](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/docs/METHOD_NOTES.md)。
 - [build_ode_zarr_real.py](https://github.com/NTUMARS/ODE-POLICY/blob/cc3e08b2cf95fe2b4545fa34a68c51bb9cec9d89/ode_policy/real/build_ode_zarr_real.py)：绝对关节目标与时间对齐。
-- [eval_ode_policy.py](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/ode_policy/libero/eval_ode_policy.py)：执行方显式传入 `a0`，按实际执行更新承接状态。
-
-开始实现时先检查 `git status`、当前 HEAD、`AGENTS.md` 和相关调用方。若代码已变化，只复核影响本任务的差异；不要回退仓库或覆盖已有修改。以下路径和类名以当前代码为准，可做必要的小幅调整并在结果中说明。
+- [eval_ode_policy.py](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/ode_policy/libero/eval_ode_policy.py)：执行方显式传入 `a0`，承接已执行步对应的积分目标。
 
 ## 3. 文件与职责
 
 以下路径均相对于 `dexmani_policy/`：
 
-| 文件 | 实施内容 |
+| 文件 | 当前职责 |
 | --- | --- |
-| 新增 `agents/action_decoders/ode.py` | `_FiLMLayer`、`VectorField`、`ODE` decoder；条件投影、积分、loss、可选 diversity head |
-| 新增 `agents/policies/ode.py` | 薄的点云 encoder 与 `ODEPolicy(Policy)`；组装、归一化及训练/预测接口 |
-| 新增 `datasets/variants/ode.py` | `ODEDataset(DemonstrationDataset)`；只补充 `prev_action` |
-| 新增 `configs/ode.yaml` | 一份配方，沿用现有 Hydra 组装与训练入口 |
-| 修改 `agents/policies/base.py` | 可选 `prev_action` 参数；优化器收集整个 decoder |
-| 修改 `agents/policies/adaptac.py` | 同步其独立覆写的 `predict_action()` 签名；原算法行为不变 |
-| 修改 `deployment/runtime.py`、`env_runner/sim_runner.py` | 传入物理单位的上一条已下发指令，执行端负责承接 |
-| 按需更新 `test_tools/` 和相关文档 | 小规模验收、使用命令与执行约定 |
+| `agents/action_decoders/ode.py` | `_FiLMLayer`、`VectorField`、`ODE` decoder；条件投影、积分、loss、可选 diversity head |
+| `agents/policies/ode.py` | 薄的点云 encoder 与 `ODEPolicy(Policy)`；组装、归一化及训练/预测接口 |
+| `datasets/variants/ode.py` | `ODEDataset(DemonstrationDataset)`；只补充 `prev_action` |
+| `configs/ode.yaml` | 一份配方，沿用现有 Hydra 组装与训练入口 |
+| `agents/policies/base.py`、`agents/policies/adaptac.py` | 公共 `prev_action` 签名；基类优化器收集整个 decoder |
+| `deployment/metadata.py` | 从策略读取 `requires_prev_action`，供执行端判断承接需求 |
+| `deployment/runtime.py`、`env_runner/sim_runner.py` | 传入物理单位的上一条已下发指令，执行端负责承接 |
+| `test_tools/check_ode.py` | 复用 smoke test，完成算法与执行约定的定向验收 |
 
 `common/inference.py:predict_actions()` 已支持 `**kwargs`，优先直接利用。`SequenceSampler` 已提供 `sample_source_rows()`，不新增 sampler 或重新生成 Zarr。Dataset 的 `_target_` 在 YAML 中直接指定，无需在配置组装器新增按策略名切换 Dataset 的分支。
 
-上述四个新增文件是算法组织边界，不是禁止添加必要许可证材料或一份短测试文件。保留移植代码的来源、固定 commit、修改说明和上游 Apache-2.0 许可证文本；按上游实际情况保留相关 notice。不要为此引入运行时 GitHub 依赖或整个上游仓库。
+移植来源、固定 commit 和主要调整记录在 decoder 文件头；针对性验收放在现有 `test_tools/` 中。
 
 ## 4. 必须正确的数据时间约定
 
@@ -174,23 +172,25 @@ decoder 输出已经是 `[B,H,19]` 的未来序列。Policy 反归一化后直�
 
 ### 6.3 仿真与真机边界
 
-`SimRunner._run_episode()` 中初始化局部 `prev_action=None`，将它传过 `predict_action_chunk()`；每执行一条 `env.step(action)` 后更新为刚下发的目标。下一个回合重新初始化。
+`SimRunner._run_episode()` 中初始化局部 `prev_action=None`，将它传过 `predict_action_chunk()`；每执行一条 `env.step(action)` 后取 `info["executed_joint_action"].copy()`，承接环境按硬关节限位裁剪后实际下发的目标，与数据记录器一致。绝对关节执行保留角度分支，等价解由 IK/规划阶段选择。下一个回合重新初始化。
 
-常规执行要求完整 H 步后再编码观测。仿真共同入口检查 ODE 的 `action_steps == agent.n_action_steps` 一次；允许用一处直接的 ODE 类型判断落实该实际约束，不为此创建通用校验框架。原有策略继续支持其已有的前缀执行行为。
+无裁剪时，承接目标等于官方 carried execution 的积分终点；裁剪生效时，这是本项目在 chunk 边界对起点的执行约束适配，不能声称整段执行仍是无约束 ODE 的同一条积分曲线。decoder 保留官方积分核心。
+
+常规执行要求完整 H 步后再编码观测。`Policy.requires_prev_action` 默认为 False，ODE 声明为 True；仿真执行与部署元数据直接读取该标志。仿真共同入口检查 ODE 的 `action_steps == agent.n_action_steps` 一次。其他策略不读取承接字段，继续支持其已有的前缀执行行为。
 
 终止或截断发生在 chunk 中间时立即结束，不能为了执行满 H 而继续控制环境。若系统中断后要继续任务，应重新定义一次明确的初始化，不能暗中视为已执行整段。
 
 `PolicyRuntime` 仅提供预测，不知道外部硬件执行了多少动作。因此真机调用方必须每次传入上一条实际下发的关节目标，并按本配方执行 H 步。只新增 runtime 参数、而客户端一直省略它，会变成每个 chunk 从实测状态重启，不能称为已完成 carried execution。
 
-本任务在本仓库完成接口和使用示例；不未经授权修改 `dexmani_real`。如果当前工作区没有真实客户端，交付时明确该调用方适配与真机闭环尚未验证。若调用方已有指令裁剪/滤波，传入同一关节坐标下实际下发的目标。
+`PolicyInfo.requires_prev_action` 读取加载后策略的声明，不写入 checkpoint。`dexmani_real` 在连接设备前检查同步、完整 H 步约束；每条 `Robot.send_action()` 正常返回后保存裁剪后的 19 维高层目标，再传入下一次预测。提交失败不推进承接值，中途停止清空承接。这里不承诺 SDK 回执、两设备原子执行或物理到位；Ruckig 中间参考仍由驱动管理。实机闭环尚未验证。
 
 模型不持有执行状态，因此 `warmup()` 不推进承接动作；保留 runtime 已有的 generator 状态恢复。更新调用示例时不要把预测 chunk 的最后一帧提前当作已执行指令。
 
 ## 7. 优化器、EMA 与编译
 
-基类 `optimizer_groups()` 将 `parameter_groups(self.action_decoder.model, ...)` 改为 `parameter_groups(self.action_decoder, ...)`，obs 参数组逻辑不变。不要改写现有特殊策略的参数组规则。
+基类 `optimizer_groups()` 收集整个 `action_decoder`，obs 参数组逻辑不变；特殊策略继续使用各自的参数组规则。
 
-这一修改应覆盖 ODE 的 `model`、`cond_net` 与启用时的 `side_head`；继续通过 `build_optimizer()` 现有的“每个可训练参数恰好出现一次”检查。
+参数组覆盖 ODE 的 `model`、`cond_net` 与启用时的 `side_head`，由 `build_optimizer()` 检查每个可训练参数恰好出现一次。
 
 现有 Diffusion/Flow 的可训练 decoder 参数位于 `.model` 下；对它们验证修改前后全局参数名列表、分组与组内顺序一致。仅检查集合不够，因为恢复训练会核对有序 `param_names`。不为本任务改 checkpoint 格式或添加兼容迁移逻辑。
 
@@ -219,7 +219,7 @@ decoder 输出已经是 `[B,H,19]` 的未来序列。Policy 反归一化后直�
 
 perturb_std 与 vel_scale 需要按实际训练数据检查，不能宣称已调优。无需新增自动统计/估计流水线。普通测试关闭 compile；GPU 可用时再做一次相关编译检查。
 
-示例训练命令在实现后应成立：
+训练命令：
 
 ```bash
 bash scripts/training/train.sh ode task_name=pick_apple_messy
@@ -237,17 +237,7 @@ bash scripts/training/train.sh ode task_name=pick_apple_messy agent.side_head=12
 2. **数值移植**：用固定、非零权重与输入，对照固定版本官方核心的 Euler/RK4 rollout、路径 loss、梯度；关闭扰动或显式固定同一 delta，采用 FP32 合理容差。单独核对扰动衰减和 action/state affine 不同的情况。可在临时目录提取官方核心作为参考，不能以完整图像 policy 的无夹爪空 BCE 当作参考。
 3. **diversity**：`side_head=0/12` 均可前向和反向且 loss 有限。单独对 diversity loss 反传，主场/condition encoder 没有该分支梯度，side head 有梯度；随机采样使用指定 generator，固定 seed 可复现。数值对照保留官方 rate/floor/eps 计算。
 4. **参数与生命周期**：所有 ODE 可训练参数恰好入组一次；代表性已有 Diffusion/Flow 的有序参数组与旧规则一致。运行现有 DP3 smoke，运行 ODE 的少量训练更新、EMA、保存、恢复和 checkpoint-only runtime 加载；验证 `[1,H,19]` / runtime `[H,19]` 输出。至少在 side_head=12 配置覆盖一次保存/恢复。
-5. **执行承接**：用轻量 fake env 或 predictor spy 检查 runner 传入的是刚执行的末条指令；第二回合首调用为 None；中途 done 不继续执行；warmup 不改变外部 prev_action，且恢复 generator 状态。ODE 拒绝不一致执行长度和 RTC prefix。此类控制流检查无需完整机器人仿真环境。
+5. **执行承接**：用轻量 fake env 或 predictor spy 覆盖有、无指令裁剪，检查 runner 传入的是环境实际执行的末条关节目标；第二回合首调用为 None；中途 done 或 truncated 不继续执行；warmup 不改变外部 prev_action，且恢复 generator 状态。ODE 拒绝不一致执行长度和 RTC prefix。此类控制流检查无需完整机器人仿真环境。
 6. **编译**：现有环境具备对应 GPU 条件时，验证 `.model` compile 后训练/预测与保存恢复可用；缺少条件则明确列为未验证，不建立新编译回退系统。
 
-这些检查是实现后的验收要求，不代表本任务书撰写时已经通过。当前设计审查已完成源码调用链检查、306 个原采样器合成窗口检查、affine 扰动关系检查和预测覆写点的 AST 核查；审查环境没有 PyTorch，尚未执行上述模型、梯度、训练、编译或仿真测试。
-
-完成时只报告：实际改动、保留/适配的官方机制、已运行命令与结果、尚未验证的部分、使用命令及真机调用方约定。成功率、延迟和平滑性收益必须来自真实实验，不能由代码检查推断。
-
-## 10. 执行方式与收敛要求
-
-按“核对相关现状 → 实现数据和官方核心 → 接入 Policy/执行入口 → 定向验收 → 检查最终 diff”推进，不先重构整个仓库。正常实现取舍自行完成，已有明确约定不反复请求确认。
-
-若当前代码与任务书有局部差异，以不破坏真实语义的最小适配完成并说明；若影响动作含义、接口正确性且无法自行核实，明确指出阻塞，不能用静默回退掩盖。缺少依赖时先完成独立可做的源码检查，准确记录缺少什么，不反复安装大型依赖或声称未运行检查已通过。
-
-只修改与该闭环有关的文件，保留用户已有工作。最终清理未使用配置、重复实现与临时参考文件。除非执行任务的用户另外授权，不自动推送代码、修改其他仓库或启动长时间训练。
+CPU 定向验收和 RTX 4090 上的 compile、少量训练、保存恢复已通过；真机执行仅完成离线测试。真实数据完整训练、任务成功率、延迟和平滑性收益，以及真机闭环仍需独立实验验证。验收命令见 [README](README.md#ode-使用)。

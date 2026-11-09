@@ -58,13 +58,20 @@ class PolicyRuntime:
             "rtc_guidance_cap": rtc_guidance_cap,
         }
 
-    def predict(self, observation, *, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
+    def predict(self, observation, *, prev_action=None, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         tensors = prepare_observations(
             observation, normalization_dims=self.agent.normalization_dims,
             n_obs_steps=self.agent.n_obs_steps, rgb_preprocessing=self.info.rgb_preprocessing,
             device=self.generator.device,
         )
         kwargs = self._prepare_rtc(rtc_prefix, delay_steps, rtc_guidance_cap)
+        if prev_action is not None:
+            previous = np.asarray(prev_action)
+            if previous.shape != (self.info.control_action_dim,) or previous.dtype.kind not in "fiu":
+                raise ValueError(f"prev_action requires a physical target of shape ({self.info.control_action_dim},)")
+            kwargs["prev_action"] = prepare_numeric_tensor(
+                previous, device=self.generator.device, label="physical prev_action",
+            )
         return predict_actions(
             self.agent, tensors, inference_steps=self.info.inference_steps,
             generator=self.generator, **kwargs,

@@ -44,6 +44,7 @@ def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float)
 class Policy(nn.Module):
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
     supports_rtc: bool = False
+    requires_prev_action: bool = False
     loss_groups: dict[str, tuple[int, int, float]] | None = None
 
     def __init__(
@@ -127,6 +128,7 @@ class Policy(nn.Module):
         inference_steps: int | None = None,
         *,
         generator: torch.Generator | None = None,
+        prev_action: torch.Tensor | None = None,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
@@ -188,5 +190,5 @@ class Policy(nn.Module):
         self, lr: float, obs_lr: float, weight_decay: float, obs_weight_decay: float
     ) -> list[dict]:
         return parameter_groups(
-            self.action_decoder.model, lr=lr, weight_decay=weight_decay
+            self.action_decoder, lr=lr, weight_decay=weight_decay
         ) + parameter_groups(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay)
