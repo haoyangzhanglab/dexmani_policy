@@ -73,6 +73,8 @@ class ForceTransformer(nn.Module):
 
 
 class ForceDiffusion(Diffusion):
+    """Standard Gaussian diffusion in dataset force units (XHand Real: SDK / 255)."""
+
     def __init__(
         self,
         model: nn.Module,

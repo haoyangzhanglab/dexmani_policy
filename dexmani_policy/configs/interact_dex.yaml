@@ -35,6 +35,7 @@ dataset:
 agent:
   _target_: dexmani_policy.agents.policies.interact_dex.InterActDex
   future_force_loss_weight: 0.1
+  future_force_loss_beta: 0.00392156862745098  # XHand Real: 1 SDK unit / 255
   pc_dim: 6
   num_points: 1024
 

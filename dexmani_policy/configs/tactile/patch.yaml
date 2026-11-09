@@ -2,7 +2,7 @@
 agent:
   tactile_encoder:
     _target_: dexmani_policy.agents.obs_encoder.xhand_tactile.XHandPatchEncoder
-    activity_scale: 1.0
+    activity_scale: 0.00392156862745098  # XHand Real: 1 SDK unit / 255
 dataset:
   sensor_modalities: [joint_state, point_cloud, taxel_tactile_force]
 normalization:

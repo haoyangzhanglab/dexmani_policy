@@ -14,9 +14,18 @@ class EpisodeStore:
         group = zarr.open_group(zarr.DirectoryStore(self.path), mode="r")
         fields = group["data"]
         self.field_names = tuple(dict.fromkeys(fields.keys() if keys is None else keys))
+        self.attrs = dict(group.attrs)
+        if (
+            self.attrs.get("format") == "dexmani.real.canonical"
+            and TACTILE_FEATURE_SHAPES.keys() & self.field_names
+            and self.attrs.get("tactile_scale_divisor") != 255.0
+        ):
+            raise ValueError(
+                f"Canonical Zarr {self.path}: tactile_scale_divisor must be 255.0, "
+                f"got {self.attrs.get('tactile_scale_divisor')!r}"
+            )
         self.data = {key: fields[key] for key in self.field_names}
-        self.episode_ends = np.asarray(group["meta"]["episode_ends"])
-        ends = self.episode_ends
+        ends = np.asarray(group["meta"]["episode_ends"])
         if (
             ends.ndim != 1
             or ends.size == 0
@@ -42,7 +51,6 @@ class EpisodeStore:
                 if values.dtype.kind != "f":
                     raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
         self.episode_ends = ends.astype(np.int64, copy=False)
-        self.attrs = dict(group.attrs)
 
     def read(self, key, rows, *, columns=None):
         arr = self[key]

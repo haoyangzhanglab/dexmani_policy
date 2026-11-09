@@ -1,4 +1,4 @@
-"""Per-frame XHand force, taxel and regional patch encoders."""
+"""Per-frame identity tactile encoders; XHand Real inputs use SDK / 255."""
 
 import math
 
@@ -10,7 +10,7 @@ __all__ = ["XHandForceEncoder", "XHandTaxelEncoder", "XHandPatchEncoder"]
 
 
 class XHandForceEncoder(nn.Module):
-    """Raw identity force [BT,5,3] -> [BT,5,64] with one shared 3-layer MLP."""
+    """Identity force [BT,5,3] (XHand Real: SDK / 255) -> [BT,5,64] with one shared 3-layer MLP."""
 
     num_tokens = 5
     out_dim = 64
@@ -35,7 +35,7 @@ class XHandForceEncoder(nn.Module):
 
 
 class XHandTaxelEncoder(nn.Module):
-    """Raw identity taxel force [BT,5,120,3] -> [BT,5,64] with KineDex 1D CNN."""
+    """Identity taxel force [BT,5,120,3] (XHand Real: SDK / 255) -> [BT,5,64] with KineDex 1D CNN."""
 
     num_tokens = 5
     out_dim = 64
@@ -98,7 +98,7 @@ def right_hand_region_ids() -> torch.Tensor:
 
 
 class XHandPatchEncoder(nn.Module):
-    """Pool raw, zero-reference forces [BT,5,120,3] into five 64D tokens."""
+    """Pool identity, zero-reference forces [BT,5,120,3] into five 64D tokens."""
 
     num_tokens = 5
     num_regions = 5
@@ -106,13 +106,14 @@ class XHandPatchEncoder(nn.Module):
     input_key = "taxel_tactile_force"
 
     def __init__(
-        self, region_ids: torch.Tensor | list[list[int]] | None = None, activity_scale: float = 1.0,
+        self, region_ids: torch.Tensor | list[list[int]] | None = None,
+        activity_scale: float = 0.00392156862745098,
     ) -> None:
         super().__init__()
         activity_scale = torch.tensor(activity_scale, dtype=torch.float32).item()
         if not math.isfinite(activity_scale) or activity_scale <= 0:
             raise ValueError("activity_scale must be finite and positive in FP32")
-        # Same numeric units as the dataset force; zero bias is calibrated upstream.
+        # Same units as the dataset force; default is one SDK unit in XHand Real SDK / 255.
         self.activity_scale = activity_scale
         if region_ids is None:
             region_ids = right_hand_region_ids()
@@ -176,7 +177,7 @@ class XHandPatchEncoder(nn.Module):
             )
 
     def forward(self, u: torch.Tensor) -> torch.Tensor:
-        """Consume raw taxel force; zero contact must be calibrated by the data producer."""
+        """Consume identity taxel force; XHand Real uses SDK / 255, calibrated upstream."""
         descriptors = self._patch_descriptors(u)
         patch_features = self.patch_mlp(descriptors)
         patch_features = (

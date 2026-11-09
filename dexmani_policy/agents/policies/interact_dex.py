@@ -93,13 +93,15 @@ class InterActDex(Policy):
                  pc_dim=6, num_points=1024, pc_encoder_config=None, fps_random_config=None,
                  timestep_embed_dim=128, n_layers=8, hidden_dim=768, n_head=8,
                  mlp_ratio=4.0, p_drop_attn=0.1, qkv_bias=False, qk_norm=False,
-                 num_inference_steps=10, future_force_loss_weight=0.1,
+                 num_inference_steps=10, future_force_loss_weight=0.1, future_force_loss_beta=1.0,
                  future_force_horizon=8, time_shift_alpha=1.0):
         positive_int(future_force_horizon, "future_force_horizon")
         if future_force_horizon > horizon - n_obs_steps + 1:
             raise ValueError("future_force_horizon exceeds future actions")
         if not math.isfinite(future_force_loss_weight) or future_force_loss_weight < 0:
             raise ValueError("future_force_loss_weight must be finite and non-negative")
+        if not math.isfinite(future_force_loss_beta) or future_force_loss_beta <= 0:
+            raise ValueError("future_force_loss_beta must be finite and positive")
         if action_dim != 19:
             raise ValueError("InterActDex requires 19D joint actions")
         obs_encoder = InterActDexEncoder(pc_dim, num_points, n_obs_steps, pc_encoder_config, fps_random_config)
@@ -132,6 +134,7 @@ class InterActDex(Policy):
             action_dim=action_dim,
         )
         self.future_force_loss_weight = future_force_loss_weight
+        self.future_force_loss_beta = future_force_loss_beta
         self.future_force_horizon = future_force_horizon
         self.future_force_head = FutureForceHead(n_obs_steps) if future_force_loss_weight > 0 else None
 
@@ -139,6 +142,7 @@ class InterActDex(Policy):
     def effective_config(self):
         return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha,
                 "future_force_loss_weight": self.future_force_loss_weight,
+                "future_force_loss_beta": self.future_force_loss_beta,
                 "future_force_horizon": self.future_force_horizon}
 
     def configure_normalizer(self, feature_dims, feature_shapes):
@@ -163,16 +167,24 @@ class InterActDex(Policy):
         if target.shape != prediction.shape or valid.shape != prediction.shape[:1]:
             raise ValueError("Future force labels must be [B,5,3] with [B] validity")
         with torch.autocast(device_type=target.device.type, enabled=False):
-            errors = F.smooth_l1_loss(prediction.float(), target, reduction="none").mean((-1, -2))
+            # Prediction and target retain dataset units (XHand Real: SDK / 255).
+            prediction, target = prediction.float(), target.float()
+            errors = F.smooth_l1_loss(
+                prediction, target, reduction="none", beta=self.future_force_loss_beta,
+            ).mean((-1, -2))
             mask = valid.to(errors.dtype)
             denominator = mask.sum().clamp_min(1)
             loss = (errors * mask).sum() / denominator
             metrics = {}
             if log_metrics:
                 with torch.no_grad():
-                    mae = ((prediction.detach().float() - target).abs().mean((-1, -2)) * mask).sum() / denominator
-                    metrics = dict(loss_future_force=loss.detach(),
-                                   future_force_valid_fraction=mask.mean(), future_force_mae_raw=mae)
+                    mae = ((prediction - target).abs().mean((-1, -2)) * mask).sum() / denominator
+                    metrics = {
+                        "loss_future_force": loss.detach(),
+                        "future_force_valid_fraction": mask.mean(),
+                        "future_force_mae_scaled": mae,
+                        "future_force_mae_sdk": mae * 255.0,
+                    }
         return loss, metrics
 
     def compute_loss(self, batch, *, log_metrics=True, **kwargs):
