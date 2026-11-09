@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES
 
 
 def contiguous_numpy(value, dtype=None):
@@ -38,7 +38,7 @@ def prepare_observations(observation, *, normalization_dims, n_obs_steps, rgb_pr
         if len(value) < n_obs_steps:
             raise ValueError(f"Policy history {name} requires at least {n_obs_steps} frames")
         value = value[-n_obs_steps:]
-        shape = (width,) if name in {"joint_state", "eef_pose"} else FIELD_FEATURE_SHAPES.get(name)
+        shape = (width,) if name in {"joint_state", "eef_pose"} else FIELD_FEATURE_SHAPES.get(name, TACTILE_FEATURE_SHAPES.get(name))
         if shape is not None and value.shape[1:] != shape:
             raise ValueError(f"Policy history {name} requires trailing shape {shape}")
         if name in POINT_CLOUD_FIELDS:

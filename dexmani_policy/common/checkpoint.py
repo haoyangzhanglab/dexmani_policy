@@ -58,6 +58,8 @@ def restore_policy(
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
 
     feature_dims = effective_config["normalization_dims"]
+    if "action" not in feature_dims:
+        raise ValueError("Policy normalization_dims must include action")
     feature_shapes = normalization_feature_shapes(feature_dims, effective_config["normalization"])
     rng_state = get_rng_state()
     try:

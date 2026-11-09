@@ -149,12 +149,7 @@ class InterActDex(Policy):
     def _encode_features(self, obs):
         if any(value.shape[:2] != (obs["joint_state"].shape[0], self.n_obs_steps) for value in obs.values()):
             raise ValueError("All observations must share [B,n_obs_steps] axes")
-        key = "finger_tactile_force"
-        pre = self._preprocess_obs({name: value for name, value in obs.items() if name != key})
-        scale = self.normalizer[key].scale
-        # Compute N(F)-N(0) directly, avoiding cancellation through the offset.
-        pre[key] = (obs[key].to(scale) * scale).flatten(0, 1)
-        return self.obs_encoder(pre)
+        return self.obs_encoder(self._preprocess_obs(obs))
 
     @staticmethod
     def _pack_action_context(features):
@@ -168,7 +163,7 @@ class InterActDex(Policy):
         if force.shape != prediction.shape or valid.shape != prediction.shape[:1]:
             raise ValueError("Future force labels must be [B,5,3] with [B] validity")
         with torch.autocast(device_type=force.device.type, enabled=False):
-            target = self.normalizer["finger_tactile_force"].normalize(force)
+            target = force
             errors = F.smooth_l1_loss(prediction.float(), target, reduction="none").mean((-1, -2))
             mask = valid.to(errors.dtype)
             denominator = mask.sum().clamp_min(1)
@@ -178,7 +173,7 @@ class InterActDex(Policy):
                 with torch.no_grad():
                     mae = ((prediction.detach().float() - target).abs().mean((-1, -2)) * mask).sum() / denominator
                     metrics = dict(loss_future_force=loss.detach(),
-                                   future_force_valid_fraction=mask.mean(), future_force_mae=mae)
+                                   future_force_valid_fraction=mask.mean(), future_force_mae_raw=mae)
         return loss, metrics
 
     def compute_loss(self, batch, *, log_metrics=True, **kwargs):

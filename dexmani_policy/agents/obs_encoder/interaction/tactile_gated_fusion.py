@@ -5,7 +5,7 @@ from torch import nn
 
 
 class TactileGatedFusion(nn.Module):
-    """Force input is N(F)-N(0); all Value paths preserve physical zero."""
+    """Consume raw, zero-referenced force; all Value paths preserve physical zero."""
 
     def __init__(self):
         super().__init__()

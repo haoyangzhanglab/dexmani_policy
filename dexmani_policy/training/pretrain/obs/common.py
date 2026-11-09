@@ -9,7 +9,7 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.config import positive_int, validate_normalization_spec
 from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
@@ -161,10 +161,7 @@ def train(method, argv=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    missing = dataset.normalization_fields.keys() - cfg.normalization.keys()
-    if missing:
-        raise ValueError(f"Missing normalization for inputs: {sorted(missing)}")
-    cfg.normalization = {key: cfg.normalization[key] for key in dataset.normalization_fields}
+    validate_normalization_spec(dataset.normalization_fields, cfg.normalization)
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:

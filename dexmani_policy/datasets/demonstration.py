@@ -14,7 +14,7 @@ from dexmani_policy.common.image_util import (
 )
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int,
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES, positive_int,
 )
 from dexmani_policy.datasets.transforms import (
     AUGMENTATION_SPECS,
@@ -93,9 +93,10 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             self.episode_store.n_episodes, val_episodes=val_episodes,
             seed=seed, max_train_episodes=max_train_episodes,
         )
-        for key in FIELD_FEATURE_SHAPES.keys() & set(sensor_modalities):
-            if self.episode_store[key].shape[1:] != FIELD_FEATURE_SHAPES[key]:
-                raise ValueError(f"{key} requires trailing shape {FIELD_FEATURE_SHAPES[key]} after its T axis")
+        shapes = {**FIELD_FEATURE_SHAPES, **TACTILE_FEATURE_SHAPES}
+        for key in shapes.keys() & set(sensor_modalities):
+            if self.episode_store[key].shape[1:] != shapes[key]:
+                raise ValueError(f"{key} requires trailing shape {shapes[key]} after its T axis")
             if self.episode_store[key].dtype.kind != "f":
                 raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
         if len(self.episode_store[action_key].shape) != 2:

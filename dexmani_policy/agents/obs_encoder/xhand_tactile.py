@@ -10,7 +10,7 @@ __all__ = ["XHandForceEncoder", "XHandTaxelEncoder", "XHandPatchEncoder"]
 
 
 class XHandForceEncoder(nn.Module):
-    """Normalized [BT,5,3] -> [BT,5,64] with one shared 3-layer MLP."""
+    """Raw identity force [BT,5,3] -> [BT,5,64] with one shared 3-layer MLP."""
 
     num_tokens = 5
     out_dim = 64
@@ -35,7 +35,7 @@ class XHandForceEncoder(nn.Module):
 
 
 class XHandTaxelEncoder(nn.Module):
-    """Normalized [BT,5,120,3] -> [BT,5,64] with KineDex 1D CNN."""
+    """Raw identity taxel force [BT,5,120,3] -> [BT,5,64] with KineDex 1D CNN."""
 
     num_tokens = 5
     out_dim = 64
@@ -98,7 +98,7 @@ def right_hand_region_ids() -> torch.Tensor:
 
 
 class XHandPatchEncoder(nn.Module):
-    """Pool zero-reference scaled forces [BT,5,120,3] into five 64D tokens."""
+    """Pool raw, zero-reference forces [BT,5,120,3] into five 64D tokens."""
 
     num_tokens = 5
     num_regions = 5
@@ -112,6 +112,7 @@ class XHandPatchEncoder(nn.Module):
         activity_scale = torch.tensor(activity_scale, dtype=torch.float32).item()
         if not math.isfinite(activity_scale) or activity_scale <= 0:
             raise ValueError("activity_scale must be finite and positive in FP32")
+        # Same numeric units as the dataset force; zero bias is calibrated upstream.
         self.activity_scale = activity_scale
         if region_ids is None:
             region_ids = right_hand_region_ids()
@@ -175,7 +176,7 @@ class XHandPatchEncoder(nn.Module):
             )
 
     def forward(self, u: torch.Tensor) -> torch.Tensor:
-        """Consume u = N(raw) - N(0) = raw * scale, supplied by the Policy."""
+        """Consume raw taxel force; zero contact must be calibrated by the data producer."""
         descriptors = self._patch_descriptors(u)
         patch_features = self.patch_mlp(descriptors)
         patch_features = (

@@ -4,15 +4,15 @@ from math import prod
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, validate_normalization_spec
 
 
 def normalization_feature_shapes(dims, spec):
-    """Configuration defines required affine fields, including direct buffer consumers."""
+    validate_normalization_spec(dims, spec)
     return {
         key: FIELD_FEATURE_SHAPES.get(key, (width,))
         for key, width in dims.items()
-        if spec[key] != "identity" or key == "action" or key in TACTILE_FEATURE_SHAPES
+        if spec[key] == "limits"
     }
 
 
@@ -21,6 +21,14 @@ class FieldNormalizer(nn.Module):
         super().__init__()
         self.register_buffer("scale", torch.as_tensor(scale, dtype=torch.float32))
         self.register_buffer("offset", torch.as_tensor(offset, dtype=torch.float32))
+        self.validate()
+
+    def validate(self):
+        if self.scale.shape != self.offset.shape:
+            raise ValueError("Affine scale and offset must have identical shapes")
+        valid = torch.isfinite(self.scale) & torch.isfinite(self.offset) & (self.scale != 0)
+        if not valid.all():
+            raise ValueError("Invalid affine parameters: expected finite values and nonzero scale")
 
     def normalize(self, value) -> torch.Tensor:
         scale, offset = self.scale, self.offset
@@ -50,6 +58,8 @@ class LinearNormalizer(nn.Module):
                 values = values.float()
             if not values.numel():
                 continue
+            if not torch.isfinite(values).all():
+                raise ValueError(f"Nonfinite normalization data for {key}")
             feature_shape = FIELD_FEATURE_SHAPES.get(key, values.shape[-1:])
             values = values.reshape(-1, prod(feature_shape))
             chunk_min, chunk_max = torch.aminmax(values, dim=0)
@@ -67,9 +77,6 @@ class LinearNormalizer(nn.Module):
         scale = 2 / span.masked_fill(constant, 2)
         offset = -1 - scale * low
         offset[constant] = -low[constant]
-        valid = torch.isfinite(scale) & torch.isfinite(offset) & (scale != 0)
-        if not valid.all():
-            raise ValueError(f"Cannot represent finite, invertible affine parameters for {key!r}")
         self.fields[key] = FieldNormalizer(scale, offset)
 
     def __getitem__(self, key) -> FieldNormalizer:
@@ -78,6 +85,7 @@ class LinearNormalizer(nn.Module):
 
 def validate_normalizer_state(normalizer: LinearNormalizer) -> None:
     for key, field in normalizer.fields.items():
-        valid = torch.isfinite(field.scale) & torch.isfinite(field.offset) & (field.scale != 0)
-        if not valid.all():
-            raise ValueError(f"Invalid affine parameters for {key}: expected finite, nonzero scale")
+        try:
+            field.validate()
+        except ValueError as error:
+            raise ValueError(f"Invalid affine field {key}: {error}") from error

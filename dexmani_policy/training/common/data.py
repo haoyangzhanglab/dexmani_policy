@@ -1,3 +1,4 @@
+import re
 from itertools import islice
 from math import prod
 
@@ -6,7 +7,7 @@ import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS,
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES, validate_normalization_spec,
 )
 from dexmani_policy.common.normalizer import (
     FieldNormalizer, LinearNormalizer, validate_normalizer_state,
@@ -17,25 +18,29 @@ def fit_normalizer(
     dataset, spec, normalizer: LinearNormalizer, *, initial_state=None, inherited_fields=(), hand_affine=None,
 ) -> None:
     """Fit the configured affine fields in place, preserving inherited and internal fields."""
+    validate_normalization_spec(spec, spec)
+    for key in inherited_fields:
+        if key not in normalizer.fields or spec.get(key) != "limits":
+            raise RuntimeError(f"Missing affine field for inherited limits feature: {key}")
     inherited = LinearNormalizer({
-        key: normalizer[key].scale.shape for key in inherited_fields if key in normalizer.fields
+        key: normalizer[key].scale.shape for key in inherited_fields
     })
     inherited.load_state_dict({} if initial_state is None else initial_state, strict=True)
     normalizer.fields.update(dict(inherited.fields.items()))
-    for key in spec:
-        if key not in normalizer.fields or key in inherited_fields:
+    for key, mode in spec.items():
+        if mode == "identity":
             continue
-        mode = spec[key]
+        if key not in normalizer.fields:
+            raise RuntimeError(f"Missing affine field for limits feature: {key}")
+        if key in inherited_fields:
+            continue
+        expected_shape = normalizer[key].scale.shape
+        chunks = dataset.iter_normalization_data(key)
         if key == "action" and hand_affine is not None:
             arm_dim = normalizer[key].scale.numel() - hand_affine["scale"].numel()
-        if mode == "limits":
-            chunks = dataset.iter_normalization_data(key)
-            if key == "action" and hand_affine is not None:
-                chunks = (values[..., :arm_dim] for values in chunks)
-            normalizer.fit_field(key, chunks)
-        elif mode != "identity":
-            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected identity or limits")
-        if key == "action" and mode != "identity" and dataset.action_key == "action_ee":
+            chunks = (values[..., :arm_dim] for values in chunks)
+        normalizer.fit_field(key, chunks)
+        if key == "action" and dataset.action_key == "action_ee":
             field = normalizer[key]
             if field.scale.numel() <= 9:
                 raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
@@ -47,6 +52,8 @@ def fit_normalizer(
                 torch.cat((field.scale[:arm_dim], hand_affine["scale"])),
                 torch.cat((field.offset[:arm_dim], hand_affine["offset"])),
             )
+        if normalizer[key].scale.shape != expected_shape:
+            raise ValueError(f"Fitted affine shape mismatch for {key}: expected {tuple(expected_shape)}")
     validate_normalizer_state(normalizer)
 
 
@@ -57,7 +64,7 @@ def build_dataset(cfg):
     dims = {
         key: int(buffer[key].shape[-1]) for key in dataset.sensor_modalities
     }
-    for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
+    for key in (FIELD_FEATURE_SHAPES.keys() | TACTILE_FEATURE_SHAPES.keys()) & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
     if dataset.pc_dim is not None:
         for key in POINT_CLOUD_FIELDS.intersection(dims):
@@ -83,15 +90,30 @@ def build_dataset(cfg):
         if modality in dataset.sensor_modalities and attr in buffer.attrs:
             deployment[attr] = buffer.attrs[attr]
     if "object_pointcloud" in dataset.sensor_modalities:
-        if "hoi_pcd" not in buffer.attrs:
-            raise ValueError("HOI dataset requires hoi_pcd metadata")
-        metadata = buffer.attrs["hoi_pcd"]
-        if metadata["task_name"] != cfg.task_name:
-            raise ValueError("HOI dataset task differs from training task")
+        metadata = buffer.attrs.get("hoi_pcd")
+        if not isinstance(metadata, dict):
+            raise ValueError("HOI dataset requires hoi_pcd metadata mapping")
+        task_name = metadata.get("task_name")
+        if not isinstance(task_name, str) or not task_name.strip() or task_name != cfg.task_name:
+            raise ValueError("HOI dataset task_name must be nonempty and match training task")
+        names = metadata.get("object_names")
+        if (
+            not isinstance(names, list) or not names
+            or any(not isinstance(name, str) or not name.strip() for name in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError("HOI dataset object_names must be a nonempty list of unique names")
+        digest = metadata.get("template_sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+            raise ValueError("HOI dataset template_sha256 must be a 64-digit SHA256 hex string")
         points = buffer["object_pointcloud"]
         if points.shape[1:] != (1024, 3) or points.dtype.name != "float32":
             raise ValueError("HOI dataset requires float32 [T,1024,3]")
-        deployment["hoi_pcd"] = metadata
+        deployment["hoi_pcd"] = {
+            "task_name": task_name,
+            "object_names": names,
+            "template_sha256": digest.lower(),
+        }
     if "depth" in dataset.sensor_modalities:
         deployment["depth_config"] = {
             "shape": list(buffer["depth"].shape[1:]),

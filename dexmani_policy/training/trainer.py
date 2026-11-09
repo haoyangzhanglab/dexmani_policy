@@ -34,7 +34,7 @@ class PolicyTrainer:
             current_hoi = data_description.get("deployment_metadata", {}).get("hoi_pcd")
             saved_hoi = checkpoint.effective_config.get("deployment_metadata", {}).get("hoi_pcd")
             if current_hoi != saved_hoi:
-                raise ValueError("Resume data/model mismatch: HOI asset recipe")
+                raise ValueError("Resume data/model mismatch: HOI task/template")
         device = torch.device(cfg.training.device)
         codebook = hand_affine = None
         if checkpoint is None and cfg.policy_name == "dqrise":
@@ -83,8 +83,9 @@ class PolicyTrainer:
                     with open_dict(cfg.normalization):
                         for key in inherited_fields:
                             cfg.normalization[key] = payload["normalization"][key]
+                    inherited_fields = tuple(key for key in inherited_fields if cfg.normalization[key] == "limits")
                     del payload
-            validate_normalization(cfg)
+        validate_normalization(cfg)
         model.configure_normalizer(
             data_description["field_dims"],
             normalization_feature_shapes(data_description["field_dims"], cfg.normalization),
