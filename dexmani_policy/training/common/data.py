@@ -76,7 +76,6 @@ def build_dataset(cfg):
     if "dt" in buffer.attrs:
         deployment["control_dt_s"] = buffer.attrs["dt"]
     for modality, attr in (
-        ("object_pointcloud", "hoi_pcd"),
         ("point_cloud", "pointcloud_config"),
         ("hand_pointcloud", "hand_pointcloud_config"),
         ("fingertip_xyz", "fingertip_link_names"),
@@ -86,10 +85,13 @@ def build_dataset(cfg):
     if "object_pointcloud" in dataset.sensor_modalities:
         if "hoi_pcd" not in buffer.attrs:
             raise ValueError("HOI dataset requires hoi_pcd metadata")
-        if deployment["hoi_pcd"]["task_name"] != cfg.task_name:
+        metadata = buffer.attrs["hoi_pcd"]
+        if metadata["task_name"] != cfg.task_name:
             raise ValueError("HOI dataset task differs from training task")
-        if buffer["object_pointcloud"].shape[1:] != (1024, 3) or buffer["object_pointcloud"].dtype.name != "float32":
+        points = buffer["object_pointcloud"]
+        if points.shape[1:] != (1024, 3) or points.dtype.name != "float32":
             raise ValueError("HOI dataset requires float32 [T,1024,3]")
+        deployment["hoi_pcd"] = metadata
     if "depth" in dataset.sensor_modalities:
         deployment["depth_config"] = {
             "shape": list(buffer["depth"].shape[1:]),
