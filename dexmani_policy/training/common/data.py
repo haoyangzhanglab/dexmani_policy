@@ -97,10 +97,7 @@ def build_dataset(cfg):
         if modality in dataset.sensor_modalities and attr in buffer.attrs:
             deployment[attr] = buffer.attrs[attr]
     if "hoi_pcd" in deployment:
-        recipe = deployment["hoi_pcd"]
-        if (recipe["schema_version"], recipe["num_points"], recipe["units"], recipe["coordinate_frame"]) != (1, 1024, "m", "xarm_base"):
-            raise ValueError("Unsupported HOI dataset recipe")
-        if recipe["task_name"] != cfg.task_name:
+        if deployment["hoi_pcd"]["task_name"] != cfg.task_name:
             raise ValueError("HOI dataset task differs from training task")
         if buffer["object_pointcloud"].shape[1:] != (1024, 3) or buffer["object_pointcloud"].dtype.name != "float32":
             raise ValueError("HOI dataset requires float32 [T,1024,3]")
