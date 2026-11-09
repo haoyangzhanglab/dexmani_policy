@@ -65,8 +65,6 @@ def generate(zarr_path, output, num_workers=1):
             raise ValueError(f"Contact geometry requires {key}[T,N>0,C>=3]")
     if buffer["object_pointcloud"].shape[1] != 1024:
         raise ValueError("CordViP requires 1024 object points")
-    if buffer["joint_state"].shape[1:] != (19,):
-        raise ValueError("CordViP requires joint_state[T,19]")
     if "action" in keys and buffer["action"].shape[1:] != (19,):
         raise ValueError("CordViP policy requires action[T,19]")
     rows = int(buffer.episode_ends[-1])

@@ -3,6 +3,8 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
+
 
 class EpisodeStore:
     """Read-only arrays from a local Zarr 2 directory."""
@@ -33,6 +35,12 @@ class EpisodeStore:
                 raise ValueError(
                     f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
                 )
+            feature_shape = FIELD_FEATURE_SHAPES.get(key, TACTILE_FEATURE_SHAPES.get(key))
+            if feature_shape is not None:
+                if shape[1:] != feature_shape:
+                    raise ValueError(f"{key} requires trailing shape {feature_shape} after its T axis")
+                if values.dtype.kind != "f":
+                    raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
         self.episode_ends = ends.astype(np.int64, copy=False)
         self.attrs = dict(group.attrs)
 

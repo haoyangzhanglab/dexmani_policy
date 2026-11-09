@@ -38,7 +38,7 @@ def prepare_observations(observation, *, normalization_dims, n_obs_steps, rgb_pr
         if len(value) < n_obs_steps:
             raise ValueError(f"Policy history {name} requires at least {n_obs_steps} frames")
         value = value[-n_obs_steps:]
-        shape = (width,) if name in {"joint_state", "eef_pose"} else FIELD_FEATURE_SHAPES.get(name, TACTILE_FEATURE_SHAPES.get(name))
+        shape = FIELD_FEATURE_SHAPES.get(name, TACTILE_FEATURE_SHAPES.get(name))
         if shape is not None and value.shape[1:] != shape:
             raise ValueError(f"Policy history {name} requires trailing shape {shape}")
         if name in POINT_CLOUD_FIELDS:

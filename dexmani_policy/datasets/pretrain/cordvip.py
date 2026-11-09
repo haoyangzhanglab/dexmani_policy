@@ -22,8 +22,6 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
                 raise ValueError(f"CordViP requires {key}[T,N>0,C>=3]")
         if buffer["object_pointcloud"].shape[1] != 1024:
             raise ValueError("CordViP contact head predicts 1024 object point labels")
-        if buffer["joint_state"].shape[1:] != (19,):
-            raise ValueError("CordViP requires arm7+hand12 joint_state")
         if buffer["contact_map"].shape[1:] != (1024,):
             raise ValueError("Contact labels must match the 1024 object point slots")
         super().__init__(

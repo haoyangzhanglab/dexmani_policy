@@ -7,6 +7,8 @@ TACTILE_FEATURE_SHAPES = {
     "taxel_tactile_force": (5, 120, 3),
 }
 FIELD_FEATURE_SHAPES = {
+    "joint_state": (19,),
+    "eef_pose": (9,),
     "fingertip_xyz": (5, 3),
     "camera_intrinsic": (9,),
     "camera_extrinsic": (12,),

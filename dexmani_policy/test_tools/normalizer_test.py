@@ -14,6 +14,7 @@ from hydra.errors import InstantiationException
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
 from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.test_tools.smoke_test import check_dataset, make_source, run_smoke
 from dexmani_policy.train import build_trainer
@@ -151,6 +152,71 @@ class NormalizerTest(unittest.TestCase):
                 build_dataset(cfg)
             self.assertIsInstance(caught.exception.__cause__, ValueError)
 
+    def test_proprio_dataset_shape_contracts(self):
+        for field, width, bad_width in (("joint_state", 19, 18), ("eef_pose", 9, 6)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                cfg, source = make_policy_fixture(Path(directory), "interact_dex")
+                dataset, description = build_dataset(cfg)
+                self.assertEqual(description["field_dims"][field], width)
+                self.assertEqual(dataset[0]["obs"][field].shape, (2, width))
+                spec = {field: "limits"}
+                normalizer = LinearNormalizer(normalization_feature_shapes({field: width}, spec))
+                self.assertEqual(normalizer[field].scale.shape, (width,))
+                self.assertEqual(normalizer[field].offset.shape, (width,))
+                fit_normalizer(dataset, spec, normalizer)
+                self.assertEqual(normalizer[field].scale.shape, (width,))
+                self.assertEqual(normalizer[field].offset.shape, (width,))
+                for size, dtype, message in ((bad_width, np.float32, "trailing shape"),
+                                             (width, np.int32, "floating point")):
+                    with self.subTest(size=size, dtype=dtype):
+                        del source[f"data/{field}"]
+                        source.create_dataset(f"data/{field}", data=np.zeros((12, size), dtype=dtype))
+                        with self.assertRaisesRegex(InstantiationException, f"{field}.*{message}") as caught:
+                            build_dataset(cfg)
+                        self.assertIsInstance(caught.exception.__cause__, ValueError)
+
+    def test_proprio_inference_shape_contracts(self):
+        from dexmani_policy.common.inference import prepare_observations
+
+        for field, width, bad_width in (("joint_state", 19, 18), ("eef_pose", 9, 6)):
+            self.assertEqual(FIELD_FEATURE_SHAPES[field], (width,))
+            good = np.arange(3 * width, dtype=np.float64).reshape(3, width)
+            # Fixed observation shapes must not depend on checkpoint normalization widths.
+            for configured_width in (width, bad_width):
+                with self.subTest(field=field, configured_width=configured_width):
+                    options = dict(normalization_dims={field: configured_width, "action": 19},
+                                   n_obs_steps=2, rgb_preprocessing={}, device="cpu")
+                    result = prepare_observations({field: good}, **options)
+                    torch.testing.assert_close(result[field], torch.from_numpy(good[-2:]).float().unsqueeze(0))
+                    with self.assertRaisesRegex(ValueError, f"{field}.*trailing shape"):
+                        prepare_observations({field: np.zeros((2, bad_width), dtype=np.float32)}, **options)
+
+    def test_joint_state_contract_in_pretraining_and_preprocessing(self):
+        from dexmani_policy.datasets.episode_store import EpisodeStore
+        from dexmani_policy.datasets.preprocess.contact_map import generate
+        from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.zarr"
+            source = make_source(path)
+            for key, shape in (("hand_pointcloud", (12, 8, 3)),
+                               ("object_pointcloud", (12, 1024, 3)), ("contact_map", (12, 1024))):
+                source.create_dataset(f"data/{key}", data=np.zeros(shape, dtype=np.float32))
+            dataset = CordViPPretrainDataset(path)
+            self.assertEqual(dataset[0]["obs"]["joint_state"].shape, (4, 19))
+            output = Path(directory) / "contact.zarr"
+            for width, dtype, message in ((18, np.float32, "trailing shape"),
+                                           (19, np.int32, "floating point")):
+                with self.subTest(width=width, dtype=dtype):
+                    del source["data/joint_state"]
+                    source.create_dataset("data/joint_state", data=np.zeros((12, width), dtype=dtype))
+                    with self.assertRaisesRegex(ValueError, f"joint_state.*{message}"):
+                        CordViPPretrainDataset(path)
+                    with self.assertRaisesRegex(ValueError, f"joint_state.*{message}"):
+                        generate(path, output)
+                    self.assertFalse(output.exists())
+                    self.assertEqual(EpisodeStore(path, keys=["action"])["action"].shape, (12, 19))
+
     def test_streaming_limits_and_constant_channels(self):
         values = torch.tensor([[1., 3., 7.], [5., 9., 7.], [3., 6., 7.]])
         normalizer = LinearNormalizer()
@@ -186,9 +252,9 @@ class NormalizerTest(unittest.TestCase):
             cfg = load_policy_config("dp3", [f"zarr_path={path}", "horizon=4", "n_action_steps=2",
                                              "normalization.joint_state=identity", "dataset.augmentation_cfg=null"])
             self.assertNotIn("fields.joint_state.scale", check_dataset(cfg, source))
-            spec = dict(point_cloud="identity", joint_state="identity", finger_tactile_force="identity",
+            spec = dict(point_cloud="identity", joint_state="identity", eef_pose="identity", finger_tactile_force="identity",
                         taxel_tactile_force="identity")
-            dims = dict(joint_state=19, point_cloud=6, finger_tactile_force=15, taxel_tactile_force=1800)
+            dims = dict(joint_state=19, eef_pose=9, point_cloud=6, finger_tactile_force=15, taxel_tactile_force=1800)
             identity = LinearNormalizer(normalization_feature_shapes(dims, spec))
             with patch.object(dataset, "iter_normalization_data", side_effect=AssertionError("identity must not fit")):
                 fit_normalizer(dataset, spec, identity)
