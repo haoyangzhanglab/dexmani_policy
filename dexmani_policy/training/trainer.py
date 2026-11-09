@@ -17,7 +17,7 @@ from dexmani_policy.common.config import (
     positive_int,
 )
 from dexmani_policy.common.io_util import atomic_path, close_resources
-from dexmani_policy.common.normalizer import normalizer_shapes_from_state
+from dexmani_policy.common.normalizer import normalization_feature_shapes, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.config import assemble_effective_config, validate_normalization
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position, fit_normalizer
@@ -51,12 +51,6 @@ class PolicyTrainer:
             raise ValueError("Dataset primary action width must match policy control output")
         if checkpoint is not None and data_description["field_dims"] != cfg.normalization_dims:
             raise ValueError("Resume data/model mismatch: normalization_dims")
-        model.configure_normalizer(
-            data_description["field_dims"] if checkpoint is None else cfg.normalization_dims,
-            {} if checkpoint is None else normalizer_shapes_from_state(
-                checkpoint.model_state,
-            ),
-        )
         if checkpoint is None:
             sources = cfg.get("initialization", {})
             method = cfg.policy_name
@@ -88,16 +82,19 @@ class PolicyTrainer:
                                         ("hand_pointcloud", "object_pointcloud", "joint_state"))
                     with open_dict(cfg.normalization):
                         for key in inherited_fields:
-                            has_affine = any(f"fields.{key}.{part}" in pretrained_state for part in ("scale", "offset"))
-                            cfg.normalization[key] = payload["normalization"][key] if has_affine else "identity"
+                            cfg.normalization[key] = payload["normalization"][key]
                     del payload
             validate_normalization(cfg)
-            normalizer = fit_normalizer(
-                dataset, cfg.normalization, initial_state=pretrained_state,
-                feature_dims=model.normalization_dims, hand_affine=hand_affine,
+        model.configure_normalizer(
+            data_description["field_dims"],
+            normalization_feature_shapes(data_description["field_dims"], cfg.normalization),
+        )
+        if checkpoint is None:
+            fit_normalizer(
+                dataset, cfg.normalization, model.normalizer, initial_state=pretrained_state,
+                inherited_fields=inherited_fields, hand_affine=hand_affine,
             )
             print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
-            model.normalizer = normalizer
             if method == "dexlatent":
                 model.fit_latent_normalizer(dataset)
 
@@ -135,8 +132,10 @@ class PolicyTrainer:
                     raise ValueError("Resume checkpoint is missing EMA state")
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
         model.to(device=device, dtype=torch.float32)
+        validate_normalizer_state(model.normalizer)
         if ema_model is not None:
             ema_model.to(device=device, dtype=torch.float32)
+            validate_normalizer_state(ema_model.normalizer)
             # Bind current Parameters only after assignment and device migration.
             ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
 

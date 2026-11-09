@@ -11,7 +11,7 @@ from dexmani_policy.agents.action_decoders.backbones.modules import (
 )
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 
 
 def vicreg_loss(prediction, target):
@@ -115,7 +115,7 @@ class AFRO(nn.Module):
         self.idm = build_mlp([64, 256, 128, 16], activation=nn.GELU, normalize=False)
         self.fdm = ForwardDynamics(64)
         self.normalizer = LinearNormalizer(
-            {"point_cloud": (3,)} if normalization["point_cloud"] != "identity" else {}
+            normalization_feature_shapes({"point_cloud": 3}, normalization)
         )
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=100, beta_schedule="squaredcos_cap_v2",

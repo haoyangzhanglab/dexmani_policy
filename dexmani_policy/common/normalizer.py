@@ -1,27 +1,18 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
+from math import prod
 
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
 
 
-def normalization_feature_shapes(dims):
+def normalization_feature_shapes(dims, spec):
+    """Configuration defines required affine fields, including direct buffer consumers."""
     return {
         key: FIELD_FEATURE_SHAPES.get(key, (width,))
         for key, width in dims.items()
-    }
-
-
-def normalizer_shapes_from_state(
-    state: Mapping[str, torch.Tensor],
-) -> dict[str, torch.Size]:
-    """Rebuild normalizer buffer shapes from saved state."""
-    prefix, suffix = "normalizer.fields.", ".scale"
-    return {
-        key[len(prefix):-len(suffix)]: value.shape
-        for key, value in state.items()
-        if key.startswith(prefix) and key.endswith(suffix)
+        if spec[key] != "identity" or key == "action" or key in TACTILE_FEATURE_SHAPES
     }
 
 
@@ -50,72 +41,32 @@ class LinearNormalizer(nn.Module):
             self.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
 
     @torch.no_grad()
-    def fit_field(self, key: str, chunks: Iterable, *, mode="limits", last_n_dims=1):
-        """Preserve feature axes and use FP64 for moment accumulation."""
-        if mode not in {"limits", "gaussian", "rms", "max_abs"}:
-            raise ValueError(f"Unknown normalization mode: {mode}")
-
-        count = 0
-        if mode == "rms":
-            sum_squares = torch.zeros((), dtype=torch.float64)
-        elif mode == "max_abs":
-            max_abs = torch.zeros((), dtype=torch.float64)
+    def fit_field(self, key: str, chunks: Iterable) -> None:
+        """Fit per-feature limits from streaming training chunks."""
+        limits = None
         for chunk in chunks:
             values = torch.as_tensor(chunk)
-            if mode in {"gaussian", "rms"}:
-                values = values.double()
-            elif not values.is_floating_point():
+            if not values.is_floating_point():
                 values = values.float()
             if not values.numel():
                 continue
-            feature_shape = values.shape[-last_n_dims:]
-            values = values.reshape(-1, feature_shape.numel())
-            size = len(values)
-            if mode == "rms":
-                sum_squares += values.square().sum()
-                size = values.numel()
-            elif mode == "max_abs":
-                max_abs = torch.maximum(max_abs, values.abs().max())
-                size = values.numel()
-            elif mode == "limits":
-                chunk_min, chunk_max = torch.aminmax(values, dim=0)
-                if count == 0:
-                    low, high = chunk_min, chunk_max
-                else:
-                    low, high = torch.minimum(low, chunk_min), torch.maximum(high, chunk_max)
-            else:
-                variance, chunk_mean = torch.var_mean(values, dim=0, correction=0)
-                chunk_m2 = variance * size
-                if count == 0:
-                    mean, m2 = chunk_mean, chunk_m2
-                else:
-                    delta = chunk_mean - mean
-                    total = count + size
-                    m2 = m2 + chunk_m2 + delta.square() * (count * size / total)
-                    mean = mean + delta * (size / total)
-            count += size
+            feature_shape = FIELD_FEATURE_SHAPES.get(key, values.shape[-1:])
+            values = values.reshape(-1, prod(feature_shape))
+            chunk_min, chunk_max = torch.aminmax(values, dim=0)
+            if limits is not None:
+                chunk_min = torch.minimum(limits[0], chunk_min)
+                chunk_max = torch.maximum(limits[1], chunk_max)
+            limits = chunk_min, chunk_max
             del values, chunk
 
-        if not count or (mode == "gaussian" and count < 2):
-            raise ValueError(f"Insufficient samples for {key} with mode={mode}")
-
-        if mode in {"rms", "max_abs"}:
-            magnitude = (sum_squares / count).sqrt() if mode == "rms" else max_abs
-            scalar = torch.ones_like(magnitude) if magnitude == 0 else magnitude.reciprocal()
-            scale = scalar.float().expand(feature_shape).clone()
-            offset = torch.zeros_like(scale)
-        elif mode == "limits":
-            low, high = low.float().reshape(feature_shape), high.float().reshape(feature_shape)
-            span = high - low
-            constant = span < 1e-4
-            scale = 2 / span.masked_fill(constant, 2)
-            offset = -1 - scale * low
-            offset[constant] = -low[constant]
-        else:
-            mean = mean.float().reshape(feature_shape)
-            std = (m2 / (count - 1)).sqrt().float().reshape(feature_shape)
-            scale = std.masked_fill(std < 1e-4, 1).reciprocal()
-            offset = -mean * scale
+        if limits is None:
+            raise ValueError(f"Insufficient samples for {key} with mode=limits")
+        low, high = (value.float().reshape(feature_shape) for value in limits)
+        span = high - low
+        constant = span < 1e-4
+        scale = 2 / span.masked_fill(constant, 2)
+        offset = -1 - scale * low
+        offset[constant] = -low[constant]
         valid = torch.isfinite(scale) & torch.isfinite(offset) & (scale != 0)
         if not valid.all():
             raise ValueError(f"Cannot represent finite, invertible affine parameters for {key!r}")

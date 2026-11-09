@@ -6,46 +6,35 @@ import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES,
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS,
 )
 from dexmani_policy.common.normalizer import (
-    FieldNormalizer, LinearNormalizer, normalization_feature_shapes, validate_normalizer_state,
+    FieldNormalizer, LinearNormalizer, validate_normalizer_state,
 )
 
 
-def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affine=None):
-    """Assemble the train affine once, inheriting complete fields before fitting the rest."""
-    spec = {key: spec[key] for key in feature_dims}
-    expected_shapes = normalization_feature_shapes(feature_dims)
-    initial_state = {} if initial_state is None else initial_state
-    normalizer = LinearNormalizer({
-        key: expected_shapes[key] for key in spec
-        if any(f"fields.{key}.{part}" in initial_state for part in ("scale", "offset"))
+def fit_normalizer(
+    dataset, spec, normalizer: LinearNormalizer, *, initial_state=None, inherited_fields=(), hand_affine=None,
+) -> None:
+    """Fit the configured affine fields in place, preserving inherited and internal fields."""
+    inherited = LinearNormalizer({
+        key: normalizer[key].scale.shape for key in inherited_fields if key in normalizer.fields
     })
-    normalizer.load_state_dict(initial_state, strict=True)
-    validate_normalizer_state(normalizer)
-    for key, mode in spec.items():
-        if key in normalizer.fields:
+    inherited.load_state_dict({} if initial_state is None else initial_state, strict=True)
+    normalizer.fields.update(dict(inherited.fields.items()))
+    for key in spec:
+        if key not in normalizer.fields or key in inherited_fields:
             continue
-        if mode == "identity":
-            if key == "action" or key in TACTILE_FEATURE_SHAPES:
-                # Action and tactile loss paths read affine buffers directly.
-                shape = expected_shapes[key]
-                normalizer.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
-            else:
-                continue
-        else:
+        mode = spec[key]
+        if key == "action" and hand_affine is not None:
+            arm_dim = normalizer[key].scale.numel() - hand_affine["scale"].numel()
+        if mode == "limits":
             chunks = dataset.iter_normalization_data(key)
-            if key == "action" and hand_affine is not None and mode in {"limits", "gaussian"}:
-                arm_dim = feature_dims[key] - hand_affine["scale"].numel()
+            if key == "action" and hand_affine is not None:
                 chunks = (values[..., :arm_dim] for values in chunks)
-            tactile_limits = key in TACTILE_FEATURE_SHAPES and mode == "limits"
-            normalizer.fit_field(key, chunks, mode=mode,
-                                 last_n_dims=1 if tactile_limits else len(expected_shapes[key]))
-            if tactile_limits:
-                field = normalizer[key]
-                field.scale = field.scale.expand(expected_shapes[key]).clone()
-                field.offset = field.offset.expand(expected_shapes[key]).clone()
+            normalizer.fit_field(key, chunks)
+        elif mode != "identity":
+            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected identity or limits")
         if key == "action" and mode != "identity" and dataset.action_key == "action_ee":
             field = normalizer[key]
             if field.scale.numel() <= 9:
@@ -54,13 +43,11 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None, hand_affi
             field.offset[3:9] = 0
         if key == "action" and hand_affine is not None:
             field = normalizer[key]
-            arm_dim = feature_dims[key] - hand_affine["scale"].numel()
-            # RMS/MaxAbs must include hand values when determining the shared arm scale.
             normalizer.fields[key] = FieldNormalizer(
                 torch.cat((field.scale[:arm_dim], hand_affine["scale"])),
                 torch.cat((field.offset[:arm_dim], hand_affine["offset"])),
             )
-    return normalizer
+    validate_normalizer_state(normalizer)
 
 
 def build_dataset(cfg):
@@ -96,7 +83,9 @@ def build_dataset(cfg):
     ):
         if modality in dataset.sensor_modalities and attr in buffer.attrs:
             deployment[attr] = buffer.attrs[attr]
-    if "hoi_pcd" in deployment:
+    if "object_pointcloud" in dataset.sensor_modalities:
+        if "hoi_pcd" not in buffer.attrs:
+            raise ValueError("HOI dataset requires hoi_pcd metadata")
         if deployment["hoi_pcd"]["task_name"] != cfg.task_name:
             raise ValueError("HOI dataset task differs from training task")
         if buffer["object_pointcloud"].shape[1:] != (1024, 3) or buffer["object_pointcloud"].dtype.name != "float32":

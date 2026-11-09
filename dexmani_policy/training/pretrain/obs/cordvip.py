@@ -8,7 +8,7 @@ from torch.nn import functional as F
 
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.interaction.correspondence import ContactCoordinationEncoder
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 
 
 class CordViP(nn.Module):
@@ -22,10 +22,8 @@ class CordViP(nn.Module):
             raise ValueError("Loss weights must be finite, nonnegative, and at least one positive")
         self.encoder = ContactCoordinationEncoder()
         self.n_obs_steps = n_obs_steps
-        shapes = {"hand_pointcloud": (3,), "object_pointcloud": (3,), "joint_state": (19,)}
-        self.normalizer = LinearNormalizer({
-            key: shape for key, shape in shapes.items() if normalization[key] != "identity"
-        })
+        dims = {"hand_pointcloud": 3, "object_pointcloud": 3, "joint_state": 19}
+        self.normalizer = LinearNormalizer(normalization_feature_shapes(dims, normalization))
 
         robot_dim, object_dim, hand_dim, arm_dim = self.encoder.output_dims
         visual_dim = robot_dim + object_dim

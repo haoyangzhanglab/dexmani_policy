@@ -58,7 +58,7 @@ def prepare_hand_data(cfg):
     train_hand = load_hand_array(buffer, train)
     val_hand = load_hand_array(buffer, val) if val.any() else None
     normalizer = LinearNormalizer()
-    normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
+    normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)))
     cfg.dataset.zarr_path = buffer.path
     logger.info("VQ episodes: total=%d train=%d val=%d unused=%d; train frames=%d",
                 buffer.n_episodes, train.sum(), val.sum(), (~(train | val)).sum(), len(train_hand))

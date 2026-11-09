@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
 from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_policy_config
@@ -102,6 +103,7 @@ def save_run(model, optimizer, scheduler, cfg, step):
 def restore_run(model, optimizer, scheduler, checkpoint) -> int:
     # The optimizer already owns these Parameters, so restore their values in place.
     model.load_state_dict(checkpoint["model_state"], strict=True)
+    validate_normalizer_state(model.normalizer)
     if optimizer.param_groups[0]["param_names"] != checkpoint["optimizer_state"]["param_groups"][0]["param_names"]:
         raise ValueError("Optimizer parameter order changed")
     optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -184,10 +186,7 @@ def train(method, argv=None):
 
         model = CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
     if not resuming:
-        model.normalizer = fit_normalizer(
-            dataset, cfg.normalization,
-            feature_dims={key: field.scale.numel() for key, field in model.normalizer.fields.items()},
-        )
+        fit_normalizer(dataset, cfg.normalization, model.normalizer)
     device = torch.device(cfg.training.device)
     model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))

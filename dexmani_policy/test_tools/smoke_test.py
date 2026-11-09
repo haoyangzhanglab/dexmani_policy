@@ -12,6 +12,7 @@ import zarr
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int, set_project_root
+from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
 from dexmani_policy.deployment.metadata import policy_info
 from dexmani_policy.train import run_trainer, run_training
@@ -64,7 +65,8 @@ def check_dataset(cfg, source):
         for key in ("joint_state", "point_cloud"):
             torch.testing.assert_close(sample["obs"][key], raw[key][rows[:2]], rtol=0, atol=0)
 
-    normalizer = fit_normalizer(dataset, cfg.normalization, feature_dims=description["field_dims"])
+    normalizer = LinearNormalizer(normalization_feature_shapes(description["field_dims"], cfg.normalization))
+    fit_normalizer(dataset, cfg.normalization, normalizer)
     for key, values in raw.items():
         field = normalizer[key]
         normalized = field.normalize(values)

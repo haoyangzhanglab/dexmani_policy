@@ -50,7 +50,7 @@ def restore_policy(
     import hydra
     import torch
 
-    from dexmani_policy.common.normalizer import normalizer_shapes_from_state
+    from dexmani_policy.common.normalizer import normalization_feature_shapes, validate_normalizer_state
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
     torch.set_float32_matmul_precision("highest")
@@ -58,7 +58,7 @@ def restore_policy(
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
 
     feature_dims = effective_config["normalization_dims"]
-    feature_shapes = normalizer_shapes_from_state(state_dict)
+    feature_shapes = normalization_feature_shapes(feature_dims, effective_config["normalization"])
     rng_state = get_rng_state()
     try:
         agent = hydra.utils.instantiate(effective_config["agent"], _convert_="all")
@@ -68,6 +68,7 @@ def restore_policy(
     agent.configure_normalizer(feature_dims, feature_shapes)
     agent.load_state_dict(state_dict, strict=True, assign=True)
     agent.to(device=device, dtype=torch.float32)
+    validate_normalizer_state(agent.normalizer)
     agent.eval()
     rgb_encoder = getattr(agent.obs_encoder, "rgb_encoder", None)
     if rgb_encoder is not None and rgb_encoder.tune_mode == "lora":

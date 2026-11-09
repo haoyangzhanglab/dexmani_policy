@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 import hydra
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.config import PROJECT_ROOT, positive_int
+from dexmani_policy.common.config import PROJECT_ROOT, TACTILE_FEATURE_SHAPES, positive_int
 
 if TYPE_CHECKING:
     from dexmani_policy.agents.policies.base import Policy
@@ -99,9 +99,13 @@ def validate_normalization(cfg):
         raise ValueError(f"Missing normalization for inputs and action: {sorted(missing)}")
     spec = {key: cfg.normalization[key] for key in expected}
     for key, mode in spec.items():
-        allowed = {"identity", "limits", "gaussian", "rms", "max_abs"}
+        allowed = {"identity", "limits"}
         if mode not in allowed:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected {sorted(allowed)}")
+
+    for key in TACTILE_FEATURE_SHAPES.keys() & spec.keys():
+        if spec[key] != "identity":
+            raise ValueError(f"{key} must use identity for new tactile training")
 
     physical = set()
     if cfg.policy_name in {"sat", "dqrise", "dexlatent"}:

@@ -85,6 +85,11 @@ class DexLatent(Policy):
     def effective_config(self) -> dict:
         return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha}
 
+    def configure_normalizer(self, feature_dims, feature_shapes) -> None:
+        super().configure_normalizer(
+            feature_dims, {**feature_shapes, "hand_latent": (self.hand_prior.hand_mean_head.out_features,)},
+        )
+
     @torch.no_grad()
     def _encode_actions(self, actions) -> tuple[torch.Tensor, torch.Tensor]:
         normalized = self.normalizer["action"].normalize(actions)
@@ -92,7 +97,7 @@ class DexLatent(Policy):
 
     def fit_latent_normalizer(self, dataset) -> None:
         latents = (self._encode_actions(chunk)[1] for chunk in dataset.iter_normalization_data("action"))
-        self.normalizer.fit_field("hand_latent", latents, mode="limits")
+        self.normalizer.fit_field("hand_latent", latents)
 
     def compute_loss(self, batch: dict, *, log_metrics: bool = True, **kwargs) -> tuple[torch.Tensor, dict]:
         condition = self._encode_obs(batch["obs"])
