@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
 from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer, normalization_feature_shapes
-from dexmani_policy.test_tools.smoke_test import make_source, run_smoke
+from dexmani_policy.test_tools.smoke_test import check_dataset, make_source, run_smoke
 from dexmani_policy.train import build_trainer
 from dexmani_policy.training.common.config import load_policy_config, validate_normalization
 from dexmani_policy.training.common.data import build_dataset, fit_normalizer
@@ -26,14 +26,6 @@ def make_policy_fixture(root, recipe, tactile="force"):
     path = root / "source.zarr"
     source = make_source(path)
     rng = np.random.default_rng(42)
-    for key, shape in (("eef_pose", (12, 9)), ("fingertip_xyz", (12, 5, 3)),
-                       ("finger_tactile_force", (12, 5, 3)), ("taxel_tactile_force", (12, 5, 120, 3)),
-                       ("hand_pointcloud", (12, 8, 3)), ("object_pointcloud", (12, 1024, 3))):
-        source.create_dataset(f"data/{key}", data=rng.normal(size=shape).astype("float32"))
-    source.create_dataset("data/rgb", data=rng.integers(0, 256, (12, 32, 32, 3), dtype=np.uint8))
-    source.create_dataset("data/camera_intrinsic", data=np.tile(np.array([20, 0, 16, 0, 20, 16, 0, 0, 1], np.float32), (12, 1)))
-    source.create_dataset("data/camera_extrinsic", data=np.tile(np.eye(3, 4, dtype=np.float32).reshape(12), (12, 1)))
-    source.attrs["hoi_pcd"] = dict(task_name="pick_apple_messy", object_names=["fixture"], template_sha256="0" * 64)
     overrides = [f"zarr_path={path}", "training.device=cpu", "horizon=4", "n_obs_steps=2", "n_action_steps=2",
                  "dataloader.batch_size=2", "dataloader.num_workers=0", "dataset.augmentation_cfg=null",
                  "training.loop.total_train_steps=2", "training.lr_warmup_steps=0", "training.use_compile=false",
@@ -55,6 +47,18 @@ def make_policy_fixture(root, recipe, tactile="force"):
                       "agent.rgb_backbone_config.tune_mode=full", "agent.rgb_backbone_config.image_size=[32,32]",
                       "+agent.rgb_backbone_config.architecture={hidden_size:32,intermediate_size:64,num_hidden_layers:1,num_attention_heads:4,patch_size:8,image_size:32}"]
     cfg = load_policy_config(recipe, overrides)
+    for key, shape in (("eef_pose", (12, 9)), ("fingertip_xyz", (12, 5, 3)),
+                       ("finger_tactile_force", (12, 5, 3)), ("taxel_tactile_force", (12, 5, 120, 3)),
+                       ("hand_pointcloud", (12, 8, 3)), ("object_pointcloud", (12, 1024, 3))):
+        if key in cfg.dataset.sensor_modalities:
+            source.create_dataset(f"data/{key}", data=rng.normal(size=shape).astype("float32"))
+    if "rgb" in cfg.dataset.sensor_modalities:
+        source.create_dataset("data/rgb", data=rng.integers(0, 256, (12, 32, 32, 3), dtype=np.uint8))
+        source.create_dataset("data/camera_intrinsic", data=np.tile(np.array([20, 0, 16, 0, 20, 16, 0, 0, 1], np.float32), (12, 1)))
+        source.create_dataset("data/camera_extrinsic", data=np.tile(np.eye(3, 4, dtype=np.float32).reshape(12), (12, 1)))
+    if "object_pointcloud" in cfg.dataset.sensor_modalities:
+        # Synthetic contract fixture, never a deployable object template.
+        source.attrs["hoi_pcd"] = dict(task_name="pick_apple_messy", object_names=["fixture"], template_sha256="0" * 64)
     if recipe == "dqrise":
         asset = root / "codebook.npz"
         np.savez(asset, sorted_hand_poses=rng.uniform(-1, 1, (8, 12)).astype("float32"),
@@ -92,6 +96,9 @@ class NormalizerTest(unittest.TestCase):
                 LinearNormalizer().fit_field("action", [torch.tensor([[value]])])
         with self.assertRaisesRegex(ValueError, "Insufficient"):
             LinearNormalizer().fit_field("action", [torch.empty(0, 3)])
+        for widths in ((1, 3), (3, 1)):
+            with self.subTest(widths=widths), self.assertRaisesRegex(ValueError, "trailing shape"):
+                LinearNormalizer().fit_field("action", (torch.ones(2, width) for width in widths))
         for scale, offset in (([0.], [0.]), ([1.], [float("inf")]), ([1., 2.], [0.])):
             with self.assertRaises(ValueError):
                 FieldNormalizer(scale, offset)
@@ -176,6 +183,9 @@ class NormalizerTest(unittest.TestCase):
             train = torch.from_numpy(source["data/action"][episode * 6:(episode + 1) * 6])
             torch.testing.assert_close(normalizer["action"].normalize(train).amin(0), -torch.ones(19))
             torch.testing.assert_close(normalizer["action"].normalize(train).amax(0), torch.ones(19))
+            cfg = load_policy_config("dp3", [f"zarr_path={path}", "horizon=4", "n_action_steps=2",
+                                             "normalization.joint_state=identity", "dataset.augmentation_cfg=null"])
+            self.assertNotIn("fields.joint_state.scale", check_dataset(cfg, source))
             spec = dict(point_cloud="identity", joint_state="identity", finger_tactile_force="identity",
                         taxel_tactile_force="identity")
             dims = dict(joint_state=19, point_cloud=6, finger_tactile_force=15, taxel_tactile_force=1800)
@@ -196,7 +206,7 @@ class NormalizerTest(unittest.TestCase):
                 self.assertTrue(torch.equal(pre[key], value.flatten(0, 1)))
                 self.assertEqual(pre[key].data_ptr(), value.data_ptr())
 
-    def test_new_training_rejects_old_modes(self):
+    def test_training_config_constraints(self):
         cfg = load_policy_config("adaptac")
         validate_normalization(cfg)
         for mode in ("gaussian", "rms", "max_abs", "unknown"):
@@ -224,8 +234,10 @@ class NormalizerTest(unittest.TestCase):
                 **normalization_feature_shapes(description["field_dims"], cfg.normalization), "hand_latent": (32,),
             })
             fitted["hand_latent"].scale.fill_(3)
+            point_field = fitted["point_cloud"]
             fit_normalizer(dataset, cfg.normalization, fitted, initial_state=inherited.state_dict(),
                            inherited_fields=("point_cloud",), hand_affine=hand)
+            self.assertIs(fitted["point_cloud"], point_field)
             torch.testing.assert_close(fitted["hand_latent"].scale, torch.full((32,), 3.))
             for part in ("scale", "offset"):
                 torch.testing.assert_close(getattr(fitted["action"], part)[7:], hand[part], rtol=0, atol=0)
@@ -242,7 +254,11 @@ class NormalizerTest(unittest.TestCase):
                 fit_normalizer(dataset, cfg.normalization, fitted,
                                initial_state=LinearNormalizer({"point_cloud": (3,)}).state_dict(),
                                inherited_fields=("point_cloud",))
-
+            inherited["point_cloud"].scale.zero_()
+            with patch.object(dataset, "iter_normalization_data", side_effect=AssertionError("invalid inherited affine must fail before fitting")):
+                with self.assertRaisesRegex(ValueError, "point_cloud"):
+                    fit_normalizer(dataset, cfg.normalization, fitted,
+                                   initial_state=inherited.state_dict(), inherited_fields=("point_cloud",))
 
 
 class RestoreTest(unittest.TestCase):
@@ -250,22 +266,7 @@ class RestoreTest(unittest.TestCase):
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
         root = Path(cls.directory.name)
-        path = root / "source.zarr"
-        source = make_source(path)
-        rng = np.random.default_rng(42)
-        for key, shape in (("eef_pose", (12, 9)), ("fingertip_xyz", (12, 5, 3)),
-                           ("finger_tactile_force", (12, 5, 3))):
-            source.create_dataset(f"data/{key}", data=rng.normal(size=shape).astype("float32"))
-        cfg = load_policy_config("interact_dex", [
-            f"zarr_path={path}", "training.device=cpu", "horizon=4", "n_obs_steps=2", "n_action_steps=2",
-            "agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=4",
-            "agent.pc_encoder_config.depth=1", "agent.pc_encoder_config.num_patches=4",
-            "agent.pc_encoder_config.group_size=4", "agent.num_points=8",
-            "dataloader.batch_size=2", "dataloader.num_workers=0", "dataset.augmentation_cfg=null",
-            "training.loop.total_train_steps=3", "training.lr_warmup_steps=0",
-        ])
-        cfg.workspace.output_dir = str(root / "run")
-        cfg.workspace.wandb_cfg = None
+        cfg, _ = make_policy_fixture(root, "interact_dex")
         with closing(build_trainer(cfg)) as trainer:
             trainer.save_checkpoint("normalizer regression fixture")
         cls.checkpoint = load_checkpoint(root / "run/checkpoints/latest.pt")

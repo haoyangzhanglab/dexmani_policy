@@ -66,5 +66,5 @@ class InterActDexDataset(DemonstrationDataset):
             self.episode_store, query, (self.future_force_horizon,), field="finger_tactile_force",
         )
         data["future_force"] = torch.from_numpy(force[0])
-        data["future_force_valid"] = torch.as_tensor(valid[0])
+        data["future_force_valid"] = torch.from_numpy(valid)[0]
         return data

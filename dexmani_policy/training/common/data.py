@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES, validate_normalization_spec,
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES,
 )
 from dexmani_policy.common.normalizer import (
     FieldNormalizer, LinearNormalizer, validate_normalizer_state,
@@ -17,19 +17,20 @@ from dexmani_policy.common.normalizer import (
 def fit_normalizer(
     dataset, spec, normalizer: LinearNormalizer, *, initial_state=None, inherited_fields=(), hand_affine=None,
 ) -> None:
-    """Fit the configured affine fields in place, preserving inherited and internal fields."""
-    validate_normalization_spec(spec, spec)
-    for key in inherited_fields:
-        if key not in normalizer.fields or spec.get(key) != "limits":
-            raise RuntimeError(f"Missing affine field for inherited limits feature: {key}")
-    inherited = LinearNormalizer({
-        key: normalizer[key].scale.shape for key in inherited_fields
-    })
-    inherited.load_state_dict({} if initial_state is None else initial_state, strict=True)
-    normalizer.fields.update(dict(inherited.fields.items()))
+    """Fit limits fields, loading inherited affine into the existing modules."""
+    if inherited_fields or initial_state is not None:
+        inherited = LinearNormalizer()
+        for key in inherited_fields:
+            if key not in normalizer.fields or spec.get(key) != "limits":
+                raise RuntimeError(f"Missing affine field for inherited limits feature: {key}")
+            inherited.fields[key] = normalizer[key]
+        inherited.load_state_dict({} if initial_state is None else initial_state, strict=True)
+        validate_normalizer_state(inherited)
     for key, mode in spec.items():
         if mode == "identity":
             continue
+        if mode != "limits":
+            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected identity or limits")
         if key not in normalizer.fields:
             raise RuntimeError(f"Missing affine field for limits feature: {key}")
         if key in inherited_fields:
@@ -38,23 +39,19 @@ def fit_normalizer(
         chunks = dataset.iter_normalization_data(key)
         if key == "action" and hand_affine is not None:
             arm_dim = normalizer[key].scale.numel() - hand_affine["scale"].numel()
-            chunks = (values[..., :arm_dim] for values in chunks)
-        normalizer.fit_field(key, chunks)
-        if key == "action" and dataset.action_key == "action_ee":
-            field = normalizer[key]
-            if field.scale.numel() <= 9:
-                raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
-            field.scale[3:9] = 1
-            field.offset[3:9] = 0
-        if key == "action" and hand_affine is not None:
+            normalizer.fit_field(key, (values[..., :arm_dim] for values in chunks))
             field = normalizer[key]
             normalizer.fields[key] = FieldNormalizer(
-                torch.cat((field.scale[:arm_dim], hand_affine["scale"])),
-                torch.cat((field.offset[:arm_dim], hand_affine["offset"])),
+                torch.cat((field.scale, hand_affine["scale"])),
+                torch.cat((field.offset, hand_affine["offset"])),
             )
+        else:
+            normalizer.fit_field(key, chunks)
         if normalizer[key].scale.shape != expected_shape:
             raise ValueError(f"Fitted affine shape mismatch for {key}: expected {tuple(expected_shape)}")
-    validate_normalizer_state(normalizer)
+        if key == "action" and dataset.action_key == "action_ee":
+            normalizer[key].scale[3:9] = 1
+            normalizer[key].offset[3:9] = 0
 
 
 def build_dataset(cfg):

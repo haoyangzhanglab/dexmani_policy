@@ -67,8 +67,9 @@ def check_dataset(cfg, source):
 
     normalizer = LinearNormalizer(normalization_feature_shapes(description["field_dims"], cfg.normalization))
     fit_normalizer(dataset, cfg.normalization, normalizer)
-    for key, values in raw.items():
-        field = normalizer[key]
+    assert set(normalizer.fields) == {key for key, mode in cfg.normalization.items() if mode == "limits"}
+    for key, field in normalizer.fields.items():
+        values = raw[key]
         normalized = field.normalize(values)
         flattened = normalized.reshape(-1, values.shape[-1])
         torch.testing.assert_close(flattened.amin(0), -torch.ones(values.shape[-1]))

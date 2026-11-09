@@ -159,11 +159,10 @@ class InterActDex(Policy):
         return self._pack_action_context(self._encode_features(obs))
 
     def _compute_future_force_loss(self, prediction, batch, *, log_metrics):
-        force, valid = batch["future_force"], batch["future_force_valid"]
-        if force.shape != prediction.shape or valid.shape != prediction.shape[:1]:
+        target, valid = batch["future_force"], batch["future_force_valid"]
+        if target.shape != prediction.shape or valid.shape != prediction.shape[:1]:
             raise ValueError("Future force labels must be [B,5,3] with [B] validity")
-        with torch.autocast(device_type=force.device.type, enabled=False):
-            target = force
+        with torch.autocast(device_type=target.device.type, enabled=False):
             errors = F.smooth_l1_loss(prediction.float(), target, reduction="none").mean((-1, -2))
             mask = valid.to(errors.dtype)
             denominator = mask.sum().clamp_min(1)

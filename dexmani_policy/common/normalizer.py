@@ -23,12 +23,12 @@ class FieldNormalizer(nn.Module):
         self.register_buffer("offset", torch.as_tensor(offset, dtype=torch.float32))
         self.validate()
 
-    def validate(self):
+    def validate(self, key="field") -> None:
         if self.scale.shape != self.offset.shape:
-            raise ValueError("Affine scale and offset must have identical shapes")
+            raise ValueError(f"Affine scale and offset for {key} must have identical shapes")
         valid = torch.isfinite(self.scale) & torch.isfinite(self.offset) & (self.scale != 0)
         if not valid.all():
-            raise ValueError("Invalid affine parameters: expected finite values and nonzero scale")
+            raise ValueError(f"Invalid affine parameters for {key}: expected finite values and nonzero scale")
 
     def normalize(self, value) -> torch.Tensor:
         scale, offset = self.scale, self.offset
@@ -52,6 +52,7 @@ class LinearNormalizer(nn.Module):
     def fit_field(self, key: str, chunks: Iterable) -> None:
         """Fit per-feature limits from streaming training chunks."""
         limits = None
+        feature_shape = None
         for chunk in chunks:
             values = torch.as_tensor(chunk)
             if not values.is_floating_point():
@@ -60,7 +61,10 @@ class LinearNormalizer(nn.Module):
                 continue
             if not torch.isfinite(values).all():
                 raise ValueError(f"Nonfinite normalization data for {key}")
-            feature_shape = FIELD_FEATURE_SHAPES.get(key, values.shape[-1:])
+            if feature_shape is None:
+                feature_shape = FIELD_FEATURE_SHAPES.get(key, values.shape[-1:])
+            if values.shape[-len(feature_shape):] != feature_shape:
+                raise ValueError(f"Normalization data for {key} requires trailing shape {tuple(feature_shape)}")
             values = values.reshape(-1, prod(feature_shape))
             chunk_min, chunk_max = torch.aminmax(values, dim=0)
             if limits is not None:
@@ -85,7 +89,4 @@ class LinearNormalizer(nn.Module):
 
 def validate_normalizer_state(normalizer: LinearNormalizer) -> None:
     for key, field in normalizer.fields.items():
-        try:
-            field.validate()
-        except ValueError as error:
-            raise ValueError(f"Invalid affine field {key}: {error}") from error
+        field.validate(key)

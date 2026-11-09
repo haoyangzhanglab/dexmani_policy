@@ -15,8 +15,9 @@ POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointc
 
 
 def validate_normalization_spec(fields, spec):
-    missing = set(fields) - spec.keys()
-    unknown = spec.keys() - set(fields)
+    fields = set(fields)
+    missing = fields - spec.keys()
+    unknown = spec.keys() - fields
     if missing or unknown:
         raise ValueError(f"Invalid normalization fields: missing={sorted(missing)}, unknown={sorted(unknown)}")
     for key, mode in spec.items():
