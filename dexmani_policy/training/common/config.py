@@ -18,15 +18,11 @@ def register_resolvers():
     OmegaConf.register_new_resolver("run_id", lambda: LAUNCH_ID, replace=True)
 
 
-def config_name(config):
+def load_policy_config(config, overrides=()):
     path = Path(config)
     if path.is_absolute() or ".." in path.parts or not str(config) or str(config).startswith("~"):
         raise ValueError("Config must be a name or relative path under dexmani_policy/configs")
-    return path.with_suffix("").as_posix() if path.suffix == ".yaml" else path.as_posix()
-
-
-def load_policy_config(config, overrides=()):
-    name = config_name(config)
+    name = path.with_suffix("").as_posix() if path.suffix == ".yaml" else path.as_posix()
     register_resolvers()
     with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         cfg = hydra.compose(config_name=name, overrides=list(overrides))
@@ -46,8 +42,8 @@ def assemble_policy_config(cfg):
         if auxiliary and action_key != "action":
             raise ValueError("R3D auxiliary targets require joint action")
 
-        cfg.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
-        for key in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
+        cfg.agent.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
+        for key in ("horizon", "n_obs_steps", "n_action_steps"):
             cfg.agent[key] = cfg[key]
         cfg.dataset.update(action_key=action_key, zarr_path=cfg.zarr_path,
                            horizon=cfg.horizon, obs_horizon=cfg.n_obs_steps,
@@ -121,12 +117,3 @@ def validate_config(cfg):
     cls = cast("type[Policy]", hydra.utils.get_class(cfg.agent._target_))
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
-
-
-def assemble_effective_config(cfg, model):
-    with open_dict(cfg):
-        cfg.pop("max_updates", None)
-        cfg.normalization_dims = model.normalization_dims
-        cfg.agent.update(model.effective_config)
-    OmegaConf.resolve(cfg)
-    return cfg

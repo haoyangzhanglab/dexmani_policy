@@ -3,7 +3,6 @@ from math import prod
 
 import hydra
 import torch
-from omegaconf import open_dict
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.common.config import (
@@ -46,7 +45,7 @@ def fit_normalizer(
             normalizer[key].offset[3:9] = 0
 
 
-def build_dataset(cfg):
+def build_dataset(cfg, *, include_metadata=True):
     """Construct training samples and describe their stored field dimensions."""
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
@@ -66,11 +65,8 @@ def build_dataset(cfg):
         if points.shape[1:] != (1024, 3) or points.dtype.name != "float32":
             raise ValueError("HOI dataset requires float32 [T,1024,3]")
     print(f"[Dataset] {dataset.training_summary()}")
-    return dataset, {"field_dims": dims, "deployment_metadata": dataset_metadata(dataset, cfg.task_name)}
-
-
-def dataset_metadata(dataset, task_name):
-    buffer = dataset.episode_store
+    if not include_metadata:
+        return dataset, {"field_dims": dims}
     deployment = {}
     if "dt" in buffer.attrs:
         deployment["control_dt_s"] = buffer.attrs["dt"]
@@ -83,7 +79,7 @@ def dataset_metadata(dataset, task_name):
             deployment[attr] = buffer.attrs[attr]
     if "object_pointcloud" in dataset.sensor_modalities:
         metadata = buffer.attrs["hoi_pcd"]
-        if metadata["task_name"] != task_name:
+        if metadata["task_name"] != cfg.task_name:
             raise ValueError("HOI dataset task_name must match training task")
         deployment["hoi_pcd"] = {
             key: metadata[key] for key in ("task_name", "object_names", "template_sha256")
@@ -93,34 +89,7 @@ def dataset_metadata(dataset, task_name):
             "shape": list(buffer["depth"].shape[1:]),
             "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
         }
-    return deployment
-
-
-def prepare_data_config(cfg, dataset, deployment, *, saved=None, confirm_data_relocation=False):
-    """Prepare data settings once; resume checks layout/semantics, not content identity."""
-    buffer = dataset.episode_store
-    info = {
-        "episode_ends": buffer.episode_ends.tolist(),
-        "train_windows": len(dataset),
-        "fields": {key: {"shape": list(value.shape), "dtype": str(value.dtype)}
-                   for key, value in buffer.data.items()},
-        "coordinates": {key: buffer.attrs[key] for key in
-                        ("format", "hand_joint_order", "hand_units", "action_semantics")
-                        if key in buffer.attrs},
-    }
-    if saved is not None:
-        if saved["data_info"] != info:
-            raise ValueError("Resume data layout/coordinate metadata mismatch")
-        if saved["deployment_metadata"] != deployment:
-            raise ValueError("Resume deployment_metadata mismatch")
-        if saved["dataset"]["zarr_path"] != buffer.path and not confirm_data_relocation:
-            raise ValueError("Resume path changed: an unchanged copy requires --confirm-data-relocation")
-    with open_dict(cfg):
-        cfg.zarr_path = buffer.path
-        cfg.dataset.zarr_path = buffer.path
-        if saved is None:
-            cfg.data_info = info
-            cfg.deployment_metadata = deployment
+    return dataset, {"field_dims": dims, "deployment_metadata": deployment}
 
 
 def close_data_loader(loader, iterator=None):

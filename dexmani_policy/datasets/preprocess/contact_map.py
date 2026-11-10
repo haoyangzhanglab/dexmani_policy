@@ -73,7 +73,7 @@ def generate(zarr_path, output, num_workers=1):
     try:
         group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
         retained_attrs = ("format", "dt", "action_semantics", "hand_pointcloud_config",
-                          "hoi_pcd", "hand_joint_order", "hand_units")
+                          "hoi_pcd")
         group.attrs.update({key: buffer.attrs[key] for key in retained_attrs if key in buffer.attrs})
         group.create_group("meta").create_dataset("episode_ends", data=buffer.episode_ends)
         data = group.create_group("data")

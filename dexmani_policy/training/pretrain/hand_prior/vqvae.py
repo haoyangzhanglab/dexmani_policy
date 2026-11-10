@@ -12,9 +12,7 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.hand_prior.codebook import (
-    codebook_distances, validate_hand_coordinates,
-)
+from dexmani_policy.agents.hand_prior.codebook import codebook_distances
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
@@ -53,7 +51,6 @@ def prepare_hand_data(cfg):
         buffer.n_episodes, seed=cfg.dataset.seed,
         val_episodes=cfg.dataset.val_episodes, max_train_episodes=cfg.dataset.max_train_episodes,
     )
-    validate_hand_coordinates(buffer.attrs)
 
     train_hand = load_hand_array(buffer, train)
     val_hand = load_hand_array(buffer, val) if val.any() else None

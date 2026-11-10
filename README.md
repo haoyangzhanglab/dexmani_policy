@@ -73,7 +73,7 @@ python -m dexmani_policy.training.common.resume --run "$RUN"
 
 新实验使用新目录。省略 `hydra.run.dir` 时自动生成带时间标识的目录。`config.yaml` 记录初始配置快照；checkpoint 的 `effective_config` 是恢复训练的权威配方，`metrics.jsonl` 记录指标，`checkpoints/` 保存完整训练状态和 `latest.pt`。默认 W&B 为离线模式，可用 `workspace.wandb_cfg=null` 关闭。
 
-普通 Resume 要求源数据保持不变，并比较保存的 episode 边界、训练窗口数、数组布局和部署 metadata。这些检查不证明数据内容相同，也不会扫描或哈希整个 Zarr。路径迁移仅接受未经修改的副本，需同时传 `--zarr-path /new/data.zarr --confirm-data-relocation`。Resume 必须包含 `data_info` 和 `deployment_metadata`，缺失直接失败，不补造恢复依据。更换数据属于新实验，应使用新目录和现有初始化入口，不能用 Resume 实现。
+Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。只检查必要的模型输入和动作维度，不比较数据内容、episode 布局或新旧 metadata。允许同 shape 的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
 
 续训恢复 raw/EMA、优化器、学习率调度器、步数和随机数状态；本地日志回退到 checkpoint 步数后继续追加。`--max-updates 100` 只限制本次续训执行量，不修改总预算。多进程数据增强的 worker 状态不在 checkpoint 中，因此不承诺跨中断逐位复现。
 

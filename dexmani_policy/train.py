@@ -7,16 +7,16 @@ from pathlib import Path
 
 import hydra
 import torch
-from omegaconf import open_dict
+from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.config import set_project_root
 from dexmani_policy.common.normalizer import normalization_feature_shapes, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.common.config import (
-    assemble_effective_config, assemble_policy_config, prepare_training, register_resolvers,
+    assemble_policy_config, prepare_training, register_resolvers,
     validate_normalization, validate_config,
 )
-from dexmani_policy.training.common.data import build_dataset, fit_normalizer, prepare_data_config
+from dexmani_policy.training.common.data import build_dataset, fit_normalizer
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
@@ -31,9 +31,6 @@ def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
     if checkpoint is not None and data_description["field_dims"] != cfg.normalization_dims:
         raise ValueError("Resume data/model mismatch: normalization_dims")
 
-    if method in {"dqrise", "dexlatent"}:
-        from dexmani_policy.agents.hand_prior.codebook import validate_hand_coordinates
-        validate_hand_coordinates(dataset.episode_store.attrs)
     codebook = hand_affine = None
     if checkpoint is None and method == "dqrise":
         from dexmani_policy.agents.hand_prior.codebook import load_codebook
@@ -97,7 +94,7 @@ def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
     return model
 
 
-def build_trainer(cfg, *, checkpoint=None, confirm_data_relocation=False):
+def build_trainer(cfg, *, checkpoint=None):
     cfg = copy.deepcopy(cfg)
     if checkpoint is None:
         cfg = prepare_training(cfg)
@@ -105,13 +102,19 @@ def build_trainer(cfg, *, checkpoint=None, confirm_data_relocation=False):
         validate_config(cfg)
     set_seed(cfg.training.seed)
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
-    dataset, data_description = build_dataset(cfg)
-    prepare_data_config(cfg, dataset, data_description["deployment_metadata"],
-                      saved=None if checkpoint is None else checkpoint.effective_config,
-                      confirm_data_relocation=confirm_data_relocation)
+    dataset, data_description = build_dataset(cfg, include_metadata=checkpoint is None)
+    with open_dict(cfg):
+        cfg.zarr_path = dataset.episode_store.path
+        cfg.dataset.zarr_path = cfg.zarr_path
+        if checkpoint is None:
+            cfg.deployment_metadata = data_description["deployment_metadata"]
     model = _prepare_policy(cfg, dataset, data_description, checkpoint=checkpoint)
     if checkpoint is None:
-        cfg = assemble_effective_config(cfg, model)
+        with open_dict(cfg):
+            cfg.pop("max_updates", None)
+            cfg.normalization_dims = model.normalization_dims
+            cfg.agent.update(model.effective_config)
+        OmegaConf.resolve(cfg)
     return PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
 
 

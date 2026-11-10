@@ -312,10 +312,6 @@ class PolicyTrainer:
                     print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
 
             finally:
-                callbacks = []
-
-                if iterator is not None:
-                    callbacks.append(lambda: close_data_loader(self.train_loader, iterator))
-
                 self.model.eval()
-                close_resources(*callbacks)
+                if iterator is not None:
+                    close_resources(lambda: close_data_loader(self.train_loader, iterator))

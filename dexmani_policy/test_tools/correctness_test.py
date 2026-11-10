@@ -1,7 +1,5 @@
 """Cheap CPU regressions for resume, optimizer and publication boundaries."""
-import copy
 import json
-import shutil
 import tempfile
 import unittest
 from contextlib import closing
@@ -13,59 +11,18 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.agents.hand_prior.codebook import validate_hand_coordinates, load_codebook
+from dexmani_policy.agents.hand_prior.codebook import load_codebook
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.deployment.runtime import PolicyRuntime
 from dexmani_policy.evaluation.selection import run_pipeline
-from dexmani_policy.test_tools.smoke_test import make_source
 from dexmani_policy.training.common.config import load_policy_config, validate_config
-from dexmani_policy.training.common.data import build_dataset, prepare_data_config, EpochBatchSampler, epoch_position
+from dexmani_policy.training.common.data import EpochBatchSampler, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.pretrain.obs.common import export_encoder, save_run
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
 class CorrectnessTest(unittest.TestCase):
-    def test_resume_data(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = make_source(root / 'source.zarr')
-            source.attrs['dt'] = 0.05
-            cfg = load_policy_config('dp3', [f'zarr_path={root / "source.zarr"}',
-                                            'horizon=4', 'n_obs_steps=2', 'n_action_steps=2',
-                                            'dataset.augmentation_cfg=null'])
-            cfg.workspace.output_dir = str(root / "run")
-            dataset, description = build_dataset(cfg)
-            metadata = description['deployment_metadata']
-            prepare_data_config(cfg, dataset, metadata)
-            saved = OmegaConf.to_container(cfg, resolve=True)
-            prepare_data_config(cfg, dataset, metadata, saved=saved)
-            source['meta/episode_ends'][:] = [4, 12]
-            changed, _ = build_dataset(cfg)
-            self.assertEqual(len(changed), len(dataset))
-            with self.assertRaisesRegex(ValueError, 'layout'):
-                prepare_data_config(cfg, changed, metadata, saved=saved, confirm_data_relocation=True)
-            source['meta/episode_ends'][:] = [6, 12]
-            for changes in ({'episode_ends': [4, 12]}, {'train_windows': 9}):
-                old = copy.deepcopy(saved)
-                old['data_info'].update(changes)
-                with self.assertRaisesRegex(ValueError, 'layout'):
-                    prepare_data_config(cfg, dataset, metadata, saved=old)
-            with self.assertRaisesRegex(ValueError, 'deployment_metadata'):
-                prepare_data_config(cfg, dataset, {'control_dt_s': 0.1}, saved=saved)
-            self.assertEqual(cfg.deployment_metadata.control_dt_s, 0.05)
-            shutil.copytree(root / 'source.zarr', root / 'copy.zarr')
-            cfg.dataset.zarr_path = str(root / 'copy.zarr')
-            moved, _ = build_dataset(cfg)
-            with self.assertRaisesRegex(ValueError, 'path changed'):
-                prepare_data_config(cfg, moved, metadata, saved=saved)
-            prepare_data_config(cfg, moved, metadata, saved=saved, confirm_data_relocation=True)
-            for key in ('data_info', 'deployment_metadata'):
-                incomplete = copy.deepcopy(saved)
-                del incomplete[key]
-                with self.assertRaises(KeyError):
-                    prepare_data_config(cfg, dataset, metadata, saved=incomplete)
-
     def test_sampling_position(self):
         sampler = EpochBatchSampler(range(10), 2, False, shuffle=True, seed=42)
         for step in range(7):
@@ -186,40 +143,13 @@ class CorrectnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source, output = Path(directory) / 'best.pt', Path(directory) / 'codebook.npz'
             torch.save(dict(model_config=model.model_config, model_state_dict=model.state_dict(),
-                            normalizer_state_dict=normalizer.state_dict(), epoch=3), source)
+                            normalizer_state_dict=normalizer.state_dict()), source)
             export_codebook(source, output)
             codebook, affine = load_codebook(output)
             self.assertEqual(codebook.num_codes, 4)
             torch.testing.assert_close(affine['scale'], torch.ones(12))
-            with np.load(output, allow_pickle=False) as artifact:
-                self.assertEqual(artifact['source_epoch'].item(), 3)
-                self.assertEqual(artifact['source_checkpoint'].item(), str(source))
 
-    def test_contact_metadata(self):
-        import zarr
-        from dexmani_policy.datasets.preprocess.contact_map import generate
-        with tempfile.TemporaryDirectory() as directory:
-            source_path, output = Path(directory) / 'source.zarr', Path(directory) / 'contact.zarr'
-            source = make_source(source_path)
-            source.attrs.update(format='dexmani.real.canonical',
-                                action_semantics='absolute_joint_goal_not_next_step_arrival')
-            for key, shape in (('hand_pointcloud', (12, 8, 3)), ('object_pointcloud', (12, 1024, 3))):
-                source.create_dataset('data/' + key, data=np.zeros(shape, dtype=np.float32))
-            with patch('dexmani_policy.datasets.preprocess.contact_map.frame_contact_map',
-                       return_value=np.zeros(1024, dtype=np.float32)):
-                generate(source_path, output)
-            result = zarr.open_group(str(output), mode='r')
-            self.assertEqual(dict(result.attrs), dict(source.attrs))
-            validate_hand_coordinates(dict(result.attrs))
-
-    def test_coordinate_and_json_boundaries(self):
-        validate_hand_coordinates({'format': 'dexmani.real.canonical'})
-        validate_hand_coordinates({'hand_joint_order': ['thumb:3', 'index:3', 'middle:2', 'ring:2', 'pinky:2'],
-                                   'hand_units': 'radians'})
-        for attrs in ({}, {'hand_units': 'degrees'}, {'hand_joint_order': []}, {'format': 'unknown'},
-                      {'format': 'dexmani.real.canonical', 'hand_units': 'degrees'}):
-            with self.assertRaises(ValueError):
-                validate_hand_coordinates(attrs)
+    def test_logger_rejects_nonfinite(self):
         with tempfile.TemporaryDirectory() as directory:
             with closing(ExperimentLogger(directory, wandb_enabled=False)) as logger:
                 with self.assertRaises(ValueError):

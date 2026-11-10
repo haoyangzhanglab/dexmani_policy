@@ -17,7 +17,6 @@ from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import (
     build_train_loader, close_data_loader, epoch_position, fit_normalizer,
-    dataset_metadata, prepare_data_config,
 )
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
@@ -32,8 +31,6 @@ def load_run(method, argv=None):
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--zarr-path")
-    parser.add_argument("--confirm-data-relocation", action="store_true",
-                        help="Assert that the new path is an unchanged copy of the original data")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("overrides", nargs="*")
@@ -69,7 +66,7 @@ def load_run(method, argv=None):
     if args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
         cfg.dataset.zarr_path = cfg.zarr_path
-    return cfg, checkpoint, args.max_updates, args.confirm_data_relocation
+    return cfg, checkpoint, args.max_updates
 
 
 def export_encoder(checkpoint, output_path):
@@ -142,7 +139,7 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
 
 
 def train(method, model_class, argv=None):
-    cfg, checkpoint, max_updates, confirm_data_relocation = load_run(method, argv)
+    cfg, checkpoint, max_updates = load_run(method, argv)
     resuming = checkpoint is not None
     if resuming and checkpoint["global_step"] >= cfg.training.loop.total_train_steps:
         print(f"Pretraining already completed at step {checkpoint['global_step']}")
@@ -168,9 +165,8 @@ def train(method, model_class, argv=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    prepare_data_config(cfg, dataset, dataset_metadata(dataset, cfg.task_name),
-                      saved=None if checkpoint is None else checkpoint["effective_config"],
-                      confirm_data_relocation=confirm_data_relocation)
+    cfg.zarr_path = dataset.episode_store.path
+    cfg.dataset.zarr_path = cfg.zarr_path
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:

@@ -14,13 +14,13 @@ from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int, set_project_root
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
-from dexmani_policy.train import run_trainer, run_training
+from dexmani_policy.train import run_training
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import build_dataset, fit_normalizer
 from dexmani_policy.training.common.resume import prepare_resume
 
 
-def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int) -> tuple[int, int]:
+def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, resume_zarr_path=None) -> tuple[int, int]:
     positive_int(max_updates, "max_updates")
     positive_int(resume_updates, "resume_updates")
     cfg.workspace.output_dir = str(directory)
@@ -29,10 +29,25 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int) ->
         raise ValueError("The saved training budget must leave updates for resume; reduce --max-updates")
     step = run_training(cfg, max_updates=max_updates)
     assert step == max_updates, "Fresh update count mismatch"
-    trainer = prepare_resume(directory)
+    trainer = prepare_resume(directory, zarr_path=resume_zarr_path)
     assert trainer is not None
-    assert trainer.global_step == step, "Resume source mismatch"
-    final = run_trainer(trainer, max_updates=resume_updates)
+    with closing(trainer):
+        assert trainer.global_step == step, "Resume source mismatch"
+        if resume_zarr_path is not None:
+            assert trainer.cfg.dataset.zarr_path == str(Path(resume_zarr_path).expanduser().resolve())
+        checkpoint = load_checkpoint(directory / "checkpoints" / "latest.pt")
+        torch.testing.assert_close(trainer.model.state_dict(), checkpoint.model_state, check_device=False)
+        if trainer.ema_model is not None:
+            torch.testing.assert_close(trainer.ema_model.state_dict(), checkpoint.ema_model_state, check_device=False)
+        optimizer_state = trainer.optimizer.state_dict()
+        torch.testing.assert_close(optimizer_state["state"], checkpoint.optimizer_state["state"], check_device=False)
+        assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
+        assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
+        assert dict(trainer.cfg.deployment_metadata) == checkpoint.effective_config["deployment_metadata"]
+        del checkpoint, optimizer_state
+        trainer.compile_models()
+        trainer.train(max_updates=resume_updates)
+        final = trainer.global_step
     expected = min(step + resume_updates, cfg.training.loop.total_train_steps)
     assert final == expected, "Resume update count mismatch"
     saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
@@ -80,6 +95,12 @@ def check_dataset(cfg, source):
 
 def check_synthetic(root, device, *, max_updates, resume_updates):
     source = make_source(root / "source.zarr")
+    source.attrs["dt"] = 0.05
+    replacement_path = root / "replacement.zarr"
+    replacement = make_source(replacement_path)
+    replacement.create_dataset("meta/episode_ends", data=np.array([3, 6, 9, 12]), overwrite=True)
+    replacement["data/action"][:] += 1
+    replacement.attrs["dt"] = 0.1
     cfg = load_policy_config("dp3", [
         f"zarr_path={root / 'source.zarr'}", f"training.device={device}",
         "horizon=4", "n_obs_steps=2", "n_action_steps=2",
@@ -93,16 +114,19 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     ])
     normalizer_state = check_dataset(cfg, source)
     run = root / "run"
-    step, final = run_smoke(cfg, run, max_updates=max_updates, resume_updates=resume_updates)
+    step, final = run_smoke(cfg, run, max_updates=max_updates, resume_updates=resume_updates,
+                           resume_zarr_path=replacement_path)
     print(f"PASS training/save/resume: fresh={step}, resumed={final}", flush=True)
 
     observation = {key: source[f"data/{key}"][:2] for key in cfg.dataset.sensor_modalities}
     # Deployment must use the checkpoint alone, including its fitted affine.
     shutil.rmtree(root / "source.zarr")
+    shutil.rmtree(replacement_path)
     with closing(load_policy(run, device=device)) as runtime:
         snapshot = runtime.info.to_dict()
         assert "policy_name" not in snapshot
         assert not runtime.info.requires_prev_action
+        assert runtime.info.control_dt_s == 0.05
         assert snapshot["observation_fields"] == tuple(cfg.dataset.sensor_modalities)
         torch.testing.assert_close(
             runtime.agent.normalizer.state_dict(), normalizer_state, rtol=0, atol=0, check_device=False,

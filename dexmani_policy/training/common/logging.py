@@ -94,18 +94,13 @@ def to_log_scalars(metrics: dict[str, Any]) -> dict[str, float]:
     return scalars
 
 
-def count_params(module) -> tuple[int, int]:
+def print_param_count(agent) -> None:
     total = trainable = 0
-    for parameter in module.parameters():
+    for parameter in agent.parameters():
         count = parameter.numel()
         total += count
         if parameter.requires_grad:
             trainable += count
-    return total, trainable
-
-
-def print_param_count(agent) -> None:
-    total, trainable = count_params(agent)
     print(f"[{type(agent).__name__}] parameters={total / 1e6:.2f} M, trainable={trainable / 1e6:.2f} M")
 
 

@@ -56,16 +56,10 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     offset = state["fields.hand.offset"].detach().float().cpu()
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output) as temporary:
-        payload = {
-            "source_checkpoint": str(Path(checkpoint_path).expanduser().resolve()),
-            "source_epoch": checkpoint["epoch"],
-            "sorted_hand_poses": poses,
-            "hand_normalizer_scale": scale.numpy(),
-            "hand_normalizer_offset": offset.numpy(),
-        }
         # An open file prevents NumPy from silently appending a second suffix.
         with open(temporary, "wb") as file:
-            np.savez(file, **payload)
+            np.savez(file, sorted_hand_poses=poses,
+                     hand_normalizer_scale=scale.numpy(), hand_normalizer_offset=offset.numpy())
     return len(poses)
 
 
