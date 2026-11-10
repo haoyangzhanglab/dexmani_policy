@@ -23,6 +23,29 @@ from dexmani_policy.training.trainer import PolicyTrainer
 
 
 class CorrectnessTest(unittest.TestCase):
+    def test_point_counts_and_contact_head_boundary(self):
+        import zarr
+        from dexmani_policy.training.common.data import build_dataset
+        from dexmani_policy.datasets.preprocess.contact_map import generate
+        from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.zarr'
+            source = zarr.open_group(str(path), mode='w')
+            source.create_dataset('meta/episode_ends', data=np.array([4]))
+            for key, shape in (('joint_state', (4, 19)), ('action', (4, 19)),
+                               ('hand_pointcloud', (4, 7, 6)), ('object_pointcloud', (4, 11, 6)),
+                               ('contact_map', (4, 11))):
+                source.create_dataset('data/' + key, data=np.ones(shape, np.float16))
+            cfg = load_policy_config('cordvip', [f'zarr_path={path}', 'horizon=4', 'n_obs_steps=2', 'n_action_steps=2'])
+            dataset, description = build_dataset(cfg)
+            self.assertEqual(description['field_dims']['object_pointcloud'], 3)
+            self.assertEqual(dataset[0]['obs']['object_pointcloud'].shape, (2, 11, 3))
+            self.assertEqual(dataset[0]['obs']['object_pointcloud'].dtype, torch.float32)
+            with self.assertRaisesRegex(ValueError, '1024'):
+                generate(path, Path(directory) / 'contact.zarr')
+            with self.assertRaisesRegex(ValueError, '1024'):
+                CordViPPretrainDataset(path)
+
     def test_sampling_position(self):
         sampler = EpochBatchSampler(range(10), 2, False, shuffle=True, seed=42)
         for step in range(7):

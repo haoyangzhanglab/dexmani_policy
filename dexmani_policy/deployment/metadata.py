@@ -22,9 +22,7 @@ class PolicyInfo:
     control_dt_s: float | None
     depth_config: dict | None
     pointcloud_config: dict | None
-    hand_pointcloud_config: dict | None
     fingertip_link_names: tuple[str, ...] | None
-    hoi_pcd: dict | None = None
 
     def to_dict(self):
         result = asdict(self)
@@ -53,7 +51,5 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         control_dt_s=deployment.get("control_dt_s"),
         depth_config=deployment.get("depth_config"),
         pointcloud_config=deployment.get("pointcloud_config"),
-        hand_pointcloud_config=deployment.get("hand_pointcloud_config"),
         fingertip_link_names=tuple(fingertip_links) if fingertip_links is not None else None,
-        hoi_pcd=deployment.get("hoi_pcd"),
     )
