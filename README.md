@@ -28,58 +28,99 @@
 
 各方法均接入本项目的数据与机器人设置，具体结构和监督方式有所不同。
 
-## ODE 使用
+## 安装
+
+在仓库根目录操作。启动脚本使用名为 `policy` 的 Conda 环境；已有环境可直接激活。
 
 ```bash
-bash scripts/training/train.sh ode task_name=pick_apple_messy
-bash scripts/training/train.sh ode task_name=pick_apple_messy agent.solver=rk4
-bash scripts/training/train.sh ode task_name=pick_apple_messy agent.side_head=12
+conda create -n policy python=3.10
+conda activate policy
+# CUDA 12.4 构建；其他设备使用与本机匹配的 Torch 2.4.1 / torchvision 0.19.1。
+python -m pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu124
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m pip check
 ```
 
-默认 `n_obs_steps=2, n_action_steps=8, horizon=9`，支持 19 维绝对关节目标。
-原始数据第 t 行保存观测后的指令 `u_t`；Dataset 另取同回合 `u_(t-1)`，首帧取未增强的实测状态。
-动作起点和 target 使用 action affine，最新状态使用 joint_state affine。`perturb_std=0.01` rad
-与 `vel_scale=0.05` 是迁移初值，尚未调优。`eval.inference_steps` 表示每个控制周期的积分子步数，
-不改变输出长度或控制周期。diversity 默认按 mixture 权重抽分量并取其均值；
-`agent.eps_center=false` 才在分量内采样。ODE 不支持 RTC。
+点云 FPS / KNN 路径还需要针对当前 Torch/CUDA 编译的 PyTorch3D 0.7.8；它是独立的编译依赖，`pip install -e .` 不会自动安装。离线接触标签额外使用 Open3D，可安装 `python -m pip install -e '.[preprocess]'`。
 
-真机调用方负责承接实际指令。以下函数由客户端提供；`send_joint_target` 必须按数据中的控制周期逐条下发，并返回实际提交目标：
+仿真评测需要安装 `dexmani_sim` 并准备其任务资源与评测 seed 池；若它位于相邻目录，可执行 `python -m pip install -e ../dexmani_sim`，然后重新运行 `pip check`。硬件执行由 `dexmani_real` 提供。
+
+## 数据与初始化权重
+
+示教数据默认位于 `robot_data/<task_name>.zarr`，字段与时间对应关系见[数据集格式](docs/仿真数据集格式.md)。运行其他任务时修改 `task_name`；自定义位置用 `zarr_path=/path/to/data.zarr`。
+
+DP3、ODE、ManiFlow、AdapTac 和 InterAct-Dex 可直接从示教训练。其他方法按需准备：
+
+| 方法 | 新训练需要的初始化 |
+| --- | --- |
+| DP | `bash scripts/utils/download_pretrained.sh dp`：DINOv2 |
+| SAT / DexLatent / R3D | 将脚本参数换成 `sat` / `dexlatent` / `r3d`；分别准备 DINOv3、DINOv3 + 手部先验、Uni3D |
+| DQ-RISE | `download_pretrained.sh dqrise` 准备 DINOv3；另外提供 `initialization.codebook`，见[手部动作表示](docs/手部动作表示.md) |
+| AFRO | 提供 `initialization.encoder`；从头训练时显式设置 `agent.freeze_visual=false` |
+| CordViP | 使用带手物元数据的 `.cordvip.zarr`；预训练编码器可用 `initialization.encoder` 加载 |
+
+AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/观测预训练.md)。外部权重与可选主干见 [data/README](data/README.md)。完整 checkpoint 已包含部署所需权重和归一化参数，续训、推理不再读取初始化文件。
+
+## 训练与续训
+
+```bash
+RUN="$PWD/experiments/train/dp3/pick_apple_messy/run_01"
+bash scripts/training/train.sh dp3 task_name=pick_apple_messy hydra.run.dir="$RUN"
+# 中断后在同一输出目录恢复；总预算继续使用 checkpoint 中的配方。
+python -m dexmani_policy.training.common.resume --run "$RUN"
+```
+
+新实验使用新目录。省略 `hydra.run.dir` 时自动生成带时间标识的目录。`config.yaml` 记录有效配方，`metrics.jsonl` 记录指标，`checkpoints/` 保存完整训练状态和 `latest.pt`。默认 W&B 为离线模式，可用 `workspace.wandb_cfg=null` 关闭。
+
+续训恢复 raw/EMA、优化器、学习率调度器、步数和随机数状态；本地日志回退到 checkpoint 步数后继续追加。`--max-updates 100` 只限制本次续训执行量，不修改总预算。多进程数据增强的 worker 状态不在 checkpoint 中，因此不承诺跨中断逐位复现。
+
+常用配置的含义：
+
+| 配置 | 含义 |
+| --- | --- |
+| `horizon` / `n_obs_steps` | 训练窗口长度 / 输入观测历史长度；可预测未来长度为 `horizon - n_obs_steps + 1` |
+| `n_action_steps` | 每次预测后实际执行的前缀长度；ODE 要求完整执行其训练 chunk |
+| `eval.inference_steps` | 推理迭代次数；ODE 中是每个控制周期的积分子步数 |
+| `training.loop.total_train_steps` | 优化器更新总次数，不是 epoch 或 microbatch 数 |
+| `training.loop.gradient_accumulation_steps` | 每次更新累计的 microbatch 数 |
+| `dataset.val_episodes` / `dataset.max_train_episodes` | 固定留出回合数 / 训练回合上限；同数据、seed 下调整上限不会改变验证集 |
+
+主策略训练只留出验证回合，当前不计算验证 loss；AFRO/CordViP 预训练会按各自配方验证。公共运行默认值在 `configs/common.yaml`，方法差异保留在各自配方中。
+
+## 评估与选模
+
+```bash
+bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episodes 100
+bash scripts/eval/eval_pipeline.sh \
+  --checkpoints "$RUN/checkpoints/step_00020000.pt" "$RUN/checkpoints/step_00040000.pt" \
+  --selection-episodes 25 --test-episodes 100
+```
+
+将候选替换为实际存在的 checkpoint。默认每个候选使用自己的 raw/EMA、推理步数和执行长度；只有显式传 `--weights`、`--inference-steps` 或 `--action-steps` 才统一对应项。胜者在独立 test 回合继续使用选模时的实际设置，结果文件记录这些设置。跨方法比较的条件见[仿真评测机制](docs/仿真评测机制.md)。
+
+## 部署与检查
+
+下面以 DP3 为例，`observation` 是外部执行端提供的观测历史字典，字段和长度由 `runtime.info` 描述：
 
 ```python
 from contextlib import closing
 from dexmani_policy.deployment import load_policy
 
-with closing(load_policy(checkpoint_path)) as runtime:
-    prev_action = None  # 每个回合重新初始化；warmup 不提交任何动作。
-    runtime.warmup(read_history())
-    while not episode_finished():
-        chunk = runtime.predict(read_history(), prev_action=prev_action)
-        for target in chunk:  # 正常执行完整 H 步，然后再编码观测。
-            sent_target = send_joint_target(target)
-            # 返回客户端裁剪后、同一关节坐标下的实际提交目标。
-            prev_action = sent_target.copy()
-            if episode_finished():
-                break
+with closing(load_policy("/path/to/run")) as runtime:
+    print(runtime.info.to_dict())
+    runtime.warmup(observation)
+    chunk = runtime.predict(observation)
+    targets = chunk[:runtime.info.n_action_steps]
 ```
 
-`prev_action` 为物理单位 `[19]`；省略参数仅用于初始化或无执行副作用的 warmup。
-不能在执行前将预测末帧当作上一条指令。中途终止立即停止，重新启动时显式初始化。
-`dexmani_real` 已按 `PolicyInfo.requires_prev_action` 接入上述承接，并在连接设备前检查 ODE 的同步、完整 H 步执行约束。
-真机承接值取自 `Robot.send_action()` 正常返回后的裁剪目标；这表示高层指令提交，不表示 SDK 回执或物理到位。实机闭环仍未验证。
-
-定向验收（在 `policy` Conda 环境中）：
+输出为物理单位下的控制目标，调度和发送由执行端负责。ODE 还需承接上一条实际已下发目标，完整使用方式见 [ODE 策略](docs/ODE策略.md)。
 
 ```bash
 python -m dexmani_policy.test_tools.smoke_test --device cpu --max-updates 2 --resume-updates 2
-python -m dexmani_policy.test_tools.check_ode
-python -m dexmani_policy.test_tools.check_ode --device cuda:0 --compile
 ```
 
-ODE 检查仅使用临时合成数据，每种 head 训练 2 次、恢复 2 次；不启动完整训练。
-独立官方数值/梯度对照需将固定版本
-[`ode_image_policy.py`](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/ode_policy/policies/ode/ode_image_policy.py)
-下载到临时目录，并加 `--upstream /tmp/ode_image_policy.py`；脚本仅提取连续算法核心进行对照。
-不提供该参数时明确跳过官方对照。移植来源和主要调整记录在 decoder 文件头。
+上述检查使用临时数据；真实任务成功率需要独立仿真或实机评测。
 
 ## 阅读导航
 
@@ -91,4 +132,5 @@ ODE 检查仅使用临时合成数据，每种 head 训练 2 次、恢复 2 次�
 | [观测预训练](docs/观测预训练.md) | AFRO 与 CordViP 的学习目标及迁移 |
 | [触觉与交互建模](docs/触觉与交互建模.md) | 当前触觉融合与未来力预测的作用 |
 | [仿真评测机制](docs/仿真评测机制.md) | 闭环执行、候选选择与独立测试 |
+| [ODE 策略](docs/ODE策略.md) | ODE 时序与执行承接 |
 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 远程同步、训练、续训与结果取回 |

@@ -4,11 +4,21 @@ from math import prod
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, validate_normalization_spec
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
 
 
 def normalization_feature_shapes(dims, spec):
-    validate_normalization_spec(dims, spec)
+    missing = dims.keys() - spec.keys()
+    unknown = spec.keys() - dims.keys()
+    if missing or unknown:
+        raise ValueError(f"Invalid normalization fields: missing={sorted(missing)}, unknown={sorted(unknown)}")
+    for key, mode in spec.items():
+        if mode not in {"identity", "limits"}:
+            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected identity or limits")
+        if key == "action" and mode != "limits":
+            raise ValueError("action must use limits")
+        if key in TACTILE_FEATURE_SHAPES and mode != "identity":
+            raise ValueError(f"{key} must use identity")
     return {
         key: FIELD_FEATURE_SHAPES.get(key, (width,))
         for key, width in dims.items()

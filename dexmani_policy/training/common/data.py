@@ -1,4 +1,3 @@
-import re
 from itertools import islice
 from math import prod
 
@@ -18,22 +17,14 @@ def fit_normalizer(
     dataset, spec, normalizer: LinearNormalizer, *, initial_state=None, inherited_fields=(), hand_affine=None,
 ) -> None:
     """Fit limits fields, loading inherited affine into the existing modules."""
-    if inherited_fields or initial_state is not None:
+    if initial_state is not None:
         inherited = LinearNormalizer()
         for key in inherited_fields:
-            if key not in normalizer.fields or spec.get(key) != "limits":
-                raise RuntimeError(f"Missing affine field for inherited limits feature: {key}")
             inherited.fields[key] = normalizer[key]
-        inherited.load_state_dict({} if initial_state is None else initial_state, strict=True)
+        inherited.load_state_dict(initial_state, strict=True)
         validate_normalizer_state(inherited)
     for key, mode in spec.items():
-        if mode == "identity":
-            continue
-        if mode != "limits":
-            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected identity or limits")
-        if key not in normalizer.fields:
-            raise RuntimeError(f"Missing affine field for limits feature: {key}")
-        if key in inherited_fields:
+        if mode == "identity" or key in inherited_fields:
             continue
         expected_shape = normalizer[key].scale.shape
         chunks = dataset.iter_normalization_data(key)
@@ -69,13 +60,6 @@ def build_dataset(cfg):
     dims["action"] = dataset.action_dim
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
-    description = {
-        "field_dims": dims,
-        "action_key": dataset.action_key,
-        "hand_coordinates": {key: buffer.attrs[key] for key in ("hand_joint_order", "hand_units")
-                             if key in buffer.attrs},
-        "control_action_dim": buffer[dataset.action_key].shape[-1],
-    }
     deployment = {}
     if "dt" in buffer.attrs:
         deployment["control_dt_s"] = buffer.attrs["dt"]
@@ -87,38 +71,22 @@ def build_dataset(cfg):
         if modality in dataset.sensor_modalities and attr in buffer.attrs:
             deployment[attr] = buffer.attrs[attr]
     if "object_pointcloud" in dataset.sensor_modalities:
-        metadata = buffer.attrs.get("hoi_pcd")
-        if not isinstance(metadata, dict):
-            raise ValueError("HOI dataset requires hoi_pcd metadata mapping")
-        task_name = metadata.get("task_name")
-        if not isinstance(task_name, str) or not task_name.strip() or task_name != cfg.task_name:
-            raise ValueError("HOI dataset task_name must be nonempty and match training task")
-        names = metadata.get("object_names")
-        if (
-            not isinstance(names, list) or not names
-            or any(not isinstance(name, str) or not name.strip() for name in names)
-            or len(set(names)) != len(names)
-        ):
-            raise ValueError("HOI dataset object_names must be a nonempty list of unique names")
-        digest = metadata.get("template_sha256")
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
-            raise ValueError("HOI dataset template_sha256 must be a 64-digit SHA256 hex string")
+        metadata = buffer.attrs["hoi_pcd"]
+        if metadata["task_name"] != cfg.task_name:
+            raise ValueError("HOI dataset task_name must match training task")
         points = buffer["object_pointcloud"]
         if points.shape[1:] != (1024, 3) or points.dtype.name != "float32":
             raise ValueError("HOI dataset requires float32 [T,1024,3]")
         deployment["hoi_pcd"] = {
-            "task_name": task_name,
-            "object_names": names,
-            "template_sha256": digest.lower(),
+            key: metadata[key] for key in ("task_name", "object_names", "template_sha256")
         }
     if "depth" in dataset.sensor_modalities:
         deployment["depth_config"] = {
             "shape": list(buffer["depth"].shape[1:]),
             "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
         }
-    description["deployment_metadata"] = deployment
     print(f"[Dataset] {dataset.training_summary()}")
-    return dataset, description
+    return dataset, {"field_dims": dims, "deployment_metadata": deployment}
 
 
 def close_data_loader(loader, iterator=None):
@@ -160,13 +128,13 @@ def epoch_position(global_step, batches_per_epoch, accumulation):
 
 def build_train_loader(cfg, dataset):
     options = dict(cfg.dataloader)
-    if options.get("num_workers", 0) == 0:
+    if options["num_workers"] == 0:
         options["persistent_workers"] = False
         options.pop("prefetch_factor", None)
     samples = len(dataset)
     batch_sampler = EpochBatchSampler(
         dataset, options.pop("batch_size"), options.pop("drop_last", False),
-        shuffle=options.pop("shuffle", False), seed=cfg.training.seed,
+        shuffle=options.pop("shuffle"), seed=cfg.training.seed,
     )
     batch_size = batch_sampler.batch_size
     accumulation = cfg.training.loop.gradient_accumulation_steps

@@ -57,7 +57,7 @@ class PointNetPatchEmbedding(nn.Module):
         self.patch_encoder = PointNetPatchEncoder(in_channels, out_channels, [128, 512])
 
     def forward(self, coords, features):
-        centers, _, neighbors = sample_point_patches(
+        centers, neighbors = sample_point_patches(
             coords,
             self.num_patches,
             self.patch_size,

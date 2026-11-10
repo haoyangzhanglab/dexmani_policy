@@ -70,7 +70,7 @@ class CordViP(nn.Module):
 def main():
     from dexmani_policy.training.pretrain.obs.common import train
 
-    train("cordvip")
+    train("cordvip", CordViP)
 
 
 if __name__ == "__main__":

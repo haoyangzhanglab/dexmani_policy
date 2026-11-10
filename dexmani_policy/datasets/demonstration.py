@@ -65,7 +65,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
         self.sensor_modalities = sensor_modalities
         self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys)
-        self.zarr_path = self.episode_store.path
 
         if "rgb" in sensor_modalities:
             rgb = self.episode_store["rgb"]
@@ -119,7 +118,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
     def training_summary(self):
         return (
-            f"{Path(self.zarr_path).name}: total episodes={self.episode_store.n_episodes:,}, "
+            f"{Path(self.episode_store.path).name}: total episodes={self.episode_store.n_episodes:,}, "
             f"train episodes={int(self.train_mask.sum()):,}, "
             f"val episodes={int(self.val_mask.sum()):,} (留出但未验证), "
             f"unused episodes={int((~(self.train_mask | self.val_mask)).sum()):,}, train windows={len(self):,}, "

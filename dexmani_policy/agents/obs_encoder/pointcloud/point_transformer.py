@@ -94,11 +94,10 @@ class PointPatchEncoder(nn.Module):
         self.patch_embedding = PointPatchEmbedding(input_channels, channels, geometry_scale)
         self.position_embedding = build_mlp([3, 128, channels], normalize=False)
 
-    def encode_patches(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Sample once and encode local geometry and absolute position."""
+    def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
         xyz = pointcloud[..., :3].float().contiguous()
         with torch.autocast(device_type=pointcloud.device.type, enabled=False):
-            centers, _, neighbors = sample_point_patches(
+            centers, neighbors = sample_point_patches(
                 xyz,
                 self.num_patches,
                 self.group_size,
@@ -112,15 +111,7 @@ class PointPatchEncoder(nn.Module):
         # Preserve absolute metric position alongside relative geometry.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)
-        return {
-            "tokens": tokens,
-            "xyz": centers,
-            "neighbor_indices": neighbors,
-            "relative_xyz": relative_xyz,
-        }
-
-    def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        return self.encode_patches(pointcloud)
+        return {"tokens": tokens, "xyz": centers}
 
     @property
     def out_dim(self) -> int:
@@ -196,24 +187,15 @@ class PointTransformerEncoder(PointPatchEncoder):
             channels, depth, num_heads, mlp_ratio, rope_scale, rope_base,
         )
         self.effective_config.update(global_encoder.effective_config)
-        # Keep the original flat parameter paths for pure point-cloud checkpoints.
+        # Reuse global attention without adding another level to the state dict.
         self.rope = global_encoder.rope
         self.blocks = global_encoder.blocks
         self.norm = global_encoder.norm
 
-    def encode_global(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        """Apply global attention to tokens with shared spatial RoPE."""
-        return _encode_global(tokens, cos, sin, self.blocks, self.norm)
-
-    def encode_patches(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        patches = super().encode_patches(pointcloud)
-        with torch.no_grad():
-            patches["rope_cos"], patches["rope_sin"] = self.rope(patches["xyz"])
-        return patches
-
     def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        patches = self.encode_patches(pointcloud)
+        patches = super().forward(pointcloud)
+        cos, sin = self.rope(patches["xyz"])
         return {
-            "tokens": self.encode_global(patches["tokens"], patches["rope_cos"], patches["rope_sin"]),
+            "tokens": _encode_global(patches["tokens"], cos, sin, self.blocks, self.norm),
             "xyz": patches["xyz"],
         }

@@ -9,6 +9,7 @@ import torch
 from dexmani_policy.common.checkpoint import restore_policy, load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+from dexmani_policy.common.inference import resolve_inference_settings
 from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.evaluation.metrics import summarize_episodes
@@ -35,14 +36,10 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
     loaded = load_checkpoint(checkpoint)
     cfg = loaded.effective_config
-    weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
-    if weights not in {"raw", "ema"}:
-        raise ValueError("weights must be raw or ema")
+    weights, inference_steps = resolve_inference_settings(cfg, weights=weights, inference_steps=inference_steps)
     state_dict = loaded.ema_model_state if weights == "ema" else loaded.model_state
     global_step = loaded.global_step
     del loaded
-    inference_steps = positive_int(cfg["eval"]["inference_steps"] if inference_steps is None
-                                   else inference_steps, "inference_steps")
     if seeds is None:
         seeds, _ = split_evaluation_seeds(load_seed_pool(cfg["env_runner"]["task_name"]), seed, episodes)
     else:

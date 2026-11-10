@@ -46,10 +46,10 @@ def download_hf(repo_id, directory, filenames):
 if method in ("all", "r3d"):
     download_hf("eddie-cui/r3d-weights", "uni3d", ("model.safetensors",))
 
-if method in ("all", "dexlatent", "sat", "dqrise", "dp"):
+if method in ("all", "dp"):
     download_hf("facebook/dinov2-small", "dinov2-small", ("config.json", "model.safetensors"))
 
-if method == "dinov3":
+if method in ("all", "dexlatent", "sat", "dqrise", "dinov3"):
     download_hf("timm/vit_small_patch16_dinov3.lvd1689m", "dinov3-small",
                 ("config.json", "model.safetensors", "LICENSE.md"))
 

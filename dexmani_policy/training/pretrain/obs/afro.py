@@ -167,7 +167,7 @@ class AFRO(nn.Module):
 def main():
     from dexmani_policy.training.pretrain.obs.common import train
 
-    train("afro")
+    train("afro", AFRO)
 
 
 if __name__ == "__main__":

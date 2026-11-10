@@ -2,7 +2,19 @@
 
 import numpy as np
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES, positive_int
+
+
+def resolve_inference_settings(config, *, weights=None, inference_steps=None):
+    defaults = config["eval"]
+    if weights is None:
+        if type(defaults["use_ema"]) is not bool:
+            raise ValueError("Saved use_ema must be boolean")
+        weights = "ema" if defaults["use_ema"] else "raw"
+    if weights not in {"ema", "raw"}:
+        raise ValueError("weights must be ema or raw")
+    steps = positive_int(defaults["inference_steps"] if inference_steps is None else inference_steps, "inference_steps")
+    return weights, steps
 
 
 def contiguous_numpy(value, dtype=None):

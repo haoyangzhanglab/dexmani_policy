@@ -6,9 +6,7 @@ import torch
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.hand_prior.codebook import (
-    HandStateCodebook, validate_hand_coordinates,
-)
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
 
@@ -97,12 +95,6 @@ class DQRISE(Policy):
             "num_codes": self.hand_codebook.num_codes,
             "time_shift_alpha": self.action_decoder.time_shift_alpha,
         }
-
-    def initialize_training(self, data_description, codebook) -> None:
-        validate_hand_coordinates(data_description["hand_coordinates"])
-        if data_description["action_key"] != "action":
-            raise ValueError("DQ-RISE requires joint policy data with action_key=action")
-        self.hand_codebook = codebook
 
     def compute_loss(
         self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,

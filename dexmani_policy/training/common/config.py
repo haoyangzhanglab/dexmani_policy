@@ -1,4 +1,3 @@
-import copy
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -6,7 +5,7 @@ from typing import TYPE_CHECKING, cast
 import hydra
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.config import PROJECT_ROOT, positive_int, validate_normalization_spec
+from dexmani_policy.common.config import PROJECT_ROOT, positive_int
 
 if TYPE_CHECKING:
     from dexmani_policy.agents.policies.base import Policy
@@ -59,9 +58,6 @@ def assemble_policy_config(cfg):
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         if method == "interact-dex":
-            positive_int(cfg.future_force_horizon, "future_force_horizon")
-            if cfg.future_force_horizon > cfg.horizon - cfg.n_obs_steps + 1:
-                raise ValueError("future_force_horizon exceeds future actions")
             cfg.agent.future_force_horizon = cfg.future_force_horizon
             cfg.dataset.include_future_force = cfg.agent.future_force_loss_weight > 0
         cfg.env_runner.task_name = cfg.task_name
@@ -80,7 +76,7 @@ def prepare_training(cfg):
         if name in ("dino", "siglip"):
             rgb = dict(cfg.agent.get("rgb_backbone_config") or {})
             if rgb.get("architecture") is None:
-                source = cfg.get("initialization", {}).get("rgb")
+                source = cfg.initialization.rgb
                 if source is None:
                     raise ValueError("Fresh HF RGB requires initialization.rgb or an explicit architecture")
                 from transformers import AutoConfig, SiglipVisionConfig
@@ -93,9 +89,7 @@ def prepare_training(cfg):
 
 
 def validate_normalization(cfg):
-    expected = set(cfg.dataset.sensor_modalities) | {"action"}
     spec = cfg.normalization
-    validate_normalization_spec(expected, spec)
 
     physical = set()
     if cfg.policy_name in {"sat", "dqrise", "dexlatent"}:
@@ -126,15 +120,12 @@ def validate_config(cfg):
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
 
-    print("Config validation passed")
-
 
 def assemble_effective_config(cfg, data_description, model):
-    effective = copy.deepcopy(cfg)
-    with open_dict(effective):
-        effective.pop("max_updates", None)
-        effective.normalization_dims = model.normalization_dims
-        effective.deployment_metadata = data_description["deployment_metadata"]
-        effective.agent.update(model.effective_config)
-    OmegaConf.resolve(effective)
-    return effective
+    with open_dict(cfg):
+        cfg.pop("max_updates", None)
+        cfg.normalization_dims = model.normalization_dims
+        cfg.deployment_metadata = data_description["deployment_metadata"]
+        cfg.agent.update(model.effective_config)
+    OmegaConf.resolve(cfg)
+    return cfg

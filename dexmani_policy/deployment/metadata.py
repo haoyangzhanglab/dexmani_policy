@@ -1,16 +1,7 @@
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
-
-
-def _resolve_checkpoint(policy):
-    path = Path(policy).expanduser().resolve(strict=True)
-    if path.is_dir():
-        path = (path / "checkpoints/latest.pt").resolve(strict=True)
-    if not path.is_file():
-        raise ValueError(f"Checkpoint must be a file: {path}")
-    return path
 
 
 @dataclass(frozen=True)
@@ -36,13 +27,13 @@ class PolicyInfo:
     hoi_pcd: dict | None = None
 
     def to_dict(self):
-        result = {item.name: getattr(self, item.name) for item in fields(self)}
+        result = asdict(self)
         result["checkpoint_path"] = str(self.checkpoint_path)
         return result
 
 
 def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
-    deployment = cfg.get("deployment_metadata", {})
+    deployment = cfg["deployment_metadata"]
     fingertip_links = deployment.get("fingertip_link_names")
     fields = tuple(key for key in agent.normalization_dims if key != "action")
     return PolicyInfo(

@@ -13,29 +13,23 @@ from dexmani_policy.common.io_util import atomic_path, close_resources
 
 class ExperimentLogger:
     def __init__(self, output_dir: str, wandb_cfg: Mapping | None = None, *,
-                 resume: bool = False, wandb_enabled=True):
+                 resume_step: int | None = None, wandb_enabled=True):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.resuming = resume
+        self.resuming = resume_step is not None
         if self.resuming:
             path = self.output_dir / "metrics.jsonl"
             if path.exists():
                 with path.open("rb+") as stream:
-                    end = stream.seek(0, os.SEEK_END)
-                    if end:
-                        stream.seek(-1, os.SEEK_END)
-                        if stream.read(1) != b"\n":
-                            # Only newline-terminated records survive an interrupted write.
-                            position = end
-                            while position:
-                                size = min(position, 8192)
-                                position -= size
-                                stream.seek(position)
-                                newline = stream.read(size).rfind(b"\n")
-                                if newline >= 0:
-                                    position += newline + 1
-                                    break
+                    while True:
+                        position = stream.tell()
+                        line = stream.readline()
+                        if not line:
+                            break
+                        # Only the history committed by this checkpoint survives resume.
+                        if not line.endswith(b"\n") or json.loads(line)["step"] > resume_step:
                             stream.truncate(position)
+                            break
 
         self.metrics_file = (self.output_dir / "metrics.jsonl").open(
             "a", buffering=1, encoding="utf-8"

@@ -98,7 +98,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --dry-run -- \
   dp3 task_name=pick_apple training.seed=42
 ```
 
-启动脚本的 `--dry-run` 仅打印命令，不连接远端、不同步源码，也不检查远端环境。方法名和训练配置覆盖放在 `--` 后。
+启动脚本的 `--dry-run` 打印包含 `CUDA_VISIBLE_DEVICES` 的启动命令，不连接远端、不同步源码，也不检查远端环境。方法名和训练配置覆盖放在 `--` 后。
 
 `REMOTE` 保存定义时的变量值；更换实验路径后，需要重新执行上面的数组定义。
 
@@ -122,7 +122,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --fg -- \
 
 后台与前台命令二选一。前台输出直接显示在终端，SSH 连接需保持。
 
-`--gpu` 设置远端 GPU 可见性。当前后台脚本复用 tmux 服务，已有服务时可能沿用旧的 GPU 设置；需要明确切换 GPU 时，修改公共参数中的 GPU 编号，并使用 `--fg` 启动或续训。
+`--gpu` 设置远端 GPU 可见性。前台和后台启动都会将本次 `CUDA_VISIBLE_DEVICES` 显式传给训练进程；复用已有 tmux 服务时也会使用本次设置。修改公共参数中的 GPU 编号即可切换，进程内部的 `cuda:0` 表示第一张可见 GPU。
 
 ## 5. 查看进度与停止
 
@@ -161,6 +161,8 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 ```
 
 续训恢复 checkpoint 保存的训练配方与状态，不再次传入方法名或模型配置。`--` 后传续训入口的运行参数，例如 `--num-workers`；可追加 `--max-updates 100` 限制本次执行步数，不改变实验总预算。
+
+`metrics.jsonl` 仅保留步数不超过 checkpoint 的完整记录，再继续追加；崩溃前已写入但尚未保存到 checkpoint 的更新记录会被移除。保留部分中完整行的损坏 JSON 会明确报错。
 
 需要前台续训时，在 `--` 前加入 `--fg`。源码仍由启动脚本同步，数据沿用已准备的远端目录。
 

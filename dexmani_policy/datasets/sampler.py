@@ -10,30 +10,17 @@ def window_indices(
     pad_before: int = 0,
     pad_after: int = 0,
 ) -> np.ndarray:
-    count = 0
-    start = 0
-    for episode, end in enumerate(episode_ends):
-        if episode_mask[episode]:
-            count += max(0, end - start - sequence_length + pad_before + pad_after + 1)
-        start = end
-
-    indices = np.empty((count, 3), dtype=np.int64)
+    episode_starts = np.r_[0, episode_ends[:-1]]
+    counts = np.maximum(episode_ends - episode_starts - sequence_length + pad_before + pad_after + 1, 0)
+    counts[~episode_mask] = 0
+    indices = np.empty((counts.sum(), 3), dtype=np.int64)
     cursor = 0
-    for i in range(len(episode_ends)):
-        if not episode_mask[i]:
-            continue
-
-        start_idx = episode_ends[i - 1] if i else 0
-        end_idx = episode_ends[i]
-        episode_length = end_idx - start_idx
-
-        min_start = -pad_before
-        max_start = episode_length - sequence_length + pad_after
-
-        window_starts = np.arange(min_start, max_start + 1, dtype=np.int64)
-        next_cursor = cursor + len(window_starts)
+    for episode in np.flatnonzero(counts):
+        start_idx, end_idx = episode_starts[episode], episode_ends[episode]
+        window_starts = np.arange(-pad_before, counts[episode] - pad_before, dtype=np.int64)
+        next_cursor = cursor + counts[episode]
         indices[cursor:next_cursor, 0] = np.maximum(window_starts, 0) + start_idx
-        indices[cursor:next_cursor, 1] = np.minimum(window_starts + sequence_length, episode_length) + start_idx
+        indices[cursor:next_cursor, 1] = np.minimum(window_starts + sequence_length + start_idx, end_idx)
         indices[cursor:next_cursor, 2] = np.maximum(-window_starts, 0)
         cursor = next_cursor
 
@@ -60,14 +47,13 @@ class SequenceSampler:
         if episode_mask.shape != episode_ends.shape:
             raise ValueError("episode_mask must have one entry per episode")
 
-        indices = window_indices(
+        self.indices = window_indices(
             episode_ends,
             sequence_length=sequence_length,
             pad_before=pad_before,
             pad_after=pad_after,
             episode_mask=episode_mask,
         )
-        self.indices = indices
         self.episode_store = episode_store
         self.sequence_length = sequence_length
         self.fields = dict.fromkeys(episode_store.keys()) if fields is None else dict(fields)

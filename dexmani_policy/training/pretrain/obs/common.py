@@ -9,7 +9,7 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.config import positive_int, validate_normalization_spec
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
@@ -134,7 +134,7 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
         set_rng_state(rng_state, device)
 
 
-def train(method, argv=None):
+def train(method, model_class, argv=None):
     cfg, checkpoint, max_updates = load_run(method, argv)
     resuming = checkpoint is not None
     if resuming and checkpoint["global_step"] >= cfg.training.loop.total_train_steps:
@@ -161,7 +161,6 @@ def train(method, argv=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    validate_normalization_spec(dataset.normalization_fields, cfg.normalization)
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:
@@ -172,16 +171,12 @@ def train(method, argv=None):
     accumulation = cfg.training.loop.gradient_accumulation_steps
     model: torch.nn.Module
     if is_afro:
-        from dexmani_policy.training.pretrain.obs.afro import AFRO
-
-        model = AFRO(cfg.normalization)
+        model = model_class(cfg.normalization)
         if not resuming:
             with open_dict(cfg.training.loop):
                 cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
     else:
-        from dexmani_policy.training.pretrain.obs.cordvip import CordViP
-
-        model = CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
+        model = model_class(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
     if not resuming:
         fit_normalizer(dataset, cfg.normalization, model.normalizer)
     device = torch.device(cfg.training.device)
@@ -200,7 +195,7 @@ def train(method, argv=None):
     if resuming:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace, resume=resuming)
+    logger = ExperimentLogger(**cfg.workspace, resume_step=step if resuming else None)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
     stop_requested = False

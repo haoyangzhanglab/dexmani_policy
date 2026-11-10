@@ -7,11 +7,14 @@
 | 模型与来源 | 用途 |
 | --- | --- |
 | [Uni3D（R3D 权重）](https://huggingface.co/eddie-cui/r3d-weights) | 初始化 R3D 的点云编码器 |
-| [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | DP、SAT、DQ-RISE、DexLatent 的默认 RGB 主干 |
-| [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) / [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) | 上述 RGB 策略的可选视觉主干 |
+| [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | DP 的默认 RGB 主干 |
+| [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) | SAT、DQ-RISE、DexLatent 的默认 RGB 主干 |
+| [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) | RGB 策略的可选视觉主干 |
 | [DexLatent](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/Checkpoints/20260311_225425/checkpoint_epoch_1000.pt) | 提供冻结的 XHand 手部编码器与解码器 |
 
 视觉主干提供观测表征，手部先验负责动作表示；DexLatent 策略同时使用两者。
+
+在仓库根目录执行 `bash scripts/utils/download_pretrained.sh <方法名>`。`dp` 下载 DINOv2；`sat`、`dqrise` 下载 DINOv3；`dexlatent` 额外下载手部先验；`r3d` 下载 Uni3D。`all` 下载这些默认所需权重，可选 SigLIP 需单独使用 `siglip`。更换视觉主干时，同时修改对应配方的编码器配置和 `initialization.rgb`。
 
 ## 项目内预训练产物
 

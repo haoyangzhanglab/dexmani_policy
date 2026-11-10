@@ -77,14 +77,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 training:
-  use_bfloat16: false
   use_compile: true
-  use_ema: true
-  lr_warmup_steps: 500
-  max_grad_norm: 1.0
-  loop:
-    total_train_steps: 100000
 
 eval:
   inference_steps: 4  # 评测 NFE，独立于训练时间网格。
-  use_ema: ${training.use_ema}

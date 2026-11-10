@@ -18,8 +18,7 @@ import torch.nn.functional as F
 import zarr
 
 from dexmani_policy.agents.obs_encoder.pointcloud.camera_projection import project_to_image
-from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.point_transformer import PointPatchEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.ops import farthest_point_sample, preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
 from dexmani_policy.training.common.config import load_policy_config
 
@@ -29,18 +28,16 @@ def grid_to_pixels(grid, height, width):
 
 
 @torch.no_grad()
-def inspect_frame(data, frame, encoder, processor, config, patch_size):
+def inspect_frame(data, frame, processor, config, patch_size):
     rgb = np.asarray(data["rgb"][frame])
     cloud = torch.from_numpy(np.asarray(data["point_cloud"][frame]))
     points = preprocess_point_cloud(
-        cloud[None, :, :3], config.num_points, config.fps_random_config, training=False,
+        cloud[None], config.num_points, config.fps_random_config, training=False,
     )
-    centers = encoder(points)["xyz"]
-    # FPS centers are original samples; retain their recorded RGB for an independent check.
-    distance = (centers[:, :, None] - cloud[None, None, :, :3]).square().sum(-1)
-    source_indices = distance.argmin(-1)[0]
-    assert distance.amin(-1).max() == 0
-    colors = cloud[source_indices, 3:6].numpy()
+    patches = farthest_point_sample(points, config.pc_encoder_config.num_patches, use_random=False)
+    centers = patches[..., :3]
+    # Gather source RGB with the sampled XYZ, including when several points share XYZ.
+    colors = patches[0, :, 3:6].numpy()
     intrinsic = torch.from_numpy(np.asarray(data["camera_intrinsic"][frame])).reshape(1, 3, 3)
     extrinsic = torch.from_numpy(np.asarray(data["camera_extrinsic"][frame])).reshape(1, 3, 4)
     tensor_rgb = torch.from_numpy(rgb).permute(2, 0, 1)[None]
@@ -121,14 +118,9 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("outputs/patch_projection"))
     args = parser.parse_args()
     torch.set_num_threads(2)
-    torch.manual_seed(17)
     args.output.mkdir(parents=True, exist_ok=True)
     recipe = load_policy_config("sat")
     config = recipe.agent
-    local_config = {key: value for key, value in config.pc_encoder_config.items()
-                    if key in ("channels", "num_patches", "group_size", "geometry_scale")}
-    encoder = PointPatchEncoder(input_channels=3, fps_random_config=dict(config.fps_random_config),
-                                **local_config).eval()
     rgb_encoder, processor = build_rgb_encoder(config.rgb_backbone_name, dict(config.rgb_backbone_config))
     patch_size = rgb_encoder.patch_size
     del rgb_encoder
@@ -144,7 +136,7 @@ def main():
                                  squeeze=False, constrained_layout=True)
         task_rows = []
         for index, (episode, frame_id) in enumerate(selection):
-            frame = inspect_frame(root["data"], frame_id, encoder, processor, config, patch_size)
+            frame = inspect_frame(root["data"], frame_id, processor, config, patch_size)
             ax = axes.flat[index]
             overlay(ax, frame)
             ax.set_title(f"episode {episode}, frame {frame_id} | valid {frame['valid'].sum()}/{len(frame['valid'])}")
@@ -165,17 +157,18 @@ def main():
         plt.close(fig)
         valid_rows = [row for row in task_rows if row["valid"]]
         depth = np.array([row["depth_error_mm"] for row in valid_rows])
+        depth = depth[np.isfinite(depth)]
         color = np.array([row["color_mae_255"] for row in valid_rows])
         mass = np.array([row["same_label_mass"] for row in valid_rows])
         summary[dataset.stem] = dict(
             frames=len(selection), centers=len(task_rows), valid=len(valid_rows),
-            depth_valid=int(np.isfinite(depth).sum()),
-            depth_error_mm_median=float(np.nanmedian(depth)),
-            depth_error_mm_p95=float(np.nanpercentile(depth, 95)),
-            depth_error_mm_max=float(np.nanmax(depth)),
-            color_mae_255_mean=float(color.mean()),
-            color_mae_255_p95=float(np.percentile(color, 95)),
-            same_label_mass_mean=float(mass.mean()),
+            depth_valid=len(depth),
+            depth_error_mm_median=float(np.median(depth)) if depth.size else None,
+            depth_error_mm_p95=float(np.percentile(depth, 95)) if depth.size else None,
+            depth_error_mm_max=float(depth.max()) if depth.size else None,
+            color_mae_255_mean=float(color.mean()) if color.size else None,
+            color_mae_255_p95=float(np.percentile(color, 95)) if color.size else None,
+            same_label_mass_mean=float(mass.mean()) if mass.size else None,
             footprint_other_label_majority=int((mass < 0.5).sum()),
         )
         rows.extend(task_rows)

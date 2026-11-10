@@ -55,19 +55,12 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
                 f"Environment conditions differ between baseline checkpoint {checkpoints[0]} "
                 f"and candidate checkpoint {checkpoint}: {'; '.join(differences)}"
             )
-    weights = ("ema" if cfg["eval"]["use_ema"] else "raw") if weights is None else weights
-    if weights not in {"raw", "ema"}:
-        raise ValueError("weights must be raw or ema")
-    inference_steps = cfg["eval"]["inference_steps"] if inference_steps is None else inference_steps
-    action_steps = cfg["agent"]["n_action_steps"] if action_steps is None else action_steps
-    positive_int(inference_steps, "inference_steps")
-    positive_int(action_steps, "action_steps")
     test, selection = split_evaluation_seeds(load_seed_pool(cfg["env_runner"]["task_name"]), seed, test_episodes,
                                              positive_int(selection_episodes, "selection_episodes"))
     directory = create_run_directory(root / "eval", output_dir)
     path = directory / "selection_result.json"
     record = dict(selection_seeds=selection, test_seeds=test, seed=seed,
-                  inference=dict(use_ema=weights == "ema", inference_steps=inference_steps, action_steps=action_steps),
+                  overrides=dict(weights=weights, inference_steps=inference_steps, action_steps=action_steps),
                   device=str(device), test_video=video, candidates=[])
     for index, checkpoint in enumerate(checkpoints):
         result, result_path = evaluate_policy(
@@ -78,11 +71,12 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
             checkpoint=os.path.relpath(checkpoint, directory),
             result=os.path.relpath(result_path, directory),
             statistics=result["statistics"], global_step=result["global_step"],
+            weights=result["weights"], inference_steps=result["inference_steps"], action_steps=result["action_steps"],
         ))
     winner = max(record["candidates"], key=candidate_score)
     checkpoint = directory / winner["checkpoint"]
     _, result_path = evaluate_policy(
-        checkpoint, weights=weights, inference_steps=inference_steps, action_steps=action_steps,
+        checkpoint, weights=winner["weights"], inference_steps=winner["inference_steps"], action_steps=winner["action_steps"],
         seeds=test, seed=seed, device=device, video=video, output_dir=directory / "test")
     record.update(ckpt_relpath=winner["checkpoint"], global_step=winner["global_step"],
                   test_result=os.path.relpath(result_path, directory))

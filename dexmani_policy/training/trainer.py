@@ -1,26 +1,22 @@
 import copy
 import os
 import signal
-from pathlib import Path
 from typing import Any, cast
 
 import hydra
 import torch
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import (
     Checkpoint, policy_state_dict, save_checkpoint,
 )
-from dexmani_policy.common.config import (
-    positive_int,
-)
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path, close_resources
-from dexmani_policy.common.normalizer import normalization_feature_shapes, validate_normalizer_state
+from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
-from dexmani_policy.training.common.config import assemble_effective_config, validate_normalization
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position, fit_normalizer
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
@@ -29,76 +25,8 @@ from dexmani_policy.training.common import training_signal_handlers
 
 
 class PolicyTrainer:
-    def __init__(self, cfg, dataset, data_description, *, checkpoint=None):
-        if checkpoint is not None:
-            current_hoi = data_description.get("deployment_metadata", {}).get("hoi_pcd")
-            saved_hoi = checkpoint.effective_config.get("deployment_metadata", {}).get("hoi_pcd")
-            if current_hoi != saved_hoi:
-                raise ValueError("Resume data/model mismatch: HOI task/template")
+    def __init__(self, cfg, model, dataset, *, checkpoint=None):
         device = torch.device(cfg.training.device)
-        codebook = hand_affine = None
-        if checkpoint is None and cfg.policy_name == "dqrise":
-            from dexmani_policy.agents.hand_prior.codebook import load_codebook
-
-            source = cfg.get("initialization", {}).get("codebook")
-            if source is None:
-                raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
-            codebook, hand_affine = load_codebook(source)
-            with open_dict(cfg.agent):
-                cfg.agent.num_codes = codebook.num_codes
-        model = hydra.utils.instantiate(cfg.agent, _convert_="all")
-        if data_description["control_action_dim"] != model.control_action_dim:
-            raise ValueError("Dataset primary action width must match policy control output")
-        if checkpoint is not None and data_description["field_dims"] != cfg.normalization_dims:
-            raise ValueError("Resume data/model mismatch: normalization_dims")
-        if checkpoint is None:
-            sources = cfg.get("initialization", {})
-            method = cfg.policy_name
-            if method in {"dp", "sat", "dqrise", "dexlatent"}:
-                model.obs_encoder.rgb_encoder.initialize_weights(sources.get("rgb"))
-            elif method == "r3d":
-                model.obs_encoder.pc_encoder.initialize_weights(sources.get("uni3d"))
-            pretrained_state = None
-            inherited_fields: tuple[str, ...] = ()
-            if method == "dqrise":
-                model.initialize_training(data_description, codebook)
-            elif method == "dexlatent":
-                hand_affine = model.hand_prior.initialize_weights(sources.get("dexlatent"))
-            elif method in {"afro", "cordvip"}:
-                source = sources.get("encoder")
-                if source is None:
-                    if method == "afro" and model.freeze_visual:
-                        raise ValueError("AFRO frozen visual requires initialization.encoder; scratch requires freeze_visual=false")
-                    if method == "afro":
-                        print("[AFRO] Scratch training with trainable visual encoder")
-                    else:
-                        print("[CordViP] Scratch training; all observation encoder parameters are trainable")
-                else:
-                    payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
-                    encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
-                    encoder.load_state_dict(payload["encoder_state"], strict=True)
-                    pretrained_state = payload["normalizer_state"]
-                    inherited_fields = (("point_cloud",) if method == "afro" else
-                                        ("hand_pointcloud", "object_pointcloud", "joint_state"))
-                    with open_dict(cfg.normalization):
-                        for key in inherited_fields:
-                            cfg.normalization[key] = payload["normalization"][key]
-                    inherited_fields = tuple(key for key in inherited_fields if cfg.normalization[key] == "limits")
-                    del payload
-        validate_normalization(cfg)
-        model.configure_normalizer(
-            data_description["field_dims"],
-            normalization_feature_shapes(data_description["field_dims"], cfg.normalization),
-        )
-        if checkpoint is None:
-            fit_normalizer(
-                dataset, cfg.normalization, model.normalizer, initial_state=pretrained_state,
-                inherited_fields=inherited_fields, hand_affine=hand_affine,
-            )
-            print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
-            if method == "dexlatent":
-                model.fit_latent_normalizer(dataset)
-
         if model.requires_ema_for_loss and not cfg.training.use_ema:
             raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
 
@@ -122,21 +50,16 @@ class PolicyTrainer:
         ema_model = None
         ema_updater = None
         if cfg.training.use_ema:
-            # Copy before compile; resume restores raw and EMA independently below.
+            # Raw weights are ready; restore EMA independently before compile.
             ema_model = copy.deepcopy(model)
 
-        if checkpoint is not None:
-            # Assignment replaces Parameters; restore before constructing the optimizer.
-            model.load_state_dict(checkpoint.model_state, strict=True, assign=True)
-            if ema_model is not None:
-                if checkpoint.ema_model_state is None:
-                    raise ValueError("Resume checkpoint is missing EMA state")
-                ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
-        model.to(device=device, dtype=torch.float32)
-        validate_normalizer_state(model.normalizer)
-        if ema_model is not None:
+        if checkpoint is not None and ema_model is not None:
+            if checkpoint.ema_model_state is None:
+                raise ValueError("Resume checkpoint is missing EMA state")
+            ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
             ema_model.to(device=device, dtype=torch.float32)
             validate_normalizer_state(ema_model.normalizer)
+        if ema_model is not None:
             # Bind current Parameters only after assignment and device migration.
             ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
 
@@ -148,12 +71,12 @@ class PolicyTrainer:
             self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
             cfg.training.loop.total_train_steps,
         )
-        self.cfg = assemble_effective_config(cfg, data_description, model)
+        self.cfg = cfg
         self.total_train_steps = cfg.training.loop.total_train_steps
         self.log_interval_steps = cfg.training.loop.log_interval_steps
         self.gradient_accumulation_steps = cfg.training.loop.gradient_accumulation_steps
-        self.max_grad_norm = cfg.training.get("max_grad_norm", 1.0)
-        self.use_bfloat16 = cfg.training.get("use_bfloat16", False)
+        self.max_grad_norm = cfg.training.max_grad_norm
+        self.use_bfloat16 = cfg.training.use_bfloat16
         self.batches_per_epoch = self.train_loader.batch_sampler.batches_per_epoch
         self.global_step = 0
 
@@ -184,7 +107,7 @@ class PolicyTrainer:
 
         print_param_count(model)
         print_training_recipe(self.cfg, batches_per_epoch=self.batches_per_epoch)
-        self.logger = ExperimentLogger(**cfg.workspace, resume=checkpoint is not None)
+        self.logger = ExperimentLogger(**cfg.workspace, resume_step=self.global_step if checkpoint is not None else None)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
             self.logger.save_config(self.cfg)
@@ -200,14 +123,13 @@ class PolicyTrainer:
                               self.gradient_accumulation_steps)[0]
 
     def compile_models(self):
-        if self.cfg.training.get("use_compile", False):
+        if self.cfg.training.use_compile:
             mode = self.cfg.training.get("compile_mode", "reduce-overhead")
             models = [self.model]
             if self.model.requires_ema_for_loss:
                 models.append(self.ema_model)
             for model in models:
-                if model is not None:
-                    model.compile_backbone(mode=mode)
+                model.compile_backbone(mode=mode)
 
     def close(self):
         close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)

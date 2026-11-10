@@ -1,10 +1,9 @@
-"""Shared conditioning and attention layers for action backbones."""
+"""Shared initialization and conditioning layers for action backbones and pretraining."""
 
 import math
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 POS_ENCODING_BASE = 10000.0
 WEIGHT_INIT_STD = 0.02
@@ -41,52 +40,6 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
-class SelfAttention(nn.Module):
-    def __init__(
-        self, dim, num_heads=8, qkv_bias=False, qk_norm=False, attn_drop=0.0, proj_drop=0.0
-    ):
-        super().__init__()
-        if num_heads <= 0 or dim % num_heads:
-            raise ValueError("dim must be divisible by positive num_heads")
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.attn_drop = attn_drop
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x):
-        batch, length, channels = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(batch, length, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = qkv.unbind(0)
-        x = F.scaled_dot_product_attention(
-            self.q_norm(q),
-            self.k_norm(k),
-            v,
-            dropout_p=self.attn_drop if self.training else 0.0,
-        )
-        x = x.transpose(1, 2).reshape(batch, length, channels)
-        return self.proj_drop(self.proj(x))
-
-
-class AdaLNOutput(nn.Module):
-    def __init__(self, hidden_size, output_dim, norm):
-        super().__init__()
-        self.norm_final = norm
-        self.linear = nn.Linear(hidden_size, output_dim)
-        self.adaln_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size))
-
-    def forward(self, x, condition):
-        shift, scale = self.adaln_modulation(condition).chunk(2, dim=-1)
-        return self.linear(modulate(self.norm_final(x), shift, scale))
-
-
 class SinusoidalTimestepEmbedding(nn.Module):
     """Mish conditioning uses sin/cos with endpoint-inclusive log frequencies."""
 
@@ -119,7 +72,7 @@ class TimestepMLP(nn.Module):
 
 
 class DiTTimestepEmbedding(nn.Module):
-    """DiT uses cos/sin, a different frequency spacing and SiLU projection."""
+    """Cos/sin timestep features with SiLU projection for AFRO dynamics."""
 
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()

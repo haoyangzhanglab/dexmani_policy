@@ -23,5 +23,5 @@ def split_episodes(
     train_mask = np.zeros(n_episodes, dtype=bool)
     val_mask = np.zeros(n_episodes, dtype=bool)
     train_mask[order[:train_count]] = True
-    val_mask[order[train_count:train_count + val_episodes]] = True
+    val_mask[order[available:]] = True
     return train_mask, val_mask

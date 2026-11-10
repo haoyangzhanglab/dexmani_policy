@@ -1,25 +1,25 @@
+from pathlib import Path
+
 import numpy as np
 
 from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
-from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
-from dexmani_policy.deployment.metadata import _resolve_checkpoint, policy_info
+from dexmani_policy.common.inference import (
+    prepare_numeric_tensor, prepare_observations, predict_actions, resolve_inference_settings,
+)
+from dexmani_policy.deployment.metadata import policy_info
 
 
 def load_policy(path, *, weights=None, inference_steps=None, device="cuda:0", seed=0):
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
-    path = _resolve_checkpoint(path)
+    path = Path(path).expanduser().resolve(strict=True)
+    if path.is_dir():
+        path = (path / "checkpoints/latest.pt").resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Checkpoint must be a file: {path}")
     checkpoint = load_checkpoint(path)
     cfg = checkpoint.effective_config
-    defaults = cfg.get("eval", {})
-    if weights is None:
-        if type(defaults["use_ema"]) is not bool:
-            raise ValueError("Saved use_ema must be boolean")
-        weights = "ema" if defaults["use_ema"] else "raw"
-    if weights not in {"ema", "raw"}:
-        raise ValueError("weights must be ema or raw")
-    steps = positive_int(defaults["inference_steps"] if inference_steps is None else inference_steps, "inference_steps")
+    weights, steps = resolve_inference_settings(cfg, weights=weights, inference_steps=inference_steps)
     state = checkpoint.ema_model_state if weights == "ema" else checkpoint.model_state
     del checkpoint
     agent = restore_policy(cfg, state, device)

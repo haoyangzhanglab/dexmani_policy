@@ -43,7 +43,7 @@ else
 fi
 printf 'Host: %s\nSource: %s\nRun: %s\nSession: %s\n' "$HOST" "$SOURCE" "$RUN" "$SESSION"
 if $DRY_RUN; then
-    printf 'Command: '; printf '%q ' "$PYTHON" "${COMMAND[@]}"; printf '\n'
+    printf 'Command: '; printf '%q ' env "CUDA_VISIBLE_DEVICES=$GPU" "$PYTHON" "${COMMAND[@]}"; printf '\n'
     exit 0
 fi
 printf -v setup_args '%q ' "$REPO" "$SOURCE"
@@ -62,12 +62,12 @@ for name in robot_data data; do
     ln -s -- "$data_root/$name" "$source_dir/$name"
 done
 cd "$source_dir"
-export CUDA_VISIBLE_DEVICES="$gpu"
+command=(env "CUDA_VISIBLE_DEVICES=$gpu" "$interpreter" "$@")
 if [[ "$foreground" == true ]]; then
-    exec "$interpreter" "$@"
+    exec "${command[@]}"
 fi
 mkdir -p "$repo/logs"
-printf -v command_q '%q ' "$interpreter" "$@"
+printf -v command_q '%q ' "${command[@]}"
 printf -v log_q '%q' "$repo/logs/$session.log"
 printf -v script_q '%q' "exec $command_q > $log_q 2>&1"
 tmux -L dexmani_policy new-session -d -s "$session" -c "$source_dir" "bash -c $script_q"

@@ -26,8 +26,8 @@ def farthest_point_sample(
     use_random: bool = True,
     use_random_start: bool = True,
     use_shuffle_output: bool = True,
-):
-    """Sample original points (K <= N) using XYZ distances."""
+) -> torch.Tensor:
+    """Sample original points (K <= N) by XYZ distance, preserving all channels."""
     torch3d_ops = load_pointcloud_ops()
 
     if pointcloud.size(-1) < 3:
@@ -39,24 +39,19 @@ def farthest_point_sample(
         K=num_samples,
         random_start_point=use_random and use_random_start,
     )
-    shuffle_perm = None
     if use_random and use_shuffle_output:
         shuffle_perm = torch.rand(
             xyz.shape[0], num_samples, device=pointcloud.device,
         ).argsort(dim=1)
-        sample_idx = torch.gather(sample_idx, 1, shuffle_perm)
+        if pointcloud.size(-1) == 3:
+            sampled_xyz = index_points(sampled_xyz, shuffle_perm)
+        else:
+            sample_idx = sample_idx.gather(1, shuffle_perm)
 
     # Reuse native output for XYZ-only input.
     if pointcloud.size(-1) == 3:
-        if shuffle_perm is not None:
-            sampled_xyz = sampled_xyz.gather(
-                1,
-                shuffle_perm.unsqueeze(-1).expand(-1, -1, 3),
-            )
-        return sampled_xyz.contiguous(), sample_idx
-
-    sampled_points = index_points(pointcloud, sample_idx)
-    return sampled_points.contiguous(), sample_idx
+        return sampled_xyz.contiguous()
+    return index_points(pointcloud, sample_idx).contiguous()
 
 
 def preprocess_point_cloud(
@@ -70,7 +65,7 @@ def preprocess_point_cloud(
         pc = pc.float()
     if pc.shape[1] > num_points:
         fps_config = resolve_fps_random_config(fps_random_config, training)
-        pc, _ = farthest_point_sample(pc, num_points, **fps_config)
+        pc = farthest_point_sample(pc, num_points, **fps_config)
     return pc
 
 
@@ -114,12 +109,12 @@ def sample_point_patches(
     training: bool = True,
     *,
     knn_backend: str = "pytorch3d",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return FPS centers, center indices and kNN member indices."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return FPS centers and kNN member indices."""
     if xyz.shape[1] < max(num_patches, group_size):
         raise ValueError("N must be at least max(num_patches, group_size)")
-    centers, center_indices = farthest_point_sample(
+    centers = farthest_point_sample(
         xyz, num_patches, **resolve_fps_random_config(fps_random_config, training)
     )
     neighbors = knn_indices(group_size, xyz, centers, backend=knn_backend)
-    return centers, center_indices, neighbors
+    return centers, neighbors
