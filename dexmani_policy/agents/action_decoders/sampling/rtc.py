@@ -7,7 +7,7 @@ import torch
 from .time_sampling import euler_time_grid
 
 
-def rtc_enabled(prefix, action_shape, delay, offset, beta):
+def rtc_enabled(prefix, action_shape, offset, beta):
     if prefix is None:
         return False
     if not math.isfinite(beta) or beta < 0:
@@ -17,7 +17,7 @@ def rtc_enabled(prefix, action_shape, delay, offset, beta):
     length, control_dim = prefix.shape[1:]
     if (
         offset < 0
-        or not 0 <= delay <= length <= action_shape[1] - offset
+        or not 0 <= length <= action_shape[1] - offset
         or not 0 < control_dim <= action_shape[2]
     ):
         raise ValueError("Invalid RTC prefix horizon/control dimensions")

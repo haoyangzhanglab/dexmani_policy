@@ -74,11 +74,12 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
             weights=result["weights"], inference_steps=result["inference_steps"], action_steps=result["action_steps"],
         ))
     winner = max(record["candidates"], key=candidate_score)
+    record.update(ckpt_relpath=winner["checkpoint"], global_step=winner["global_step"])
+    write_json(path, record)
     checkpoint = directory / winner["checkpoint"]
     _, result_path = evaluate_policy(
         checkpoint, weights=winner["weights"], inference_steps=winner["inference_steps"], action_steps=winner["action_steps"],
         seeds=test, seed=seed, device=device, video=video, output_dir=directory / "test")
-    record.update(ckpt_relpath=winner["checkpoint"], global_step=winner["global_step"],
-                  test_result=os.path.relpath(result_path, directory))
+    record["test_result"] = os.path.relpath(result_path, directory)
     write_json(path, record)
     return path

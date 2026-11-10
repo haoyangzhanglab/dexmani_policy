@@ -135,10 +135,9 @@ class PolicyTrainer:
         close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)
 
     def optimizer_step(self):
-        if self.max_grad_norm > 0:
-            self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.trainable_parameters, self.max_grad_norm, error_if_nonfinite=True
-            ).detach()
+        self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.trainable_parameters, self.max_grad_norm or float("inf"), error_if_nonfinite=True
+        ).detach()
 
         self.optimizer.step()
         self.scheduler.step()
@@ -205,9 +204,9 @@ class PolicyTrainer:
             "train/epoch": epoch,
         }
         if self.last_grad_norm is not None:
-            metrics.update(
-                {"train/grad_norm": self.last_grad_norm, "train/clip_ratio": self.last_grad_norm / self.max_grad_norm}
-            )
+            metrics["train/grad_norm"] = self.last_grad_norm
+            if self.max_grad_norm > 0:
+                metrics["train/clip_ratio"] = self.last_grad_norm / self.max_grad_norm
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
         metrics = to_log_scalars(metrics)
         pbar.set_postfix(

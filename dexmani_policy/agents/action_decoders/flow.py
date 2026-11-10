@@ -119,7 +119,7 @@ class RectifiedFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
+        if rtc_enabled(rtc_prefix, action_shape, history_offset, rtc_guidance_cap):
             return guided_flow(
                 self, cond, action_shape, rtc_prefix,
                 delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
@@ -318,7 +318,7 @@ class ConsistencyFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
+        if rtc_enabled(rtc_prefix, action_shape, history_offset, rtc_guidance_cap):
             return guided_flow(
                 self, cond, action_shape, rtc_prefix,
                 delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,

@@ -118,7 +118,7 @@ class Diffusion(nn.Module):
         self.noise_scheduler.final_alpha_cumprod = self.noise_scheduler.final_alpha_cumprod.to(
             cond.device
         )
-        if rtc_enabled(rtc_prefix, action_shape, delay_steps, history_offset, rtc_guidance_cap):
+        if rtc_enabled(rtc_prefix, action_shape, history_offset, rtc_guidance_cap):
             return guided_ddim(
                 self,
                 cond,

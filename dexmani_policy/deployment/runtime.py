@@ -40,6 +40,8 @@ class PolicyRuntime:
         self.generator.manual_seed(self.generator.initial_seed())
 
     def _prepare_rtc(self, rtc_prefix, delay_steps, rtc_guidance_cap):
+        if type(delay_steps) is not int or delay_steps < 0:
+            raise ValueError("delay_steps must be a non-negative integer")
         if rtc_prefix is None:
             if delay_steps:
                 raise ValueError("No prefix requires delay_steps=0")
@@ -49,7 +51,7 @@ class PolicyRuntime:
             prefix.ndim != 2
             or prefix.shape[1] != self.info.control_action_dim
             or prefix.dtype.kind not in "fiu"
-            or not 0 <= delay_steps <= len(prefix) <= self.info.future_steps
+            or not delay_steps <= len(prefix) <= self.info.future_steps
         ):
             raise ValueError("Invalid physical RTC prefix")
         return {
@@ -78,10 +80,6 @@ class PolicyRuntime:
         )
 
     def warmup(self, observation, *, rtc_delay=0, rtc_guidance_cap=None):
-        if rtc_guidance_cap is not None and (
-            type(rtc_delay) is not int or not 0 <= rtc_delay <= self.info.future_steps
-        ):
-            raise ValueError("rtc_delay must be an integer within the future window")
         generator_state = self.generator.get_state()
         try:
             prefix = self.predict(observation)

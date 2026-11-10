@@ -17,6 +17,7 @@ from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import (
     build_train_loader, close_data_loader, epoch_position, fit_normalizer,
+    dataset_metadata, prepare_data_config,
 )
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
@@ -31,6 +32,8 @@ def load_run(method, argv=None):
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--zarr-path")
+    parser.add_argument("--confirm-data-relocation", action="store_true",
+                        help="Assert that the new path is an unchanged copy of the original data")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("overrides", nargs="*")
@@ -66,10 +69,12 @@ def load_run(method, argv=None):
     if args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
         cfg.dataset.zarr_path = cfg.zarr_path
-    return cfg, checkpoint, args.max_updates
+    return cfg, checkpoint, args.max_updates, args.confirm_data_relocation
 
 
-def export_encoder(state, normalization, output_path):
+def export_encoder(checkpoint, output_path):
+    state = checkpoint["model_state"]
+    normalization = checkpoint["effective_config"]["normalization"]
     payload = {
         f"{name}_state": {
             key.removeprefix(f"{name}."): value.detach().cpu()
@@ -78,6 +83,7 @@ def export_encoder(state, normalization, output_path):
         for name in ("encoder", "normalizer")
     }
     payload["normalization"] = dict(normalization)
+    payload["global_step"] = checkpoint["global_step"]
     if not payload["encoder_state"]:
         raise ValueError("Checkpoint has no encoder.* parameters")
     output_path = Path(output_path)
@@ -98,6 +104,7 @@ def save_run(model, optimizer, scheduler, cfg, step):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     with atomic_path(checkpoint_dir / "latest.pt") as temporary:
         torch.save(checkpoint, temporary)
+    return checkpoint
 
 
 def restore_run(model, optimizer, scheduler, checkpoint) -> int:
@@ -135,7 +142,7 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
 
 
 def train(method, model_class, argv=None):
-    cfg, checkpoint, max_updates = load_run(method, argv)
+    cfg, checkpoint, max_updates, confirm_data_relocation = load_run(method, argv)
     resuming = checkpoint is not None
     if resuming and checkpoint["global_step"] >= cfg.training.loop.total_train_steps:
         print(f"Pretraining already completed at step {checkpoint['global_step']}")
@@ -161,6 +168,9 @@ def train(method, model_class, argv=None):
 
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
+    prepare_data_config(cfg, dataset, dataset_metadata(dataset, cfg.task_name),
+                      saved=None if checkpoint is None else checkpoint["effective_config"],
+                      confirm_data_relocation=confirm_data_relocation)
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:
@@ -241,6 +251,7 @@ def train(method, model_class, argv=None):
                             accumulate_metrics(totals, metrics)
                     if not finite_loss:
                         raise RuntimeError(f"Nonfinite {type(model).__name__} loss at step {step}")
+                    torch.nn.utils.clip_grad_norm_(parameters, float("inf"), error_if_nonfinite=True)
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
                         model.update_teacher(current_epoch)
@@ -284,8 +295,8 @@ def train(method, model_class, argv=None):
                     and step < stop_step and not stop_requested
                 ):
                     save_run(model, optimizer, scheduler, cfg, step)
-            save_run(model, optimizer, scheduler, cfg, step)
-            export_encoder(model.state_dict(), cfg.normalization, Path(cfg.workspace.output_dir) / "encoder.pt")
+            saved = save_run(model, optimizer, scheduler, cfg, step)
+            export_encoder(saved, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[{type(model).__name__}] Saved raw encoder.pt and checkpoints/latest.pt at epoch={epoch}, step={step}/{total}")
     finally:
         close_resources(lambda: close_data_loader(loader, iterator), logger.close)
@@ -297,7 +308,7 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False, mmap=True)
-    export_encoder(checkpoint["model_state"], checkpoint["effective_config"]["normalization"], args.output)
+    export_encoder(checkpoint, args.output)
 
 
 if __name__ == "__main__":

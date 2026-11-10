@@ -58,7 +58,7 @@ class ExperimentLogger:
 
     def log(self, data: dict[str, Any], step: int):
         record = {"step": step, **data}
-        self.metrics_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.metrics_file.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
         if self.wandb_run is not None:
             self.wandb_run.log(data, step=step)
 

@@ -10,7 +10,8 @@ from dexmani_policy.common.config import positive_int, set_project_root
 
 
 def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
-                   use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None):
+                   use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None,
+                   confirm_data_relocation=False):
     directory = Path(run).expanduser().resolve(strict=True)
     source = directory / "checkpoints" / "latest.pt"
     checkpoint = load_checkpoint(source)
@@ -40,7 +41,7 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
             cfg.dataset.zarr_path = cfg.zarr_path
     from dexmani_policy.train import build_trainer
 
-    return build_trainer(cfg, checkpoint=checkpoint)
+    return build_trainer(cfg, checkpoint=checkpoint, confirm_data_relocation=confirm_data_relocation)
 
 
 def main(argv=None):
@@ -55,6 +56,8 @@ def main(argv=None):
     parser.add_argument("--cudnn-benchmark", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--zarr-path")
+    parser.add_argument("--confirm-data-relocation", action="store_true",
+                        help="Assert that the new path is an unchanged copy of the original data")
     args = parser.parse_args(argv)
     set_project_root()
     options = vars(args).copy()

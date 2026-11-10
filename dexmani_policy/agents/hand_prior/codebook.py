@@ -13,11 +13,14 @@ from dexmani_policy.common.config import positive_int
 
 def validate_hand_coordinates(attrs):
     order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
-    if (
-        attrs.get("hand_joint_order", order) != order
-        or attrs.get("hand_units", "radians") != "radians"
-    ):
-        raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
+    expected = {"hand_joint_order": order, "hand_units": "radians"}
+    # Canonical real export validates raw radians and SDK joint names before publication.
+    canonical = attrs.get("format") == "dexmani.real.canonical"
+    for key, value in expected.items():
+        if canonical and key not in attrs:
+            continue
+        if attrs.get(key) != value:
+            raise ValueError(f"Hand data requires {key}={value!r}")
 
 
 def codebook_distances(values: Tensor, prototypes: Tensor) -> Tensor:

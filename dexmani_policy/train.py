@@ -14,9 +14,9 @@ from dexmani_policy.common.normalizer import normalization_feature_shapes, valid
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.common.config import (
     assemble_effective_config, assemble_policy_config, prepare_training, register_resolvers,
-    validate_normalization,
+    validate_normalization, validate_config,
 )
-from dexmani_policy.training.common.data import build_dataset, fit_normalizer
+from dexmani_policy.training.common.data import build_dataset, fit_normalizer, prepare_data_config
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
@@ -28,22 +28,19 @@ def _train(cfg):
 
 def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
     method = cfg.policy_name
-    if checkpoint is not None:
-        current_hoi = data_description["deployment_metadata"].get("hoi_pcd")
-        saved_hoi = checkpoint.effective_config["deployment_metadata"].get("hoi_pcd")
-        if current_hoi != saved_hoi:
-            raise ValueError("Resume data/model mismatch: HOI task/template")
-        if data_description["field_dims"] != cfg.normalization_dims:
-            raise ValueError("Resume data/model mismatch: normalization_dims")
+    if checkpoint is not None and data_description["field_dims"] != cfg.normalization_dims:
+        raise ValueError("Resume data/model mismatch: normalization_dims")
 
+    if method in {"dqrise", "dexlatent"}:
+        from dexmani_policy.agents.hand_prior.codebook import validate_hand_coordinates
+        validate_hand_coordinates(dataset.episode_store.attrs)
     codebook = hand_affine = None
     if checkpoint is None and method == "dqrise":
-        from dexmani_policy.agents.hand_prior.codebook import load_codebook, validate_hand_coordinates
+        from dexmani_policy.agents.hand_prior.codebook import load_codebook
 
         source = cfg.initialization.codebook
         if source is None:
             raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
-        validate_hand_coordinates(dataset.episode_store.attrs)
         codebook, hand_affine = load_codebook(source)
         with open_dict(cfg.agent):
             cfg.agent.num_codes = codebook.num_codes
@@ -57,7 +54,7 @@ def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
         elif method == "r3d":
             model.obs_encoder.pc_encoder.initialize_weights(cfg.initialization.uni3d)
         pretrained_state = None
-        inherited_fields = ()
+        inherited_fields: tuple[str, ...] = ()
         if method == "dqrise":
             model.hand_codebook = codebook
         elif method == "dexlatent":
@@ -100,15 +97,21 @@ def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
     return model
 
 
-def build_trainer(cfg, *, checkpoint=None):
+def build_trainer(cfg, *, checkpoint=None, confirm_data_relocation=False):
     cfg = copy.deepcopy(cfg)
     if checkpoint is None:
         cfg = prepare_training(cfg)
+    else:
+        validate_config(cfg)
     set_seed(cfg.training.seed)
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
+    prepare_data_config(cfg, dataset, data_description["deployment_metadata"],
+                      saved=None if checkpoint is None else checkpoint.effective_config,
+                      confirm_data_relocation=confirm_data_relocation)
     model = _prepare_policy(cfg, dataset, data_description, checkpoint=checkpoint)
-    cfg = assemble_effective_config(cfg, data_description, model)
+    if checkpoint is None:
+        cfg = assemble_effective_config(cfg, model)
     return PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
 
 

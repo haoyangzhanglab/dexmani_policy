@@ -166,10 +166,9 @@ def train(cfg):
             if not torch.isfinite(total_loss):
                 raise FloatingPointError("Nonfinite VQ training loss")
             total_loss.backward()
-            if recipe.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    vqvae.parameters(), recipe.max_grad_norm, error_if_nonfinite=True
-                )
+            torch.nn.utils.clip_grad_norm_(
+                vqvae.parameters(), recipe.max_grad_norm or float("inf"), error_if_nonfinite=True
+            )
             lr = optimizer.param_groups[0]["lr"]
             optimizer.step()
             scheduler.step()

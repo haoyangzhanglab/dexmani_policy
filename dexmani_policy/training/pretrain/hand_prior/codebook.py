@@ -57,6 +57,8 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output) as temporary:
         payload = {
+            "source_checkpoint": str(Path(checkpoint_path).expanduser().resolve()),
+            "source_epoch": checkpoint["epoch"],
             "sorted_hand_poses": poses,
             "hand_normalizer_scale": scale.numpy(),
             "hand_normalizer_offset": offset.numpy(),

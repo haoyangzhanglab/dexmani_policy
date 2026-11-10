@@ -106,6 +106,8 @@ def validate_normalization(cfg):
 
 
 def validate_config(cfg):
+    if not 0 <= cfg.training.max_grad_norm < float("inf"):
+        raise ValueError("training.max_grad_norm must be finite and nonnegative")
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
@@ -121,11 +123,10 @@ def validate_config(cfg):
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
 
 
-def assemble_effective_config(cfg, data_description, model):
+def assemble_effective_config(cfg, model):
     with open_dict(cfg):
         cfg.pop("max_updates", None)
         cfg.normalization_dims = model.normalization_dims
-        cfg.deployment_metadata = data_description["deployment_metadata"]
         cfg.agent.update(model.effective_config)
     OmegaConf.resolve(cfg)
     return cfg
