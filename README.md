@@ -23,7 +23,7 @@
 | R3D | 使用预训练三维表征和空间条件生成动作 |
 | ManiFlow | 结合 Flow Matching 与一致性学习 |
 | SAT / DQ-RISE / DexLatent | 共享空间观测编码，研究关节轨迹、手姿码本与连续手部潜表示 |
-| AFRO / CordViP | 先学习场景动力学或接触与协调表征，再迁移到策略 |
+| AFRO / CordViP | 可通过预训练学习场景动力学或接触与协调表征，再迁移到策略 |
 | AdapTac / InterAct-Dex | 融合触觉与场景，研究未来力引导和手部交互建模 |
 
 各方法均接入本项目的数据与机器人设置，具体结构和监督方式有所不同。
@@ -50,7 +50,7 @@ python -m pip check
 
 示教数据默认位于 `robot_data/<task_name>.zarr`，字段与时间对应关系见[数据集格式](docs/仿真数据集格式.md)。运行其他任务时修改 `task_name`；自定义位置用 `zarr_path=/path/to/data.zarr`。
 
-DP3、ODE、ManiFlow、AdapTac 和 InterAct-Dex 可直接从示教训练。其他方法按需准备：
+DP3、ODE、ManiFlow、CordViP、AdapTac 和 InterAct-Dex 可直接从示教训练。其他方法按需准备：
 
 | 方法 | 新训练需要的初始化 |
 | --- | --- |
@@ -58,7 +58,7 @@ DP3、ODE、ManiFlow、AdapTac 和 InterAct-Dex 可直接从示教训练。其�
 | SAT / DexLatent / R3D | 将脚本参数换成 `sat` / `dexlatent` / `r3d`；分别准备 DINOv3、DINOv3 + 手部先验、Uni3D |
 | DQ-RISE | `download_pretrained.sh dqrise` 准备 DINOv3；另外提供 `initialization.codebook`，见[手部动作表示](docs/手部动作表示.md) |
 | AFRO | 提供 `initialization.encoder`；从头训练时显式设置 `agent.freeze_visual=false` |
-| CordViP | 使用带手物元数据的 `.cordvip.zarr`；预训练编码器可用 `initialization.encoder` 加载 |
+| CordViP | 使用包含手点云、物体点云、joint_state、action 的 `.cordvip.zarr`，可直接训练；预训练编码器可用 `initialization.encoder` 加载 |
 
 AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/观测预训练.md)。外部权重与可选主干见 [data/README](data/README.md)。完整 checkpoint 已包含部署所需权重和归一化参数，续训、推理不再读取初始化文件。
 
@@ -107,10 +107,11 @@ bash scripts/eval/eval_pipeline.sh \
 
 ```python
 from contextlib import closing
+from dataclasses import asdict
 from dexmani_policy.deployment import load_policy
 
 with closing(load_policy("/path/to/run")) as runtime:
-    print(runtime.info.to_dict())
+    print(asdict(runtime.info))
     runtime.warmup(observation)
     chunk = runtime.predict(observation)
     targets = chunk[:runtime.info.n_action_steps]

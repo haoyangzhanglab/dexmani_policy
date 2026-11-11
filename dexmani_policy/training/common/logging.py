@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.io_util import atomic_path
 
 
 class ExperimentLogger:
@@ -63,10 +63,11 @@ class ExperimentLogger:
             self.wandb_run.log(data, step=step)
 
     def close(self):
-        callbacks = [self.metrics_file.close]
-        if self.wandb_run is not None:
-            callbacks.append(self.wandb_run.finish)
-        close_resources(*callbacks)
+        try:
+            self.metrics_file.close()
+        finally:
+            if self.wandb_run is not None:
+                self.wandb_run.finish()
 
 
 def accumulate_metrics(totals, metrics):

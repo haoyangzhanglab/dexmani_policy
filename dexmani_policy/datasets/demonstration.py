@@ -144,7 +144,12 @@ class DemonstrationDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx)
         data = self.sample_to_data(sample)
-        self.apply_augmentation(data)
+        # EpisodeStore reads own their storage, so augmentation can run in place.
+        for modality, augmentors in self.augmentors.items():
+            values = data["obs"][modality]
+            for augmentor in augmentors:
+                if np.random.random() <= augmentor.prob:
+                    augmentor.augment(values)
         if self.random_keep_points is not None:
             data["obs"]["point_cloud"] = random_sample_points(
                 data["obs"]["point_cloud"],
@@ -196,14 +201,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                         )
                     continue
                 self.augmentors.setdefault(modality, []).append(cls(**config))
-
-    def apply_augmentation(self, data):
-        """EpisodeStore reads own their storage, so augmentation can run in place."""
-        for modality, augs in self.augmentors.items():
-            x = data["obs"][modality]
-            for aug in augs:
-                if np.random.random() <= aug.prob:
-                    aug.augment(x)
 
     def iter_normalization_data(self, key):
         field = self.action_key if key == "action" else key

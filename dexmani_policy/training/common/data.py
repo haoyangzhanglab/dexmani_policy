@@ -45,7 +45,7 @@ def fit_normalizer(
             normalizer[key].offset[3:9] = 0
 
 
-def build_dataset(cfg, *, include_metadata=True):
+def build_dataset(cfg):
     """Construct training samples and describe their stored field dimensions."""
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
@@ -60,30 +60,16 @@ def build_dataset(cfg, *, include_metadata=True):
     dims["action"] = dataset.action_dim
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
-    if "object_pointcloud" in dataset.sensor_modalities:
-        points = buffer["object_pointcloud"]
-        if points.shape[1:] != (1024, 3) or points.dtype.name != "float32":
-            raise ValueError("HOI dataset requires float32 [T,1024,3]")
     print(f"[Dataset] {dataset.training_summary()}")
-    if not include_metadata:
-        return dataset, {"field_dims": dims}
     deployment = {}
     if "dt" in buffer.attrs:
         deployment["control_dt_s"] = buffer.attrs["dt"]
     for modality, attr in (
         ("point_cloud", "pointcloud_config"),
-        ("hand_pointcloud", "hand_pointcloud_config"),
         ("fingertip_xyz", "fingertip_link_names"),
     ):
         if modality in dataset.sensor_modalities and attr in buffer.attrs:
             deployment[attr] = buffer.attrs[attr]
-    if "object_pointcloud" in dataset.sensor_modalities:
-        metadata = buffer.attrs["hoi_pcd"]
-        if metadata["task_name"] != cfg.task_name:
-            raise ValueError("HOI dataset task_name must match training task")
-        deployment["hoi_pcd"] = {
-            key: metadata[key] for key in ("task_name", "object_names", "template_sha256")
-        }
     if "depth" in dataset.sensor_modalities:
         deployment["depth_config"] = {
             "shape": list(buffer["depth"].shape[1:]),

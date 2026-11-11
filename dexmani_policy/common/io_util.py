@@ -1,9 +1,7 @@
 import json
 import os
-import sys
 import tempfile
-import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -20,29 +18,11 @@ def atomic_path(path: str | os.PathLike[str]) -> Iterator[Path]:
         yield temporary
         os.replace(temporary, path)
     finally:
-        close_resources(lambda: temporary.unlink(missing_ok=True))
+        temporary.unlink(missing_ok=True)
 
 
 def write_json(path, record):
-    with atomic_path(Path(path)) as temporary:
+    with atomic_path(path) as temporary:
         temporary.write_text(
             json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         )
-
-
-def close_resources(*callbacks: Callable[[], object]) -> None:
-    """Run all callbacks; preserve an active exception or raise the first failure."""
-    active_error = sys.exc_info()[1]
-    first_error = None
-
-    for callback in callbacks:
-        try:
-            callback()
-        except BaseException as error:
-            if active_error is None and first_error is None:
-                first_error = error
-            else:
-                traceback.print_exc()
-
-    if first_error is not None:
-        raise first_error

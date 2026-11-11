@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,6 @@ import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
-from dexmani_policy.common.io_util import close_resources
 
 
 class SimRunner:
@@ -160,9 +160,19 @@ class SimRunner:
                     "total_steps": env.action_cnt,
                     "video": video,
                 }
-        finally:
+        except BaseException as error:
             if env is not None:
-                close_resources(env.close)
+                try:
+                    env.close()
+                except BaseException:
+                    # Generator.close() is a normal shutdown, so report cleanup failures.
+                    if isinstance(error, GeneratorExit):
+                        raise
+                    logging.exception("Failed to close environment after simulation error")
+            raise
+        else:
+            if env is not None:
+                env.close()
 
     def make_env(self, *, record_video: bool):
         from dexmani_sim import resolve_env_class
@@ -174,6 +184,9 @@ class SimRunner:
         try:
             env_class.__init__(env, record_video=record_video, **kwargs)
         except BaseException:
-            close_resources(env.close)
+            try:
+                env.close()
+            except BaseException:
+                logging.exception("Failed to close environment after initialization error")
             raise
         return env

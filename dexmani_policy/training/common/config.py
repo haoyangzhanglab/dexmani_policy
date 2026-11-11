@@ -61,7 +61,7 @@ def assemble_policy_config(cfg):
     return cfg
 
 
-def prepare_training(cfg):
+def prepare_training(cfg) -> None:
     for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
         path = Path(cfg.workspace.output_dir) / name
         if path.exists():
@@ -81,7 +81,6 @@ def prepare_training(cfg):
                 rgb["architecture"] = config_class.from_pretrained(source).to_dict()
             with open_dict(cfg.agent):
                 cfg.agent.rgb_backbone_config = rgb
-    return cfg
 
 
 def validate_normalization(cfg):

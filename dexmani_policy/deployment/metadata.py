@@ -1,12 +1,11 @@
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import dataclass
 
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
 
 @dataclass(frozen=True)
 class PolicyInfo:
-    checkpoint_path: Path
+    checkpoint_path: str
     weights: str
     inference_steps: int
     task_name: str
@@ -22,14 +21,7 @@ class PolicyInfo:
     control_dt_s: float | None
     depth_config: dict | None
     pointcloud_config: dict | None
-    hand_pointcloud_config: dict | None
     fingertip_link_names: tuple[str, ...] | None
-    hoi_pcd: dict | None = None
-
-    def to_dict(self):
-        result = asdict(self)
-        result["checkpoint_path"] = str(self.checkpoint_path)
-        return result
 
 
 def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
@@ -37,7 +29,7 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
     fingertip_links = deployment.get("fingertip_link_names")
     fields = tuple(key for key in agent.normalization_dims if key != "action")
     return PolicyInfo(
-        checkpoint_path=path,
+        checkpoint_path=str(path),
         weights=weights,
         inference_steps=inference_steps,
         task_name=cfg["task_name"],
@@ -53,7 +45,5 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         control_dt_s=deployment.get("control_dt_s"),
         depth_config=deployment.get("depth_config"),
         pointcloud_config=deployment.get("pointcloud_config"),
-        hand_pointcloud_config=deployment.get("hand_pointcloud_config"),
         fingertip_link_names=tuple(fingertip_links) if fingertip_links is not None else None,
-        hoi_pcd=deployment.get("hoi_pcd"),
     )

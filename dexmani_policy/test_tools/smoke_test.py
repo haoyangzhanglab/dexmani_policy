@@ -1,9 +1,10 @@
-"""Check the synthetic DP3 lifecycle, or train and resume a supplied recipe."""
+"""Check the synthetic DP3/CordViP lifecycle, or train and resume a supplied recipe."""
 
 import argparse
 import shutil
 import tempfile
 from contextlib import closing, nullcontext
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ import torch
 import zarr
 
 from dexmani_policy.common.checkpoint import load_checkpoint
+from dexmani_policy.common.pytorch_util import get_rng_state
 from dexmani_policy.common.config import positive_int, set_project_root
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
@@ -44,6 +46,10 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
         assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
         assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
         assert dict(trainer.cfg.deployment_metadata) == checkpoint.effective_config["deployment_metadata"]
+        rng = get_rng_state(cfg.training.device)
+        assert rng["python"] == checkpoint.rng_state["python"]
+        np.testing.assert_equal(rng["numpy"], checkpoint.rng_state["numpy"])
+        torch.testing.assert_close(rng["torch"], checkpoint.rng_state["torch"])
         del checkpoint, optimizer_state
         trainer.compile_models()
         trainer.train(max_updates=resume_updates)
@@ -123,7 +129,8 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     shutil.rmtree(root / "source.zarr")
     shutil.rmtree(replacement_path)
     with closing(load_policy(run, device=device)) as runtime:
-        snapshot = runtime.info.to_dict()
+        snapshot = asdict(runtime.info)
+        assert isinstance(snapshot["checkpoint_path"], str)
         assert "policy_name" not in snapshot
         assert not runtime.info.requires_prev_action
         assert runtime.info.control_dt_s == 0.05
@@ -136,9 +143,42 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     print(f"PASS deployment: saved normalization and finite actions {prediction.shape} without source data", flush=True)
 
 
+def check_cordvip(root, device, *, max_updates, resume_updates):
+    root.mkdir()
+    source = make_source(root / "source.zarr")
+    rng = np.random.default_rng(17)
+    for key, count in (("hand_pointcloud", 8), ("object_pointcloud", 12)):
+        source.create_dataset(f"data/{key}", data=rng.normal(size=(12, count, 3)))
+    source.attrs["dt"] = .05
+    replacement = root / "replacement.zarr"
+    shutil.copytree(root / "source.zarr", replacement)
+    replaced = zarr.open_group(str(replacement), mode="a")
+    replaced.attrs["dt"] = .1
+    replaced["data/action"][:] += 1
+    replaced["meta/episode_ends"][:] = [4, 12]
+    cfg = load_policy_config("cordvip", [
+        f"zarr_path={root / 'source.zarr'}", f"training.device={device}",
+        "horizon=4", "n_obs_steps=2", "n_action_steps=2",
+        "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16",
+        "agent.num_inference_steps=2", "training.use_compile=false",
+        "training.use_bfloat16=false", "training.lr_warmup_steps=0",
+        f"training.loop.total_train_steps={max_updates + resume_updates}",
+        "training.loop.log_interval_steps=1", "dataloader.batch_size=2",
+        "dataloader.num_workers=0", "dataloader.pin_memory=false",
+    ])
+    run_smoke(cfg, root / "run", max_updates=max_updates, resume_updates=resume_updates,
+              resume_zarr_path=replacement)
+    observation = {key: source[f"data/{key}"][:2] for key in cfg.dataset.sensor_modalities}
+    with closing(load_policy(root / "run", device=device)) as runtime:
+        assert runtime.info.control_dt_s == .05
+        prediction = runtime.predict(observation)
+        assert prediction.shape == (3, 19) and np.isfinite(prediction).all()
+    print("PASS CordViP: no identity metadata, float64 variable point counts, resume and finite 19D actions")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", nargs="?", help="Recipe name; omit for synthetic DP3 checks")
+    parser.add_argument("config", nargs="?", help="Recipe name; omit for synthetic DP3/CordViP checks")
     parser.add_argument("--override", action="append", default=[], help="Repeatable Hydra override (requires config)")
     parser.add_argument("--device", help="Defaults to CPU for synthetic checks, or the recipe device")
     parser.add_argument("--output-dir", type=Path, help="Keep test artifacts here instead of a temporary directory")
@@ -157,6 +197,8 @@ def main(argv=None):
         if args.config is None:
             check_synthetic(directory, args.device or "cpu",
                             max_updates=max_updates, resume_updates=args.resume_updates)
+            check_cordvip(directory / "cordvip", args.device or "cpu",
+                          max_updates=max_updates, resume_updates=args.resume_updates)
         else:
             cfg = load_policy_config(args.config, args.override)
             if args.device is not None:
