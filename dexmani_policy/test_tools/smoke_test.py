@@ -4,6 +4,7 @@ import argparse
 import shutil
 import tempfile
 from contextlib import closing, nullcontext
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -128,7 +129,8 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     shutil.rmtree(root / "source.zarr")
     shutil.rmtree(replacement_path)
     with closing(load_policy(run, device=device)) as runtime:
-        snapshot = runtime.info.to_dict()
+        snapshot = asdict(runtime.info)
+        assert isinstance(snapshot["checkpoint_path"], str)
         assert "policy_name" not in snapshot
         assert not runtime.info.requires_prev_action
         assert runtime.info.control_dt_s == 0.05

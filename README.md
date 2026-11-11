@@ -107,10 +107,11 @@ bash scripts/eval/eval_pipeline.sh \
 
 ```python
 from contextlib import closing
+from dataclasses import asdict
 from dexmani_policy.deployment import load_policy
 
 with closing(load_policy("/path/to/run")) as runtime:
-    print(runtime.info.to_dict())
+    print(asdict(runtime.info))
     runtime.warmup(observation)
     chunk = runtime.predict(observation)
     targets = chunk[:runtime.info.n_action_steps]

@@ -26,9 +26,9 @@ def _train(cfg):
     run_training(cfg, max_updates=cfg.get("max_updates"))
 
 
-def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
+def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
     method = cfg.policy_name
-    if checkpoint is not None and data_description["field_dims"] != cfg.normalization_dims:
+    if checkpoint is not None and field_dims != cfg.normalization_dims:
         raise ValueError("Resume data/model mismatch: normalization_dims")
 
     codebook = hand_affine = None
@@ -74,8 +74,8 @@ def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
                 del payload
     validate_normalization(cfg)
     model.configure_normalizer(
-        data_description["field_dims"],
-        normalization_feature_shapes(data_description["field_dims"], cfg.normalization),
+        field_dims,
+        normalization_feature_shapes(field_dims, cfg.normalization),
     )
     if checkpoint is None:
         fit_normalizer(
@@ -97,18 +97,18 @@ def _prepare_policy(cfg, dataset, data_description, *, checkpoint=None):
 def build_trainer(cfg, *, checkpoint=None):
     cfg = copy.deepcopy(cfg)
     if checkpoint is None:
-        cfg = prepare_training(cfg)
+        prepare_training(cfg)
     else:
         validate_config(cfg)
     set_seed(cfg.training.seed)
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
-    dataset, data_description = build_dataset(cfg, include_metadata=checkpoint is None)
+    dataset, data_description = build_dataset(cfg)
     with open_dict(cfg):
         cfg.zarr_path = dataset.episode_store.path
         cfg.dataset.zarr_path = cfg.zarr_path
         if checkpoint is None:
             cfg.deployment_metadata = data_description["deployment_metadata"]
-    model = _prepare_policy(cfg, dataset, data_description, checkpoint=checkpoint)
+    model = _prepare_policy(cfg, dataset, data_description["field_dims"], checkpoint=checkpoint)
     if checkpoint is None:
         with open_dict(cfg):
             cfg.pop("max_updates", None)

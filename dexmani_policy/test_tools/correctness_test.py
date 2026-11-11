@@ -13,6 +13,8 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.codebook import load_codebook
 from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.deployment.runtime import PolicyRuntime
 from dexmani_policy.evaluation.selection import run_pipeline
 from dexmani_policy.training.common.config import load_policy_config, validate_config
@@ -38,6 +40,8 @@ class CorrectnessTest(unittest.TestCase):
                 source.create_dataset('data/' + key, data=np.ones(shape, np.float16))
             cfg = load_policy_config('cordvip', [f'zarr_path={path}', 'horizon=4', 'n_obs_steps=2', 'n_action_steps=2'])
             dataset, description = build_dataset(cfg)
+            self.assertEqual(set(description), {'field_dims', 'deployment_metadata'})
+            self.assertEqual(description['deployment_metadata'], {})
             self.assertEqual(description['field_dims']['object_pointcloud'], 3)
             self.assertEqual(dataset[0]['obs']['object_pointcloud'].shape, (2, 11, 3))
             self.assertEqual(dataset[0]['obs']['object_pointcloud'].dtype, torch.float32)
@@ -149,6 +153,7 @@ class CorrectnessTest(unittest.TestCase):
             output = Path(directory) / 'encoder.pt'
             export_encoder(checkpoint, output)
             artifact = torch.load(output, weights_only=True)
+            self.assertEqual(set(artifact), {'encoder_state', 'normalizer_state', 'normalization', 'global_step'})
             model.encoder.load_state_dict(artifact['encoder_state'], strict=True)
             model.normalizer.load_state_dict(artifact['normalizer_state'], strict=True)
             self.assertEqual(artifact['global_step'], 7)
@@ -168,9 +173,142 @@ class CorrectnessTest(unittest.TestCase):
             torch.save(dict(model_config=model.model_config, model_state_dict=model.state_dict(),
                             normalizer_state_dict=normalizer.state_dict()), source)
             export_codebook(source, output)
+            with np.load(output, allow_pickle=False) as artifact:
+                self.assertEqual(set(artifact.files), {
+                    'sorted_hand_poses', 'hand_normalizer_scale', 'hand_normalizer_offset',
+                })
             codebook, affine = load_codebook(output)
             self.assertEqual(codebook.num_codes, 4)
             torch.testing.assert_close(affine['scale'], torch.ones(12))
+
+    def test_bounded_training_closes_active_iterator(self):
+        from dexmani_policy.test_tools.smoke_test import make_source
+        from dexmani_policy.train import build_trainer
+        from dexmani_policy.training.common.data import close_data_loader
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_source(root / 'source.zarr')
+            cfg = load_policy_config('dp3', [
+                f'zarr_path={root / "source.zarr"}', f'workspace.output_dir={root / "run"}',
+                'workspace.wandb_cfg=null', 'training.device=cpu',
+                'horizon=4', 'n_obs_steps=2', 'n_action_steps=2', 'agent.num_points=8',
+                'agent.down_dims=[16,32]', 'agent.diffusion_step_embed_dim=16',
+                'training.use_compile=false', 'training.use_bfloat16=false',
+                'training.loop.total_train_steps=2', 'training.lr_warmup_steps=0',
+                'dataloader.batch_size=2', 'dataloader.num_workers=0',
+                'dataloader.pin_memory=false', 'dataset.augmentation_cfg=null',
+            ])
+            with closing(build_trainer(cfg)) as trainer:
+                with patch('dexmani_policy.training.trainer.close_data_loader', wraps=close_data_loader) as close:
+                    trainer.train(max_updates=1)
+                close.assert_called_once()
+                loader, iterator = close.call_args.args
+                self.assertIs(loader, trainer.train_loader)
+                self.assertIsNotNone(iterator)
+                self.assertFalse(trainer.model.training)
+
+    def test_cleanup_attempts_all_resources_and_preserves_training_error(self):
+        trainer = PolicyTrainer.__new__(PolicyTrainer)
+        trainer.train_loader = Mock()
+        trainer.logger = ExperimentLogger.__new__(ExperimentLogger)
+        errors = [RuntimeError(name) for name in ('workers', 'metrics', 'wandb')]
+        trainer.logger.metrics_file = Mock()
+        trainer.logger.metrics_file.close.side_effect = errors[1]
+        trainer.logger.wandb_run = Mock()
+        trainer.logger.wandb_run.finish.side_effect = errors[2]
+        for primary in (None, ValueError('training failed')):
+            with self.subTest(primary=primary), patch(
+                'dexmani_policy.training.trainer.close_data_loader', side_effect=errors[0],
+            ) as close_loader:
+                try:
+                    with closing(trainer):
+                        if primary is not None:
+                            raise primary
+                except RuntimeError as error:
+                    self.assertIs(error, errors[2])
+                    if primary is not None:
+                        self.assertIs(error.__context__, errors[1])
+                        self.assertIs(errors[1].__context__, errors[0])
+                        self.assertIs(errors[0].__context__, primary)
+                else:
+                    self.fail('Cleanup errors must propagate')
+                close_loader.assert_called_once_with(trainer.train_loader)
+            trainer.logger.metrics_file.close.assert_called_once()
+            trainer.logger.wandb_run.finish.assert_called_once()
+            trainer.logger.metrics_file.close.reset_mock()
+            trainer.logger.wandb_run.finish.reset_mock()
+
+    def test_atomic_publication_and_failure_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'checkpoint.pt'
+            path.write_bytes(b'old')
+            with self.assertRaisesRegex(ValueError, 'writer'):
+                with atomic_path(path) as temporary:
+                    temporary.write_bytes(b'partial')
+                    raise ValueError('writer')
+            self.assertEqual(path.read_bytes(), b'old')
+            self.assertFalse(temporary.exists())
+            with patch('dexmani_policy.common.io_util.os.replace', side_effect=OSError('publish')):
+                with self.assertRaisesRegex(OSError, 'publish'):
+                    with atomic_path(path) as temporary:
+                        temporary.write_bytes(b'new')
+            self.assertFalse(temporary.exists())
+            self.assertEqual(path.read_bytes(), b'old')
+            with atomic_path(path) as temporary:
+                temporary.write_bytes(b'new')
+            self.assertEqual(path.read_bytes(), b'new')
+
+    def test_simulation_error_survives_close_failure(self):
+        runner = SimRunner('test', 1, ['joint_state'], {})
+        env = Mock()
+        primary, cleanup = ValueError('simulation'), RuntimeError('close')
+        env.close.side_effect = cleanup
+        with patch.object(runner, 'make_env', return_value=env), patch.object(
+            runner, '_run_episode', side_effect=primary,
+        ), patch('dexmani_policy.env_runner.sim_runner.asdict', return_value={}):
+            try:
+                list(runner.run(Mock(requires_prev_action=False), seeds=[0],
+                                inference_steps=1, action_steps=1))
+            except RuntimeError as error:
+                self.assertIs(error, cleanup)
+                self.assertIs(error.__context__, primary)
+            else:
+                self.fail('Simulation must fail')
+        env.close.assert_called_once()
+
+        class BrokenEnv:
+            close = Mock(side_effect=cleanup)
+
+            def __init__(self, **kwargs):
+                raise primary
+
+        with patch.dict('sys.modules', {'dexmani_sim': SimpleNamespace(resolve_env_class=lambda _: BrokenEnv)}):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.make_env(record_video=False)
+        self.assertIs(caught.exception.__context__, primary)
+        BrokenEnv.close.assert_called_once()
+
+    def test_contact_temporary_directory_cleanup(self):
+        import zarr
+        from dexmani_policy.datasets.preprocess.contact_map import generate
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = zarr.open_group(str(root / 'source.zarr'), mode='w')
+            source.create_dataset('meta/episode_ends', data=np.array([1]))
+            for key, shape in (('joint_state', (1, 19)), ('hand_pointcloud', (1, 2, 3)),
+                               ('object_pointcloud', (1, 1024, 3))):
+                source.create_dataset('data/' + key, data=np.ones(shape, np.float32))
+            with patch('dexmani_policy.datasets.preprocess.contact_map.frame_contact_map',
+                       side_effect=ValueError('contact')):
+                with self.assertRaisesRegex(ValueError, 'contact'):
+                    generate(root / 'source.zarr', root / 'output.zarr')
+            self.assertFalse((root / 'output.zarr').exists())
+            self.assertFalse(list(root.glob('.contact-*')))
+            with patch('dexmani_policy.datasets.preprocess.contact_map.frame_contact_map',
+                       return_value=np.ones(1024, np.float32)):
+                generate(root / 'source.zarr', root / 'output.zarr')
+            self.assertEqual(zarr.open_group(str(root / 'output.zarr'))['data/contact_map'].shape, (1, 1024))
+            self.assertFalse(list(root.glob('.contact-*')))
 
     def test_logger_rejects_nonfinite(self):
         with tempfile.TemporaryDirectory() as directory:

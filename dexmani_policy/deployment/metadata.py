@@ -1,12 +1,11 @@
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import dataclass
 
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
 
 @dataclass(frozen=True)
 class PolicyInfo:
-    checkpoint_path: Path
+    checkpoint_path: str
     weights: str
     inference_steps: int
     task_name: str
@@ -24,18 +23,13 @@ class PolicyInfo:
     pointcloud_config: dict | None
     fingertip_link_names: tuple[str, ...] | None
 
-    def to_dict(self):
-        result = asdict(self)
-        result["checkpoint_path"] = str(self.checkpoint_path)
-        return result
-
 
 def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
     deployment = cfg["deployment_metadata"]
     fingertip_links = deployment.get("fingertip_link_names")
     fields = tuple(key for key in agent.normalization_dims if key != "action")
     return PolicyInfo(
-        checkpoint_path=path,
+        checkpoint_path=str(path),
         weights=weights,
         inference_steps=inference_steps,
         task_name=cfg["task_name"],

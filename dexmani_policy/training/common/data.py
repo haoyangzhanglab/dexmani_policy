@@ -45,7 +45,7 @@ def fit_normalizer(
             normalizer[key].offset[3:9] = 0
 
 
-def build_dataset(cfg, *, include_metadata=True):
+def build_dataset(cfg):
     """Construct training samples and describe their stored field dimensions."""
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
@@ -61,8 +61,6 @@ def build_dataset(cfg, *, include_metadata=True):
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     print(f"[Dataset] {dataset.training_summary()}")
-    if not include_metadata:
-        return dataset, {"field_dims": dims}
     deployment = {}
     if "dt" in buffer.attrs:
         deployment["control_dt_s"] = buffer.attrs["dt"]

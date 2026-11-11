@@ -1,14 +1,16 @@
 import json
 import os
+import sys
 import uuid
 from collections.abc import Mapping
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.io_util import atomic_path
 
 
 class ExperimentLogger:
@@ -63,10 +65,12 @@ class ExperimentLogger:
             self.wandb_run.log(data, step=step)
 
     def close(self):
-        callbacks = [self.metrics_file.close]
+        stack = ExitStack()
         if self.wandb_run is not None:
-            callbacks.append(self.wandb_run.finish)
-        close_resources(*callbacks)
+            stack.callback(self.wandb_run.finish)
+        stack.callback(self.metrics_file.close)
+        # Forward an active training error through nested cleanup.
+        stack.__exit__(*sys.exc_info())
 
 
 def accumulate_metrics(totals, metrics):

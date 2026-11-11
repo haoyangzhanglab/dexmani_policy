@@ -2,6 +2,7 @@ import argparse
 import os
 import signal
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 import hydra
@@ -10,7 +11,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
 from dexmani_policy.training.common import training_signal_handlers
@@ -215,7 +216,9 @@ def train(method, model_class, argv=None):
         stop_requested = True
 
     iterator = None
-    try:
+    with ExitStack() as stack:
+        stack.callback(logger.close)
+        stack.callback(lambda: close_data_loader(loader, iterator))
         logger.save_config(cfg)
         if rng_state is not None:
             set_rng_state(rng_state, device)
@@ -294,8 +297,6 @@ def train(method, model_class, argv=None):
             saved = save_run(model, optimizer, scheduler, cfg, step)
             export_encoder(saved, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[{type(model).__name__}] Saved raw encoder.pt and checkpoints/latest.pt at epoch={epoch}, step={step}/{total}")
-    finally:
-        close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():

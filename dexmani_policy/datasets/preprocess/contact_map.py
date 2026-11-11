@@ -5,14 +5,12 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from multiprocessing import get_context
 from pathlib import Path
-import shutil
 import tempfile
 
 import numpy as np
 import zarr
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 
 
@@ -69,8 +67,8 @@ def generate(zarr_path, output, num_workers=1):
         raise ValueError("CordViP policy requires action[T,19]")
     rows = int(buffer.episode_ends[-1])
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".contact-", dir=output.parent))
-    try:
+    with tempfile.TemporaryDirectory(prefix=".contact-", dir=output.parent) as directory:
+        temporary = Path(directory) / "data.zarr"
         group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
         retained_attrs = ("format", "dt", "action_semantics")
         group.attrs.update({key: buffer.attrs[key] for key in retained_attrs if key in buffer.attrs})
@@ -110,9 +108,6 @@ def generate(zarr_path, output, num_workers=1):
         if output.exists():
             raise FileExistsError(f"Contact output already exists: {output}")
         temporary.rename(output)
-    finally:
-        if temporary.exists():
-            close_resources(lambda: shutil.rmtree(temporary))
     print(f"Saved {output}")
 
 

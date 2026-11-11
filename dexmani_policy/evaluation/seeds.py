@@ -9,10 +9,9 @@ def load_seed_pool(task_name):
     return [int(value) for value in (DATA_DIR / "eval_seeds" / f"{task_name}.txt").read_text().split()]
 
 
-def validate_evaluation_seed(seed):
+def validate_evaluation_seed(seed) -> None:
     if type(seed) is not int or not 0 <= seed < 2**32:
         raise ValueError("Evaluation seed must be an integer in [0, 2**32)")
-    return seed
 
 
 def validate_seed_pool(pool):

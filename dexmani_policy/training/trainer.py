@@ -1,6 +1,8 @@
 import copy
 import os
 import signal
+import sys
+from contextlib import ExitStack
 from typing import Any, cast
 
 import hydra
@@ -13,7 +15,7 @@ from dexmani_policy.common.checkpoint import (
     Checkpoint, policy_state_dict, save_checkpoint,
 )
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
@@ -117,11 +119,6 @@ class PolicyTrainer:
             self.logger.close()
             raise
 
-    @property
-    def current_epoch(self):
-        return epoch_position(self.global_step, self.batches_per_epoch,
-                              self.gradient_accumulation_steps)[0]
-
     def compile_models(self):
         if self.cfg.training.use_compile:
             mode = self.cfg.training.get("compile_mode", "reduce-overhead")
@@ -132,7 +129,11 @@ class PolicyTrainer:
                 model.compile_backbone(mode=mode)
 
     def close(self):
-        close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)
+        stack = ExitStack()
+        stack.callback(self.logger.close)
+        stack.callback(close_data_loader, self.train_loader)
+        # close() can run while the training exception is still active.
+        stack.__exit__(*sys.exc_info())
 
     def optimizer_step(self):
         self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -230,7 +231,8 @@ class PolicyTrainer:
         if self.global_step >= self.total_train_steps:
             return
         if self.global_step:
-            print(f"Resuming at step {self.global_step}, logical epoch {self.current_epoch}")
+            epoch, _ = epoch_position(self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps)
+            print(f"Resuming at step {self.global_step}, logical epoch {epoch}")
 
         if self.ema_model is not None:
             self.ema_model.eval()
@@ -296,8 +298,6 @@ class PolicyTrainer:
                             self.save_checkpoint(f"milestone={pct:02d}pct")
                         if self.global_step >= stop_step or self.stop_requested:
                             break
-                    iterator = None
-
                     if self.stop_requested:
                         break
 
@@ -312,6 +312,8 @@ class PolicyTrainer:
                     print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
 
             finally:
-                self.model.eval()
-                if iterator is not None:
-                    close_resources(lambda: close_data_loader(self.train_loader, iterator))
+                try:
+                    self.model.eval()
+                finally:
+                    if iterator is not None:
+                        close_data_loader(self.train_loader, iterator)

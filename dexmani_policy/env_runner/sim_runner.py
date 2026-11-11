@@ -9,7 +9,6 @@ import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
-from dexmani_policy.common.io_util import close_resources
 
 
 class SimRunner:
@@ -162,7 +161,7 @@ class SimRunner:
                 }
         finally:
             if env is not None:
-                close_resources(env.close)
+                env.close()
 
     def make_env(self, *, record_video: bool):
         from dexmani_sim import resolve_env_class
@@ -174,6 +173,6 @@ class SimRunner:
         try:
             env_class.__init__(env, record_video=record_video, **kwargs)
         except BaseException:
-            close_resources(env.close)
+            env.close()
             raise
         return env
