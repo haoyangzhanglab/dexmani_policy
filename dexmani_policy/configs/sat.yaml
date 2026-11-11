@@ -2,7 +2,8 @@ defaults:
   - common
   - _self_
 
-# SAT 动作表示 + DiTX 的本地适配；保留共享 RGB–point observation 和标准 flow。
+# SAT 动作表示 + 共享 RGB–point observation 和标准 flow。
+# agent.backbone_type=dit 切换到 SmolVLA 风格 action expert。
 
 policy_name: sat
 
@@ -34,6 +35,7 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.sat.SAT
+  backbone_type: ditx
 
   pc_dim: 3
   state_dim: 19
