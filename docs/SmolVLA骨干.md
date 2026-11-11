@@ -1,136 +1,173 @@
-# SmolVLA 风格的独立 DiT backbone
+# SmolVLA 风格 DiT：收敛设计与使用
 
-`dexmani_policy/agents/action_decoders/backbones/dit.py` 提供 `DiT`，与现有
-`ditx.py` 并列，供普通动作 token 的 `RectifiedFlow` 使用。现有 policy 仍使用原主干。
+本实现以 LeRobot 的 SmolVLA action expert 为依据，为本项目已有 observation encoder
+和 RectifiedFlow 提供独立骨干。当前推荐方案是：**固定观测 K/V、交替 joint SA / CA、
+输入 action/time 融合、GQA、RMSNorm、SwiGLU，并原生复用 SATActionIO。**
 
-## 源码依据与移植边界
+这是从头训练的研究基线。接口和数值正确性已经测试；“任务质量最优”仍需要相同训练
+预算下的闭环评测。它不包含 SmolVLA 的预训练 VLM，也不能加载原 SmolVLA checkpoint，
+更不能把 action expert 的参数量当成完整 VLA 参数量。
 
-参照 LeRobot 提交
-[`45a0756`](https://github.com/huggingface/lerobot/commit/45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6)：
+## 设计依据与取舍
 
-- [`modeling_smolvla.py`](https://github.com/huggingface/lerobot/blob/45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6/src/lerobot/policies/smolvla/modeling_smolvla.py#L698)：action/time 输入融合、动作 mask、输出 velocity。
-- [`smolvlm_with_expert.py`](https://github.com/huggingface/lerobot/blob/45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6/src/lerobot/policies/smolvla/smolvlm_with_expert.py)：逐层 SA/CA、RoPE、GQA、prefix K/V 的二次投影。
-- [`configuration_smolvla.py`](https://github.com/huggingface/lerobot/blob/45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6/src/lerobot/policies/smolvla/configuration_smolvla.py)：默认 16 层、每两层一次 SA、时间 period 为 0.004–4.0。
-- [`vla_utils.py`](https://github.com/huggingface/lerobot/blob/45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6/src/lerobot/policies/common/vla_utils.py)：时间编码和累计分组 attention mask。
+固定的 upstream 源码版本为
+[huggingface/lerobot@45a0756](https://github.com/huggingface/lerobot/tree/45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6/src/lerobot/policies/smolvla)。
+本项目只接收 encoder 最终的 `[B,P,C]` token，没有 upstream VLM 每层 hidden states/K/V。
 
-SmolVLA 的 action expert 是语言模型式 Transformer，不能视作现有 DiTX 改名。
-原模型同时运行 VLM prefix 和 action expert；每个 expert 层读取对应 VLM 层的
-prefix K/V，联合 SA 时两条分支各自投影 Q/K/V。CA 层则再次投影 VLM 的
-post-RoPE K 和 V。
-
-本项目的 observation encoder 只返回一个 `[B, P, C]` tensor，没有逐层 VLM
-状态。因此本实现给每个 expert 层建立独立的 observation RMSNorm 和 K/V
-投影，以固定的观测特征生成该层 prefix K/V；不再增加一个从零训练的
-observation Transformer。它保留 action expert 的计算结构，但不复现 VLM
-prefix 的逐层更新，也不提供视觉语言预训练或原 SmolVLA checkpoint 加载。
-
-## 与 DiTX 的区别
-
-| 项目 | 现有 DiTX | 新 DiT |
+| 机制 | 当前方案 | 原因 |
 | --- | --- | --- |
-| 时间条件 | 每层 AdaLN-Zero 的 shift/scale/gate | 输入 action 与 sin/cos time 拼接后经过两层 MLP |
-| 每层注意力 | 每层 SA，再 CA | 第 0、2、4…层 joint SA；第 1、3、5…层 CA |
-| 动作可见性 | chunk 内双向 | SA 为 causal；CA 仅读 prefix |
-| SA 的 memory | 动作 token | 所有 observation prefix 加当前及较早动作 |
-| 归一化 | LayerNorm，输出 RMSNorm | pre-norm RMSNorm |
-| token 位置 | 可学习 action position | Q/K 的 RoPE；观测另保留 frame embedding |
-| FFN | GELU MLP | SiLU gated MLP |
-| head 结构 | MHA | GQA，可独立指定 head_dim |
-| 输出 | DiTXOutput 两层 MLP，末层零初始化 | final RMSNorm + Linear，普通随机初始化 |
+| 时间条件 | 原 SmolVLA 的 sin/cos time 与 action concat，再过 Linear–SiLU–Linear | 结构简洁，先保留有源码依据的基本路径 |
+| Transformer | pre-RMSNorm、SiLU gated MLP；每两层一次 joint SA，其余为 CA | 保留动作间通信，同时减少每层都做 SA+CA 的开销 |
+| GQA | 默认 8 个 Q heads、2 个 KV heads，head_dim 可独立设置 | 减少 K/V 参数和缓存；适配项目 PyTorch 2.4.1 |
+| 观测 K/V | 每层独立 RMSNorm 和直接 K/V 投影 | 没有真实 VLM cache，不再模拟两级 K/V 适配 |
+| 观测位置 | 保留 frame embedding；空间和 token-type 信息由 encoder 提供 | 点云 patch 的数组序号不是物理空间位置 |
+| 普通动作 token | temporal causal mask + 局部 `arange(H)` RoPE | 保留 SmolVLA 的因果动作参照和 prefix-feature 语义 |
+| SAT / 自定义 action_io | token 双向交互，不额外加序号 RoPE | I/O 自己提供关节等身份信息；token 轴不等于时间 |
+| 输出 | 普通动作 final RMSNorm + Linear；SAT 直接复用自己的 readout | 不重复归一化/解码；保留 SAT 零 velocity head |
+| 精度 | RMSNorm、RoPE 中间计算 FP32；SDPA 使用 Q/K/V 原 dtype | 让 BF16/FP16 输入具备选择融合 attention kernel 的条件 |
+| 缓存 | 每次采样预计算一次、逐层只读 tuple | prefix 不依赖 noisy action 和 flow time，可跨 NFE 重用 |
 
-时间编码不是 action token 位置编码：前者表示 flow 的连续时间，后者表示
-序列位置，二者同时存在。新实现没有 AdaLN 或 zero gates，避免把两种结构混在一起。
+原 SmolVLA CA 的二次 K/V 投影用于适配 VLM 与 expert；上一版 standalone 实现
+也模拟了它。本版关闭 context 序号 RoPE 后，直接 observation→expert K/V 更直观，
+不再保留两个连续的线性适配层。这是对本项目的设计取舍，不声称与 upstream
+或上一版参数化逐位等价，也不兼容上一版 DiT 的 state_dict。
 
-## 张量流与 mask
+`qk_norm` 为兼容现有 SAT 构造器而保留，默认关闭。开启时，对所有层的 Q/K
+采用逐 head 的 RMSNorm，位于 action RoPE 之前；它不同于 DiTX 仅在 CA 使用
+LayerNorm 的具体实现。主对照使用现有 YAML 的 `qk_norm: false`。
 
-输入 `x: [B, H, A]`，`context: [B, P, C]`，
-`timestep` 为标量、单元素 tensor 或 `[B]`。观测使用与 DiTX 相同的 frame-major
-顺序，`P = n_obs_steps * tokens_per_frame`，不接受 padding token。
+## 实际张量流
 
-1. `Linear(A,D)` 投影动作。几何间隔的 period 生成 time sin/cos，默认维度为 D。
-2. 广播 time 到 H 个动作，与 action embedding 拼接，经过 Linear → SiLU → Linear。
-3. 每层执行 `h += attention(RMSNorm(h))`，再执行
-   `h += gated_mlp(RMSNorm(h))`。
-4. final RMSNorm + Linear 返回 `[B,H,A]` velocity。
+SAT 使用既有协议，不增加 action I/O 框架：
 
-SA 层 action Q/K 的 RoPE 位置为 `P + arange(H)`；context K 位置为
-`arange(P)`。第 i 个动作可读取全部 P 个观测和动作 0…i。这里需要显式的
-矩形 mask；直接对 `[H, P+H]` 使用 SDPA `is_causal=True` 会遮掉一部分观测。
+| 阶段 | 形状与含义 |
+| --- | --- |
+| flow 输入 | `x_t: [B,H,19]`，H 步的 19 维动作 |
+| SATActionIO.encode | 转为 19 个关节轨迹 token，输出 `[B,19,D]`，含 robot/joint descriptor |
+| 时间融合 | 把 flow time embedding 广播到 19 个 token，concat 后投影到 D |
+| 第 0、2、4…层 | action Q 读取所有 context K/V 和所有 action K/V |
+| 第 1、3、5…层 | action Q 只读取 context K/V |
+| SATActionIO.decode_velocity | 输出 `[B,H,19]` velocity |
 
-CA 层仅 action Q 使用局部位置 `arange(H)`；context K 在观测投影后已经应用
-RoPE，再 flatten 后经过 expert K 投影，不重复旋转。context V 也经过二次投影。
+只有 action hidden states 更新，context 不被 noisy action 反向更新。因此双向
+**关节**交互与静态观测缓存可以同时成立。普通动作模式的 joint SA 则让动作 i
+读取全部观测和动作 0…i；显式矩形 mask 避免 SDPA 非方阵 causal mask 屏蔽观测。
 
-Q heads 数为 `n_head`，K/V heads 数为 `n_kv_head`，要求前者是后者的整数倍。
-`head_dim` 是独立参数：Q projection 为 `D → n_head * head_dim`，因此允许
-`D != n_head * head_dim`，这对于 SmolVLA 缩窄 expert width 的设计很重要。
-默认省略 `head_dim` 时才使用 `D // n_head`。
+SAT 自定义 I/O 的约定是：`encode(x)` 返回带身份信息的 token，
+`decode_velocity(hidden)` 恢复动作坐标。构造 DiT 时跳过 I/O 的递归初始化，
+也不创建普通动作 input/output projection。SAT 的 readout 已包含归一化。
 
-## Flow 时间方向
+SAT 的短时间前缀不能直接编码：轨迹 MLP 的输入宽度固定为 H，因此
+`forward_prefix_features` 明确拒绝自定义 action_io。RTC 对完整 `[B,H,19]`
+求梯度后约束执行前缀，不依赖这个短前缀接口，已验证可用。
 
-仓库 `RectifiedFlow` 使用：
+## Flow 约定与数值边界
 
-```text
-x_t = (1-t) * noise + t * action
+沿用项目已有约定，不改 loss、noise、时间采样或 Euler 积分：
+
+```python
+x_t = (1 - t) * noise + t * action
 target_velocity = action - noise
-Euler: t=0 → 1，dt=+1/N
+# Euler: t = 0 → 1, dt = 1 / NFE
 ```
 
-原 SmolVLA 使用相反约定：噪声在 t=1，target 为 noise-action，从 1 积分至 0。
-新 backbone 按项目 decoder 传入的 t 学习目标，既不反转 t，也不取负输出。
-不能把原 SmolVLA 的 velocity、时间分布或预训练权重直接接到此 decoder。
-若未来引入原预训练函数，才需要显式使用 `tau=1-t` 和 `v_project=-v_original`。
+原 SmolVLA 的噪声位于 t=1、积分方向相反。这里不直接移植它的速度符号、
+采样循环或 checkpoint。当前接口仍是单时间 RectifiedFlow，不接受
+ConsistencyDiTX 的 `target_t`。
 
-## 使用方式
+RMSNorm 和 RoPE 保留 FP32 中间计算；连续时间编码采用原来的高精度频率计算，
+随后转换为激活 dtype。SDPA 不再无条件把 Q/K/V 上转为 FP32。具体 CUDA kernel
+取决于设备、dtype、mask、head_dim、dropout 和 PyTorch 版本，不能据此直接宣布
+FlashAttention 已启用或 GPU 已加速。参见
+[PyTorch SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)。
+
+项目锁定 PyTorch 2.4.1，GQA 使用显式 repeat_interleave，不使用较新版本的
+`enable_gqa` 参数。缓存保持紧凑 KV heads；仅 attention 前展开。训练时
+`prepare_context_kv` 返回 None，保留观测路径梯度；eval 缓存由调用方为同一观测、
+权重、设备和精度环境构造。SA 临时拼接 action K/V，绝不写回缓存。
+
+## 配置与接入
+
+SAT 增加 `backbone_type: ditx | dit`，默认 ditx，已有配方和 checkpoint 可继续使用。
+`effective_config` 会记录所选骨干。新实验只需：
+
+```bash
+bash scripts/training/train.sh sat agent.backbone_type=dit
+```
+
+沿用当前 `sat.yaml` 的 D=768、6 层、8 heads、time_dim=128、H=16、
+2 帧观测、5 NFE、time_shift_alpha=3 和原训练预算。DiT 默认 2 KV heads、
+每两层一次 SA。先在同精度下比较；评估 BF16 时可另加
+`training.use_bfloat16=true`。不要同时缩宽度、压缩 context、降低 NFE，
+否则无法判断质量和速度变化的来源。
+
+直接构造的等价示例：
 
 ```python
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 
 backbone = DiT(
-    horizon=16,
-    action_dim=19,
-    n_obs_steps=2,
-    obs_token_dim=obs_encoder.out_dim,
-    hidden_dim=256,
-    n_layers=8,
-    n_head=8,
-    n_kv_head=2,
-    self_attn_every_n_layers=2,
+    horizon=16, action_dim=19, n_obs_steps=2, obs_token_dim=384,
+    hidden_dim=768, n_layers=6, n_head=8, n_kv_head=2,
+    timestep_embed_dim=128, mlp_ratio=4.0,
+    p_drop_attn=0.1, qkv_bias=False, qk_norm=False,
+    action_io=SATActionIO(horizon=16, hidden_dim=768),
 )
-decoder = RectifiedFlow(model=backbone, num_inference_steps=5)
+decoder = RectifiedFlow(
+    model=backbone, num_inference_steps=5,
+    t_sample_mode="uniform", time_shift_alpha=3.0,
+)
 ```
 
-新类保留 `forward(x, timestep, context, *, context_kv=None)`、
-`prepare_context_kv(context)` 和 `forward_prefix_features(...)`。默认深度 8
-是本项目的实验规模；若要对齐 upstream 深度可设置 `n_layers=16`。
-FFN 中间维度沿用 SmolVLA 的约 8D/3 并向上取整到 256，默认不使用 attention dropout。
-`timestep_embed_dim` 可显式设置；默认与 hidden_dim 相等。
+对于普通 `[B,H,A]` 时间 token，省略 `action_io` 即可；不用改 decoder。
+自定义 I/O 接口在本版明确面向自带身份信息的集合 token，不用于隐式切换其他
+时间序列表示。新的结构需要新训练，不能恢复旧 DiTX 权重/优化器为 DiT。
 
-当前实现尚未移植 DiTX 的 `action_io` 分支，也没有 `qk_norm` 或
-ConsistencyDiTX 的 `target_t`。这是实现边界，不表示 SAT 与这种 Transformer
-结构不兼容：可以直接复用已有 `SATActionIO.encode/decode_velocity` 协议，
-同时保留它自己的初始化。SAT 编码后的 token 轴是关节，不是时间，因此应采用
-双向关节交互，并单独决定是否使用一维 RoPE；不能原样套用当前时间 causal mask。
-SAT 构造器还传递 `qk_norm`，接入时也需明确处理该参数。ManiFlow 则需要另一套
-双时间条件。具体改进建议与其他小型策略的源码对照见[调研说明](小型VLA与DiT优化.md)。
+## 已测量的结构成本
 
-## 缓存与验证
+按上面 SAT 配置实际构造并统计，以下均包含 SATActionIO，不含 observation encoder：
 
-`prepare_context_kv` 在 eval 下返回逐层 tuple；训练时返回 None，使所有观测投影
-保持可微。缓存包含 CA 的二次投影结果，只属于当前观测、权重、设备和计算精度。
-SA 每次临时拼接当前 noisy action 的 K/V，不把它们写回缓存，避免跨 Euler 步污染。
-调用方负责在同一精度环境下构造和使用缓存；现有 `RectifiedFlow` 已覆盖此调用模式。
+| 动作骨干 | 参数 |
+| --- | ---: |
+| DiTX，D=768、6 层 | 89,950,800 |
+| 本版 DiT，D=768、6 层、2 KV heads | 40,266,576 |
 
-RMSNorm 和 RoPE 中间运算使用 FP32；SDPA 显式关闭 autocast 后使用 FP32，之后
-恢复激活 dtype。它使用 SDPA 的 FP32 attention，数值实现与 upstream eager
-softmax 后降精度的路径并非逐位一致。
+参数约减少 55.2%。这是精确的结构统计，不代表成功率相同，也不等于运行时间减少
+55.2%。P=258、6 层、2 KV heads、head_dim=96 时，batch=1 的紧凑 context cache
+占 BF16 1,188,864 bytes（约 1.13 MiB），FP32 约 2.27 MiB；不包含临时 GQA 展开、
+attention workspace 或整个模型显存。
 
-运行针对该主干的 CPU 回归：
+保留全部 258 个观测 token，避免在没有训练证据时先丢失小物体和接触几何。
+宽度压缩与 learned resampler 留给独立实验。
+
+## 验证与下一步
 
 ```bash
-python -m dexmani_policy.test_tools.dit_test
+OMP_NUM_THREADS=1 python -m unittest dexmani_policy.test_tools.dit_test -v
 ```
 
-验证范围包括时间与观测依赖、梯度、因果性、缓存等价性、多步 flow、RTC 和 BF16。
-这些检查只能证明实现契约；策略收益还需在相同 encoder、动作表示、训练预算和 NFE
-下与 DiTX 对照实验，不能仅凭结构判断优劣。
+Python 3.12、PyTorch 2.4.1+cpu、torchvision 0.19.1+cpu、timm 1.0.22：
+9 项回归通过，覆盖普通动作 flow 梯度、时间/观测依赖、因果性与 prefix feature、
+缓存等价和只读、多步 Euler、BF16 autocast/整模 BF16、SAT 初始化与两步训练、
+双向关节梯度、关节置换等变、帧内观测置换不变与跨帧身份、RTC。
+
+另已检查实际 H=16/P=258/D=768 配置的 BF16 有限输出与缓存等价，以及小型 SAT
+模型在 CPU `torch.compile(backend="aot_eager", fullgraph=True)` 下的缓存 forward
+与 action gradient 等价。AOT 图捕获不等于 GPU Inductor 验证。
+
+未运行完整 RGB-point encoder、训练/续训/部署流程、GPU kernel/延迟测量或机器人
+闭环评测。下一步固定数据、encoder、动作表示、训练步数、NFE 和评测 seed，分别
+比较 DiTX 与本版；报告成功率、轨迹质量、encoder/prefill/单步/整 chunk 延迟及峰值显存。
+目标是以更小的动作主干达到可接受或更好的任务表现，不能先验保证“最佳”。
+
+只有这个基线收敛后，再分别实验：
+
+1. 每帧空间 resampler（128→32，保留 joint token，prefill 一次完成）。
+2. FFN 前轻量逐层时间注入。
+3. 空间通道适配、模态 attention 偏置，或训练期未来几何辅助监督。
+
+这些候选分别来自前期源码调研，当前没有默认叠加。
+依据与局限见[小型 VLA 调研](小型VLA与DiT优化.md)和
+[2026 顶会 VLA/WAM 复核](2026顶会VLA与WAM优化.md)。

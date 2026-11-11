@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
@@ -36,9 +37,12 @@ class SAT(Policy):
         qkv_bias: bool = True,
         qk_norm: bool = True,
         time_shift_alpha: float = 1.0,
+        backbone_type: Literal["ditx", "dit"] = "ditx",
     ) -> None:
         if n_obs_steps != 2 or action_dim != 19 or hidden_dim % 4:
             raise ValueError("SAT requires n_obs_steps=2, joint action_dim=19 and hidden_dim divisible by 4")
+        if backbone_type not in {"ditx", "dit"}:
+            raise ValueError("SAT backbone_type must be 'ditx' or 'dit'")
         obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -49,7 +53,8 @@ class SAT(Policy):
             rgb_backbone_config=rgb_backbone_config,
             rgb_backbone_name=rgb_backbone_name,
         )
-        backbone = DiTX(
+        backbone_cls = DiT if backbone_type == "dit" else DiTX
+        backbone = backbone_cls(
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,
@@ -78,7 +83,12 @@ class SAT(Policy):
             n_action_steps=n_action_steps,
             action_dim=action_dim,
         )
+        self.backbone_type = backbone_type
 
     @property
     def effective_config(self) -> dict:
-        return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha}
+        return {
+            **super().effective_config,
+            "backbone_type": self.backbone_type,
+            "time_shift_alpha": self.action_decoder.time_shift_alpha,
+        }

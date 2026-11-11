@@ -8,6 +8,7 @@ import torch
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 
 
 class DiTTest(unittest.TestCase):
@@ -94,9 +95,9 @@ class DiTTest(unittest.TestCase):
         attention = torch.nn.functional.scaled_dot_product_attention
 
         def check_attention_precision(query, key, value, **kwargs):
-            self.assertFalse(torch.is_autocast_enabled("cpu"))
+            self.assertTrue(torch.is_autocast_enabled("cpu"))
             for tensor in (query, key, value):
-                self.assertEqual(tensor.dtype, torch.float32)
+                self.assertEqual(tensor.dtype, torch.bfloat16)
             return attention(query, key, value, **kwargs)
 
         with patch(
@@ -114,8 +115,9 @@ class DiTTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(output).all())
         torch.testing.assert_close(output.float(), expected, rtol=0.05, atol=0.005)
         loss.backward()
-        self.assertTrue(torch.isfinite(self.model.input_embedder.weight.grad).all())
-
+        for parameter in self.model.parameters():
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad).all())
         reduced = copy.deepcopy(self.model).to(torch.bfloat16)
         with torch.no_grad():
             context = self.context.bfloat16()
@@ -126,6 +128,122 @@ class DiTTest(unittest.TestCase):
         self.assertEqual(output.dtype, torch.bfloat16)
         self.assertTrue(torch.isfinite(output).all())
         torch.testing.assert_close(output.float(), expected, rtol=0.05, atol=0.005)
+
+    def make_sat_model(self):
+        return DiT(
+            horizon=5, action_dim=19, n_obs_steps=2, obs_token_dim=7,
+            hidden_dim=24, n_layers=4, n_head=4, n_kv_head=2,
+            head_dim=8, timestep_embed_dim=16, qk_norm=True,
+            action_io=SATActionIO(horizon=5, hidden_dim=24),
+        )
+
+    def test_sat_initialization_and_training(self):
+        action_io = SATActionIO(horizon=5, hidden_dim=24)
+        original = copy.deepcopy(action_io.state_dict())
+        model = DiT(
+            horizon=5, action_dim=19, n_obs_steps=2, obs_token_dim=7,
+            hidden_dim=24, n_layers=4, n_head=4, n_kv_head=2,
+            head_dim=8, timestep_embed_dim=16, action_io=action_io,
+        )
+        for name, value in action_io.state_dict().items():
+            torch.testing.assert_close(value, original[name], rtol=0, atol=0)
+        self.assertFalse(hasattr(model, "input_embedder"))
+        self.assertFalse(hasattr(model, "output_proj"))
+        actions = torch.randn(2, 5, 19)
+        output = model(actions, self.time, self.context)
+        self.assertEqual(output.shape, actions.shape)
+        torch.testing.assert_close(output, torch.zeros_like(actions), rtol=0, atol=0)
+        decoder = RectifiedFlow(model)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        # The first update opens SAT's zero head; the second must train upstream.
+        for step in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            loss, _ = decoder.compute_loss(self.context, actions)
+            self.assertTrue(torch.isfinite(loss))
+            loss.backward()
+            for name, parameter in model.named_parameters():
+                with self.subTest(step=step, parameter=name):
+                    self.assertIsNotNone(parameter.grad)
+                    self.assertTrue(torch.isfinite(parameter.grad).all())
+                    if step:
+                        self.assertGreater(parameter.grad.abs().sum().item(), 0)
+            optimizer.step()
+
+    def test_sat_joint_communication_and_permutation(self):
+        model = self.make_sat_model().eval()
+        actions = torch.randn(2, 5, 19, requires_grad=True)
+        hidden = model._forward_hidden(actions, self.time, self.context)
+        self.assertEqual(hidden.shape, (2, 19, 24))
+        for output_joint, input_joint in ((0, 18), (18, 0)):
+            gradient = torch.autograd.grad(
+                hidden[:, output_joint].square().sum(), actions, retain_graph=True,
+            )[0]
+            self.assertGreater(gradient[:, :, input_joint].abs().sum().item(), 0)
+        # Joint identities move with the trajectory, so token order is immaterial.
+        permutation = torch.randperm(19)
+        permuted = copy.deepcopy(model)
+        permuted.action_io.robot_ids = model.action_io.robot_ids[permutation]
+        permuted.action_io.joint_ids = model.action_io.joint_ids[permutation]
+        changed = permuted._forward_hidden(actions[:, :, permutation], self.time, self.context)
+        torch.testing.assert_close(changed, hidden[:, permutation], rtol=1e-5, atol=1e-7)
+        with self.assertRaisesRegex(ValueError, "ordinary action"):
+            model.forward_prefix_features(actions[:, :3], self.time, self.context)
+
+    @torch.no_grad()
+    def test_observation_set_order_and_frame_identity(self):
+        for model, actions in (
+            (self.model.eval(), self.actions),
+            (self.make_sat_model().eval(), torch.randn(2, 5, 19)),
+        ):
+            # Learned frame identities may differ after training.
+            model.context_frame_pos_embed.normal_(std=0.2)
+            original = model._forward_hidden(actions, self.time, self.context)
+            within_frame = self.context[:, [1, 0, 2, 4, 3, 5]]
+            actual = model._forward_hidden(actions, self.time, within_frame)
+            torch.testing.assert_close(actual, original, rtol=1e-5, atol=1e-7)
+            swapped_frames = self.context[:, [3, 4, 5, 0, 1, 2]]
+            self.assertFalse(torch.allclose(
+                original, model._forward_hidden(actions, self.time, swapped_frames),
+            ))
+
+    def test_sat_cache_gradients_bfloat16_and_rtc(self):
+        model = self.make_sat_model().eval()
+        # Exercise a nonzero learned velocity, not only the initial identity flow.
+        torch.nn.init.normal_(model.action_io.final_layer.ffn_final.fc2.weight, std=0.02)
+        actions = torch.randn(2, 5, 19, requires_grad=True)
+        with torch.no_grad():
+            cache = model.prepare_context_kv(self.context)
+        expected = model(actions, self.time, self.context)
+        actual = model(actions, self.time, self.context, context_kv=cache)
+        torch.testing.assert_close(actual, expected)
+        expected_grad = torch.autograd.grad(expected.square().sum(), actions)[0]
+        actual_grad = torch.autograd.grad(actual.square().sum(), actions)[0]
+        torch.testing.assert_close(actual_grad, expected_grad)
+        self.assertGreater(actual_grad.abs().sum().item(), 0)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            cache_bf16 = model.prepare_context_kv(self.context)
+            bf16 = model(actions, self.time, self.context, context_kv=cache_bf16)
+            torch.testing.assert_close(bf16, model(actions, self.time, self.context))
+            bf16.float().square().mean().backward()
+        self.assertTrue(torch.isfinite(actions.grad).all())
+        torch.testing.assert_close(bf16.float(), expected, rtol=0.1, atol=0.01)
+        decoder = RectifiedFlow(model, num_inference_steps=3).eval()
+        kwargs = dict(cond=self.context, action_shape=actions.shape)
+        unguided = decoder.predict_action(**kwargs, generator=torch.Generator().manual_seed(11))
+        with patch.object(model, "prepare_context_kv", return_value=None):
+            uncached = decoder.predict_action(**kwargs, generator=torch.Generator().manual_seed(11))
+        torch.testing.assert_close(unguided, uncached)
+        prefix = torch.full((2, 2, 19), 5.0)
+        with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16):
+            guided = decoder.predict_action(
+                **kwargs, generator=torch.Generator().manual_seed(11),
+                rtc_prefix=prefix, delay_steps=0, rtc_guidance_cap=0.5,
+            )
+        self.assertTrue(torch.isfinite(guided).all())
+        self.assertLess(
+            (guided[:, :2] - prefix).square().mean().item(),
+            (unguided[:, :2] - prefix).square().mean().item(),
+        )
 
     def test_rtc_guidance_uses_action_gradients(self):
         decoder = RectifiedFlow(self.model, num_inference_steps=3).eval()

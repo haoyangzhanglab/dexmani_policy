@@ -2,9 +2,10 @@
 
 Reference: huggingface/lerobot at 45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6,
 src/lerobot/policies/smolvla/{modeling_smolvla,smolvlm_with_expert}.py.
-Each layer adapts fixed observation features in place of the original VLM's
-layerwise prefix K/V. This is a from-scratch backbone, not checkpoint-compatible
-with SmolVLA. Time and velocity follow the calling decoder's convention.
+Each layer projects fixed observation features directly to expert K/V. Context
+already carries spatial/type information; only frame embeddings are added here.
+This is a from-scratch backbone, not checkpoint-compatible with SmolVLA.
+Time and velocity follow the calling decoder's convention.
 """
 
 import math
@@ -74,7 +75,7 @@ class GatedMLP(nn.Module):
 class ExpertBlock(nn.Module):
     def __init__(
         self, dim, n_head, n_kv_head, head_dim, intermediate_dim,
-        cross_attention, p_drop_attn, qkv_bias,
+        cross_attention, p_drop_attn, qkv_bias, qk_norm, temporal_actions,
     ):
         super().__init__()
         self.n_head = n_head
@@ -82,6 +83,7 @@ class ExpertBlock(nn.Module):
         self.head_dim = head_dim
         self.cross_attention = cross_attention
         self.p_drop_attn = p_drop_attn
+        self.temporal_actions = temporal_actions
         kv_dim = n_kv_head * head_dim
 
         self.input_norm = RMSNorm(dim)
@@ -89,14 +91,16 @@ class ExpertBlock(nn.Module):
         self.context_k_proj = nn.Linear(dim, kv_dim, bias=qkv_bias)
         self.context_v_proj = nn.Linear(dim, kv_dim, bias=qkv_bias)
         self.q_proj = nn.Linear(dim, n_head * head_dim, bias=qkv_bias)
-        # Cross-attention adapts the already rotated prefix keys, as in SmolVLA.
-        kv_input_dim = kv_dim if cross_attention else dim
-        self.k_proj = nn.Linear(kv_input_dim, kv_dim, bias=qkv_bias)
-        self.v_proj = nn.Linear(kv_input_dim, kv_dim, bias=qkv_bias)
+        if not cross_attention:
+            self.k_proj = nn.Linear(dim, kv_dim, bias=qkv_bias)
+            self.v_proj = nn.Linear(dim, kv_dim, bias=qkv_bias)
+        self.q_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
         self.o_proj = nn.Linear(n_head * head_dim, dim, bias=False)
         self.post_attention_norm = RMSNorm(dim)
         self.mlp = GatedMLP(dim, intermediate_dim)
-        self.rope = RotaryEmbedding(head_dim)
+        if temporal_actions:
+            self.rope = RotaryEmbedding(head_dim)
 
     def split_heads(self, x, n_head):
         return x.unflatten(-1, (n_head, self.head_dim)).transpose(1, 2)
@@ -105,43 +109,38 @@ class ExpertBlock(nn.Module):
         context = self.context_norm(context)
         key = self.split_heads(self.context_k_proj(context), self.n_kv_head)
         value = self.split_heads(self.context_v_proj(context), self.n_kv_head)
-        key = self.rope(key, torch.arange(context.shape[1], device=context.device))
-        if self.cross_attention:
-            key = self.k_proj(key.transpose(1, 2).flatten(2))
-            value = self.v_proj(value.transpose(1, 2).flatten(2))
-            key = self.split_heads(key, self.n_kv_head)
-            value = self.split_heads(value, self.n_kv_head)
-        return key, value
+        return self.k_norm(key), value
 
     def forward(self, x, context, *, context_kv=None):
         key, value = self.prepare_context_kv(context) if context_kv is None else context_kv
         prefix_length = key.shape[2]
         hidden = self.input_norm(x)
-        positions = torch.arange(x.shape[1], device=x.device)
-        query = self.split_heads(self.q_proj(hidden), self.n_head)
-        if self.cross_attention:
+        query = self.q_norm(self.split_heads(self.q_proj(hidden), self.n_head))
+        attention_mask = None
+        if self.temporal_actions:
+            positions = torch.arange(x.shape[1], device=x.device)
             query = self.rope(query, positions)
-            attention_mask = None
-        else:
-            query = self.rope(query, positions + prefix_length)
-            action_key = self.split_heads(self.k_proj(hidden), self.n_kv_head)
-            action_key = self.rope(action_key, positions + prefix_length)
+        if not self.cross_attention:
+            action_key = self.k_norm(self.split_heads(self.k_proj(hidden), self.n_kv_head))
+            if self.temporal_actions:
+                action_key = self.rope(action_key, positions)
             action_value = self.split_heads(self.v_proj(hidden), self.n_kv_head)
             key = torch.cat((key, action_key), dim=2)
             value = torch.cat((value, action_value), dim=2)
-            # SDPA's non-square is_causal mask would hide part of the prefix.
-            attention_mask = torch.arange(key.shape[2], device=x.device)[None] <= (
-                prefix_length + positions[:, None]
-            )
+            if self.temporal_actions:
+                # SDPA's non-square is_causal mask would hide part of the prefix.
+                attention_mask = torch.arange(key.shape[2], device=x.device)[None] <= (
+                    prefix_length + positions[:, None]
+                )
 
         groups = self.n_head // self.n_kv_head
         key = key.repeat_interleave(groups, dim=1)
         value = value.repeat_interleave(groups, dim=1)
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            output = F.scaled_dot_product_attention(
-                query.float(), key.float(), value.float(), attn_mask=attention_mask,
-                dropout_p=self.p_drop_attn if self.training else 0.0,
-            ).to(query.dtype)
+        # Keep the projection dtype so SDPA can select fused BF16/FP16 kernels.
+        output = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask,
+            dropout_p=self.p_drop_attn if self.training else 0.0,
+        )
         x = x + self.o_proj(output.transpose(1, 2).flatten(2))
         return x + self.mlp(self.post_attention_norm(x))
 
@@ -153,6 +152,9 @@ class DiT(nn.Module):
     [B, n_obs_steps * tokens_per_frame, obs_token_dim], without padding.
     ``forward`` returns a velocity of the same shape as ``x``. A cache belongs
     to one fixed context and is reused unchanged across flow integration steps.
+    Ordinary actions use causal temporal tokens with local RoPE. Custom
+    ``action_io`` owns token identity/readout (e.g. SAT joint trajectories): its
+    tokens interact bidirectionally, without additional index positions.
     """
 
     def __init__(
@@ -168,6 +170,8 @@ class DiT(nn.Module):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.0,
         qkv_bias: bool = False,
+        qk_norm: bool = False,
+        action_io: nn.Module | None = None,
         n_kv_head: int = 2,
         head_dim: int | None = None,
         self_attn_every_n_layers: int = 2,
@@ -204,7 +208,9 @@ class DiT(nn.Module):
         self.action_dim = action_dim
         self.n_obs_steps = n_obs_steps
         self.obs_token_dim = obs_token_dim
-        self.input_embedder = nn.Linear(action_dim, hidden_dim)
+        self.action_io = action_io
+        if action_io is None:
+            self.input_embedder = nn.Linear(action_dim, hidden_dim)
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.timestep_embedder = TimeEmbedding(timestep_embed_dim)
@@ -217,13 +223,18 @@ class DiT(nn.Module):
             ExpertBlock(
                 hidden_dim, n_head, n_kv_head, head_dim, intermediate_dim,
                 cross_attention=index % self_attn_every_n_layers != 0,
-                p_drop_attn=p_drop_attn, qkv_bias=qkv_bias,
+                p_drop_attn=p_drop_attn, qkv_bias=qkv_bias, qk_norm=qk_norm,
+                temporal_actions=action_io is None,
             )
             for index in range(n_layers)
         )
-        self.final_norm = RMSNorm(hidden_dim)
-        self.output_proj = nn.Linear(hidden_dim, action_dim)
-        self.apply(self._initialize_weights)
+        if action_io is None:
+            self.final_norm = RMSNorm(hidden_dim)
+            self.output_proj = nn.Linear(hidden_dim, action_dim)
+        # Custom I/O owns its initialization, including SAT's zero velocity head.
+        for module in self.children():
+            if module is not self.action_io:
+                module.apply(self._initialize_weights)
 
     @staticmethod
     def _initialize_weights(module):
@@ -246,9 +257,13 @@ class DiT(nn.Module):
         if x.ndim != 3 or x.shape[1:] != (self.horizon, self.action_dim):
             raise ValueError("actions must have shape [B, horizon, action_dim]")
         hidden = self._forward_hidden(x, timestep, context, context_kv=context_kv)
+        if self.action_io is not None:
+            return self.action_io.decode_velocity(hidden)
         return self.output_proj(self.final_norm(hidden))
 
     def forward_prefix_features(self, x: torch.Tensor, timestep, context: torch.Tensor):
+        if self.action_io is not None:
+            raise ValueError("Prefix features require ordinary action embeddings")
         if x.ndim != 3 or not 1 <= x.shape[1] <= self.horizon or x.shape[2] != self.action_dim:
             raise ValueError("prefix actions must have shape [B, L, action_dim], 1 <= L <= horizon")
         return self._forward_hidden(x, timestep, context)
@@ -258,10 +273,10 @@ class DiT(nn.Module):
             raise ValueError("actions and context must have the same batch size")
         context_c = self.embed_context(context) if context_kv is None else None
         timestep = batch_timesteps(timestep, x, dtype=torch.float32)
-        hidden = self.input_embedder(x)
+        hidden = self.input_embedder(x) if self.action_io is None else self.action_io.encode(x)
         time = self.timestep_embedder(timestep).to(hidden.dtype)
         hidden = self.action_time_mlp(torch.cat((
-            hidden, time[:, None].expand(-1, x.shape[1], -1),
+            hidden, time[:, None].expand(-1, hidden.shape[1], -1),
         ), dim=-1))
         for index, block in enumerate(self.dit_blocks):
             hidden = block(
