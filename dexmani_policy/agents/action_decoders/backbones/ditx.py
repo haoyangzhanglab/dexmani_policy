@@ -249,15 +249,6 @@ class DiTX(nn.Module):
             return self.final_layer(hidden)
         return self.action_io.decode_velocity(hidden)
 
-    def forward_prefix_features(
-        self, x: torch.Tensor, timestep: torch.Tensor | float, context: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.action_io is not None:
-            raise ValueError("Prefix features require ordinary action embeddings")
-        if x.ndim != 3 or not 1 <= x.shape[1] <= self.horizon or x.shape[2] != self.action_dim:
-            raise ValueError("prefix actions must have shape [B, L, action_dim], 1 <= L <= horizon")
-        return self._forward_hidden(x, timestep, context)
-
     def _forward_hidden(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
     ) -> torch.Tensor:

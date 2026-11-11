@@ -58,7 +58,7 @@ class DiTTest(unittest.TestCase):
                 self.assertGreater(parameter.grad.abs().sum().item(), 0)
 
     @torch.no_grad()
-    def test_causal_actions_and_prefix_features(self):
+    def test_causal_actions(self):
         self.model.eval()
         output = self.model(self.actions, self.time, self.context)
         perturbed = self.actions.clone()
@@ -66,9 +66,6 @@ class DiTTest(unittest.TestCase):
         changed = self.model(perturbed, self.time, self.context)
         torch.testing.assert_close(output[:, :3], changed[:, :3], rtol=0, atol=1e-7)
         self.assertFalse(torch.allclose(output[:, 3:], changed[:, 3:]))
-        full = self.model.forward_prefix_features(self.actions, self.time, self.context)
-        prefix = self.model.forward_prefix_features(self.actions[:, :3], self.time, self.context)
-        torch.testing.assert_close(full[:, :3], prefix, rtol=1e-5, atol=1e-7)
 
     @torch.no_grad()
     def test_context_cache_and_euler_agree(self):
@@ -149,9 +146,13 @@ class DiTTest(unittest.TestCase):
         original = copy.deepcopy(action_io.state_dict())
         model = DiT(
             horizon=5, action_dim=19, n_obs_steps=2, obs_token_dim=7,
-            hidden_dim=24, n_layers=4, n_head=4, n_kv_head=2,
-            head_dim=8, timestep_embed_dim=16, action_io=action_io,
+            hidden_dim=24, n_layers=4, n_head=8, n_kv_head=2,
+            timestep_embed_dim=16, action_io=action_io,
         )
+        # SAT has no temporal RoPE, so its head width (24 / 8 = 3) may be odd.
+        with self.assertRaisesRegex(ValueError, "even for RoPE"):
+            DiT(horizon=5, action_dim=3, n_obs_steps=2, obs_token_dim=7,
+                hidden_dim=24, n_head=8)
         for name, value in action_io.state_dict().items():
             torch.testing.assert_close(value, original[name], rtol=0, atol=0)
         self.assertFalse(hasattr(model, "input_embedder"))
@@ -193,8 +194,6 @@ class DiTTest(unittest.TestCase):
         permuted.action_io.joint_ids = model.action_io.joint_ids[permutation]
         changed = permuted._forward_hidden(actions[:, :, permutation], self.time, self.context)
         torch.testing.assert_close(changed, hidden[:, permutation], rtol=1e-5, atol=1e-7)
-        with self.assertRaisesRegex(ValueError, "ordinary action"):
-            model.forward_prefix_features(actions[:, :3], self.time, self.context)
 
     @torch.no_grad()
     def test_observation_set_order_and_frame_identity(self):

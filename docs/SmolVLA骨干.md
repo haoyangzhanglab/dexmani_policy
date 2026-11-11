@@ -21,18 +21,13 @@
 | GQA | 默认 8 个 Q heads、2 个 KV heads，head_dim 可独立设置 | 减少 K/V 参数和缓存；适配项目 PyTorch 2.4.1 |
 | 观测 K/V | 每层独立 RMSNorm 和直接 K/V 投影 | 没有真实 VLM cache，不再模拟两级 K/V 适配 |
 | 观测位置 | 保留 frame embedding；空间和 token-type 信息由 encoder 提供 | 点云 patch 的数组序号不是物理空间位置 |
-| 普通动作 token | temporal causal mask + 局部 `arange(H)` RoPE | 保留 SmolVLA 的因果动作参照和 prefix-feature 语义 |
+| 普通动作 token | temporal causal mask + 局部 `arange(H)` RoPE | 保留 SmolVLA 的因果动作参照 |
 | SAT / 自定义 action_io | token 双向交互，不额外加序号 RoPE | I/O 自己提供关节等身份信息；token 轴不等于时间 |
 | 输出 | 普通动作 final RMSNorm + Linear；SAT 直接复用自己的 readout | 不重复归一化/解码；保留 SAT 零 velocity head |
 | 精度 | RMSNorm、RoPE 中间计算 FP32；SDPA 使用 Q/K/V 原 dtype | 让 BF16/FP16 输入具备选择融合 attention kernel 的条件 |
 | 缓存 | 每次采样预计算一次、逐层只读 tuple | prefix 不依赖 noisy action 和 flow time，可跨 NFE 重用 |
 
-原 SmolVLA CA 的二次 K/V 投影用于适配 VLM 与 expert；上一版 standalone 实现
-也模拟了它。本版关闭 context 序号 RoPE 后，直接 observation→expert K/V 更直观，
-不再保留两个连续的线性适配层。这是对本项目的设计取舍，不声称与 upstream
-或上一版参数化逐位等价，也不兼容上一版 DiT 的 state_dict。
-
-`qk_norm` 为兼容现有 SAT 构造器而保留，默认关闭。开启时，对所有层的 Q/K
+`qk_norm` 控制逐 head 的 Q/K 归一化，YAML 默认关闭。开启时，对所有层的 Q/K
 采用逐 head 的 RMSNorm，位于 action RoPE 之前；它不同于 DiTX 仅在 CA 使用
 LayerNorm 的具体实现。主对照使用现有 YAML 的 `qk_norm: false`。
 
@@ -55,11 +50,11 @@ SAT 使用既有协议，不增加 action I/O 框架：
 
 SAT 自定义 I/O 的约定是：`encode(x)` 返回带身份信息的 token，
 `decode_velocity(hidden)` 恢复动作坐标。构造 DiT 时跳过 I/O 的递归初始化，
-也不创建普通动作 input/output projection。SAT 的 readout 已包含归一化。
+也不创建普通动作 input/output projection。SAT 的 readout 已包含归一化。偶数 head_dim 约束只适用于带时间 RoPE 的普通动作，
+SAT 不使用 RoPE，允许奇数 head_dim。
 
-SAT 的短时间前缀不能直接编码：轨迹 MLP 的输入宽度固定为 H，因此
-`forward_prefix_features` 明确拒绝自定义 action_io。RTC 对完整 `[B,H,19]`
-求梯度后约束执行前缀，不依赖这个短前缀接口，已验证可用。
+SAT 的轨迹 MLP 输入宽度固定为 H。RTC 对完整 `[B,H,19]` 求梯度后约束执行前缀，
+与双向关节交互及只读观测缓存共同工作。
 
 ## Flow 约定与数值边界
 
@@ -148,21 +143,23 @@ attention workspace 或整个模型显存。
 OMP_NUM_THREADS=1 python -m unittest dexmani_policy.test_tools.dit_test -v
 ```
 
-本次整合 main 后，在 Python 3.10.20、PyTorch 2.4.1+cu124、torchvision 0.19.1+cu124、
-timm 1.0.22 环境中使用 CPU 验证：10 项回归通过，覆盖普通动作 flow 梯度、时间/观测依赖、因果性与 prefix feature、
+PR #28 整合时，在 Python 3.10.20、PyTorch 2.4.1+cu124、torchvision 0.19.1+cu124、
+timm 1.0.22 环境中使用 CPU 验证：10 项回归通过，覆盖普通动作 flow 梯度、时间/观测依赖、因果性、
 缓存等价和只读、多步 Euler、BF16 autocast/整模 BF16、SAT 初始化与两步训练、
 双向关节梯度、关节置换等变、帧内观测置换不变与跨帧身份、RTC。新增 SAT 的 Hydra
 默认/显式骨干选择和 checkpoint 保存恢复回归；使用真实的小尺寸随机初始化 encoder，
 检查严格权重恢复与非零 velocity 输出一致，旧配方缺少 backbone_type 时仍恢复为 DiTX。
 
-本次另通过 14 项 correctness 回归、现有 DP3/CordViP CPU smoke（各训练 2 步后续训
+PR 整合时另通过 14 项 correctness 回归、现有 DP3/CordViP CPU smoke（各训练 2 步后续训
 2 步，并检查部署输出）、相关 Python 编译及 git diff --check。
 
-历史检查（本次未重跑）：实际 H=16/P=258/D=768 配置的 BF16 有限输出与缓存等价，以及小型 SAT
-模型在 CPU `torch.compile(backend="aot_eager", fullgraph=True)` 下的缓存 forward
-与 action gradient 等价。AOT 图捕获不等于 GPU Inductor 验证。
+CUDA 补测使用 sandbox 外的 RTX 4090：大尺寸普通动作/SAT 的 BF16 梯度、缓存、
+Euler、RTC 和整模 BF16 有限性通过；小尺寸 CUDA Inductor 的 forward/VJP/RTC 通过。
+大尺寸严格数值对照并未全部通过：普通动作 BF16/FP32 最大差异约 0.025（CPU 亦复现），
+帧内置换 FP32 差异约 1e-6，超过原小模型测试的容差。没有为此放宽测试；
+有限精度的舍入误差不能等同于任务质量变化，也不能据小模型结果保证任意尺寸的数值等价。
 
-本次未运行 SAT 完整 RGB-point encoder 前向、端到端训练/续训/部署流程、GPU kernel/延迟测量或机器人
+尚未运行 SAT 完整 RGB-point encoder 前向、端到端训练/续训/部署流程、GPU kernel/延迟测量或机器人
 闭环评测。下一步固定数据、encoder、动作表示、训练步数、NFE 和评测 seed，分别
 比较 DiTX 与本版；报告成功率、轨迹质量、encoder/prefill/单步/整 chunk 延迟及峰值显存。
 目标是以更小的动作主干达到可接受或更好的任务表现，不能先验保证“最佳”。

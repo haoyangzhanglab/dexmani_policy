@@ -190,7 +190,8 @@ class DiT(nn.Module):
             if hidden_dim % n_head:
                 raise ValueError("hidden_dim must be divisible by n_head when head_dim is omitted")
             head_dim = hidden_dim // n_head
-        if positive_int(head_dim, "head_dim") % 2:
+        positive_int(head_dim, "head_dim")
+        if action_io is None and head_dim % 2:
             raise ValueError("head_dim must be even for RoPE")
         timestep_embed_dim = hidden_dim if timestep_embed_dim is None else timestep_embed_dim
         if positive_int(timestep_embed_dim, "timestep_embed_dim") % 2:
@@ -260,13 +261,6 @@ class DiT(nn.Module):
         if self.action_io is not None:
             return self.action_io.decode_velocity(hidden)
         return self.output_proj(self.final_norm(hidden))
-
-    def forward_prefix_features(self, x: torch.Tensor, timestep, context: torch.Tensor):
-        if self.action_io is not None:
-            raise ValueError("Prefix features require ordinary action embeddings")
-        if x.ndim != 3 or not 1 <= x.shape[1] <= self.horizon or x.shape[2] != self.action_dim:
-            raise ValueError("prefix actions must have shape [B, L, action_dim], 1 <= L <= horizon")
-        return self._forward_hidden(x, timestep, context)
 
     def _forward_hidden(self, x, timestep, context, *, context_kv=None):
         if context.shape[0] != x.shape[0]:
