@@ -51,10 +51,6 @@ class HandGeometryEncoder(nn.Module):
         self.norm = nn.LayerNorm(192)
 
     def forward(self, eef_pose, fingertip_xyz):
-        if eef_pose.ndim != 2 or eef_pose.shape[-1] != 9:
-            raise ValueError("eef_pose must be [BT,9]")
-        if fingertip_xyz.shape != (eef_pose.shape[0], 5, 3):
-            raise ValueError("fingertip_xyz must be [BT,5,3]")
         with torch.autocast(device_type=eef_pose.device.type, enabled=False):
             pose = eef_pose.float()
             rotation = _rotation_6d_to_matrix(pose[:, 3:])

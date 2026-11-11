@@ -88,13 +88,6 @@ class DQRISE(Policy):
             num_codes=num_codes,
         )
 
-    @property
-    def effective_config(self) -> dict:
-        return {
-            **super().effective_config,
-            "num_codes": self.hand_codebook.num_codes,
-        }
-
     def compute_loss(
         self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,
     ) -> tuple[torch.Tensor, dict]:

@@ -8,8 +8,6 @@ from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELD
 def resolve_inference_settings(config, *, weights=None, inference_steps=None):
     defaults = config["eval"]
     if weights is None:
-        if type(defaults["use_ema"]) is not bool:
-            raise ValueError("Saved use_ema must be boolean")
         weights = "ema" if defaults["use_ema"] else "raw"
     if weights not in {"ema", "raw"}:
         raise ValueError("weights must be ema or raw")

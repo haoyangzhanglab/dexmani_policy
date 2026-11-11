@@ -12,11 +12,9 @@ from dexmani_policy.deployment.metadata import policy_info
 def load_policy(path, *, weights=None, inference_steps=None, device="cuda:0", seed=0):
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
-    path = Path(path).expanduser().resolve(strict=True)
+    path = Path(path).expanduser().resolve()
     if path.is_dir():
-        path = (path / "checkpoints/latest.pt").resolve(strict=True)
-    if not path.is_file():
-        raise ValueError(f"Checkpoint must be a file: {path}")
+        path = (path / "checkpoints/latest.pt").resolve()
     checkpoint = load_checkpoint(path)
     cfg = checkpoint.effective_config
     weights, steps = resolve_inference_settings(cfg, weights=weights, inference_steps=inference_steps)

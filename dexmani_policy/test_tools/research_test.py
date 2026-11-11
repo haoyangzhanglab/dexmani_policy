@@ -11,6 +11,7 @@ from omegaconf import open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.normalizer import normalization_feature_shapes
+from dexmani_policy.deployment import load_policy
 from dexmani_policy.test_tools.smoke_test import make_source
 from dexmani_policy.train import build_trainer
 from dexmani_policy.training.common.config import load_policy_config
@@ -49,8 +50,9 @@ class ResearchTest(unittest.TestCase):
             source = root / 'run/checkpoints/latest.pt'
             checkpoint = load_checkpoint(source)
             self.assertNotIn('rng_state', vars(checkpoint))
-            with closing(prepare_resume(root / 'run', total_steps=4)) as trainer:
+            with closing(prepare_resume(root / 'run', total_steps=4, log_interval=2)) as trainer:
                 self.assertEqual(trainer.global_step, 2)
+                self.assertEqual(trainer.log_interval_steps, 2)
                 self.assertAlmostEqual(trainer.optimizer.param_groups[0]['lr'], cfg.optimizer.lr * .5)
                 torch.testing.assert_close(trainer.optimizer.state_dict()['state'], checkpoint.optimizer_state['state'], check_device=False)
                 trainer.train(max_updates=1)
@@ -100,6 +102,13 @@ class ResearchTest(unittest.TestCase):
                 trainer.train(max_updates=1)
             checkpoint = load_checkpoint(root / 'run/checkpoints/latest.pt')
             (root / 'codebook.npz').unlink()
+            self.assertEqual(checkpoint.effective_config['agent']['num_codes'], 4)
+            observation = {key: source[f'data/{key}'][:2] for key in cfg.dataset.sensor_modalities}
+            with closing(load_policy(root / 'run', weights='raw', inference_steps=1, device=DEVICE)) as runtime:
+                self.assertEqual(runtime.agent.hand_codebook.num_codes, 4)
+                prediction = runtime.predict(observation)
+                self.assertEqual(prediction.shape, (3, 19))
+                self.assertTrue(np.isfinite(prediction).all())
             del cfg.agent.rgb_backbone_config.architecture
             cfg.initialization.rgb = '/missing/pretrained'
             cfg.initialization.policy = str(root / 'run/checkpoints/latest.pt')
@@ -327,6 +336,71 @@ class ResearchTest(unittest.TestCase):
             self.assertEqual(torch.load(root / 'run/checkpoints/last.pt', weights_only=True)['epoch'], 3)
             self.assertTrue((root / 'run/checkpoints/best.pt').is_file())
             self.assertFalse(list((root / 'run/checkpoints').glob('epoch_*.pt')))
+
+    def test_pretrained_resnet_freeze_group_norm(self):
+        import torchvision
+        from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
+        source = torchvision.models.resnet18(weights=None)
+        model = ResNetEncoder(tune_mode='freeze', norm_mode='group_norm', out_dim=16)
+        self.assertFalse(torch.equal(model.backbone[0].weight, source.conv1.weight))
+        # Isolate only the download; torchvision construction and loading remain real.
+        with patch('torchvision.models._api.load_state_dict_from_url', return_value=source.state_dict()) as download:
+            model.initialize_weights('DEFAULT')
+        download.assert_called_once()
+        torch.testing.assert_close(model.backbone[0].weight, source.conv1.weight, rtol=0, atol=0)
+        torch.testing.assert_close(model.backbone[7][1].conv2.weight, source.layer4[1].conv2.weight, rtol=0, atol=0)
+        self.assertTrue(any(isinstance(m, torch.nn.GroupNorm) for m in model.backbone.modules()))
+        self.assertFalse(any(isinstance(m, torch.nn.BatchNorm2d) for m in model.backbone.modules()))
+        model.to(DEVICE).train()
+        self.assertFalse(model.backbone.training)
+        self.assertFalse(any(p.requires_grad for p in model.backbone.parameters()))
+        optimizer = torch.optim.SGD(model.parameters(), lr=.01)
+        output = model(torch.rand(2, 3, 64, 64, device=DEVICE))
+        self.assertEqual(output['patch_tokens'].shape, (2, 4, 16))
+        self.assertTrue(all(torch.isfinite(value).all() for value in output.values()))
+        output['global_token'].square().mean().backward()
+        self.assertTrue(all(p.grad is None for p in model.backbone.parameters()))
+        self.assertTrue(torch.isfinite(model.proj.weight.grad).all())
+        self.assertGreater(model.proj.weight.grad.abs().sum().item(), 0)
+        optimizer.step()
+        torch.testing.assert_close(model.backbone[0].weight.cpu(), source.conv1.weight, rtol=0, atol=0)
+
+    def test_resnet_policy_save_resume_and_deploy(self):
+        import numpy as np
+        import torchvision
+        from dexmani_policy.test_tools.smoke_test import run_smoke
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = make_source(root / 'source.zarr')
+            data.create_dataset('data/rgb', data=np.full((12, 64, 64, 3), 128, np.uint8))
+            cfg = load_policy_config('dp', [
+                f'zarr_path={root / "source.zarr"}', f'training.device={DEVICE}',
+                'initialization.rgb=DEFAULT', 'agent.rgb_backbone_name=resnet',
+                'horizon=4', 'n_action_steps=2', 'agent.down_dims=[16,32]',
+                'agent.diffusion_step_embed_dim=16', 'agent.num_inference_steps=1',
+                'training.use_compile=false', 'training.use_bfloat16=false',
+                'training.lr_warmup_steps=0', 'training.loop.total_train_steps=2',
+                'dataloader.num_workers=0', 'dataloader.batch_size=2',
+                'dataset.rgb_preprocess_size=null', 'dataset.rgb_random_crop_size=null',
+                'dataset.rgb_color_aug=null', 'dataset.augmentation_cfg=null',
+            ])
+            cfg.agent.rgb_backbone_config = dict(model_name='resnet18', tune_mode='freeze',
+                                                 norm_mode='group_norm', out_dim=16, image_size=[64,64])
+            source = torchvision.models.resnet18(weights=None).state_dict()
+            with patch('torchvision.models._api.load_state_dict_from_url', return_value=source) as download:
+                run_smoke(cfg, root / 'run', max_updates=1, resume_updates=1)
+            download.assert_called_once()
+            observation = {key: data[f'data/{key}'][:2] for key in cfg.dataset.sensor_modalities}
+            for weights in ('raw', 'ema'):
+                with self.subTest(weights=weights), closing(load_policy(
+                    root / 'run/checkpoints/latest.pt', weights=weights, device=DEVICE,
+                )) as runtime:
+                    encoder = runtime.agent.obs_encoder.rgb_encoder
+                    torch.testing.assert_close(encoder.backbone[0].weight.cpu(), source['conv1.weight'], rtol=0, atol=0)
+                    self.assertFalse(any(p.requires_grad for p in encoder.backbone.parameters()))
+                    prediction = runtime.predict(observation)
+                    self.assertEqual(prediction.shape, (3, 19))
+                    self.assertTrue(np.isfinite(prediction).all())
 
     def test_random_rgb_freeze_and_lora(self):
         from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder

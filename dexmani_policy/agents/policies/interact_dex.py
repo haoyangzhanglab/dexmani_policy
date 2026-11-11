@@ -77,8 +77,6 @@ class FutureForceHead(nn.Module):
         nn.init.zeros_(self.mlp[-1].bias)
 
     def forward(self, interaction):
-        if interaction.ndim != 4 or interaction.shape[1:] != (len(self.temporal_logits), 6, 192):
-            raise ValueError("interaction must be [B,n_obs_steps,6,192]")
         pooled = (interaction * self.temporal_logits.softmax(0)[None, :, None, None]).sum(1)
         context = pooled.mean(1, keepdim=True).expand(-1, 5, -1)
         return self.mlp(torch.cat((pooled[:, 1:], context), -1))

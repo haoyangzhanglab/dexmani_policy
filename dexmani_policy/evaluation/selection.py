@@ -17,12 +17,9 @@ def candidate_score(candidate):
 def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_steps=None,
                  selection_episodes=25, test_episodes=100, seed=1024, device="cuda:0",
                  video=False, output_dir=None):
-    checkpoints = [Path(path).expanduser().resolve(strict=True) for path in checkpoints]
+    checkpoints = [Path(path).expanduser().resolve() for path in checkpoints]
     if not checkpoints or len(set(checkpoints)) != len(checkpoints):
         raise ValueError("Candidates must be a nonempty list of distinct checkpoint files")
-    for checkpoint in checkpoints:
-        if not checkpoint.is_file():
-            raise ValueError(f"Checkpoint must be a file: {checkpoint}")
     root = checkpoints[0].parent.parent
     loaded = load_checkpoint(checkpoints[0])
     task_name = loaded.effective_config["env_runner"]["task_name"]

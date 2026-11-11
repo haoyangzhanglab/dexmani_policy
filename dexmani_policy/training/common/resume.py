@@ -11,7 +11,7 @@ from dexmani_policy.common.config import positive_int, set_project_root
 
 def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
                    use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None, total_steps=None):
-    directory = Path(run).expanduser().resolve(strict=True)
+    directory = Path(run).expanduser().resolve()
     source = directory / "checkpoints" / "latest.pt"
     checkpoint = load_checkpoint(source)
     cfg = OmegaConf.create(checkpoint.effective_config)
@@ -30,7 +30,7 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
                 raise ValueError("num_workers must be nonnegative")
             cfg.dataloader.num_workers = num_workers
         if log_interval is not None:
-            cfg.training.loop.log_interval_steps = positive_int(log_interval, "log_interval")
+            cfg.training.loop.log_interval_steps = log_interval
         if use_compile is not None:
             cfg.training.use_compile = use_compile
         if compile_mode is not None:
@@ -62,8 +62,6 @@ def main(argv=None):
     set_project_root()
     options = vars(args)
     max_updates = options.pop("max_updates")
-    if max_updates is not None:
-        positive_int(max_updates, "max_updates")
     trainer = prepare_resume(**options)
     if trainer is None:
         return

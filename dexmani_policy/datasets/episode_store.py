@@ -15,15 +15,6 @@ class EpisodeStore:
         fields = group["data"]
         self.data = {key: fields[key] for key in (fields.keys() if keys is None else keys)}
         self.attrs = dict(group.attrs)
-        if (
-            self.attrs.get("format") == "dexmani.real.canonical"
-            and TACTILE_FEATURE_SHAPES.keys() & self.data.keys()
-            and self.attrs.get("tactile_scale_divisor") != 255.0
-        ):
-            raise ValueError(
-                f"Canonical Zarr {self.path}: tactile_scale_divisor must be 255.0, "
-                f"got {self.attrs.get('tactile_scale_divisor')!r}"
-            )
         ends = np.asarray(group["meta"]["episode_ends"])
         if (
             ends.ndim != 1

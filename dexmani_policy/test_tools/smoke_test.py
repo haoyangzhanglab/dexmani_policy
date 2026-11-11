@@ -22,8 +22,6 @@ from dexmani_policy.training.common.resume import prepare_resume
 
 
 def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, resume_zarr_path=None) -> tuple[int, int]:
-    positive_int(max_updates, "max_updates")
-    positive_int(resume_updates, "resume_updates")
     cfg.workspace.output_dir = str(directory)
     cfg.workspace.wandb_cfg = None
     if cfg.training.loop.total_train_steps <= max_updates:

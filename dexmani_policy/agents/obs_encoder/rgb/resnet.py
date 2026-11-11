@@ -73,8 +73,6 @@ class ResNetEncoder(nn.Module):
     def initialize_weights(self, source: str | None) -> None:
         if source is None:
             return
-        if self.tune_mode == "freeze" and self.norm_mode == "group_norm":
-            raise ValueError("Frozen pretrained ResNet requires batch_norm/frozen_bn")
         norm_layer = FrozenBatchNorm2d if self.norm_mode == "frozen_bn" else nn.BatchNorm2d
         pretrained = getattr(torchvision.models, self.model_name)(weights=source, norm_layer=norm_layer)
         if self.norm_mode == "group_norm":

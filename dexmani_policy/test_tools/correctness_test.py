@@ -24,6 +24,34 @@ from dexmani_policy.training.trainer import PolicyTrainer
 
 
 class CorrectnessTest(unittest.TestCase):
+    def test_tactile_metadata_does_not_change_samples(self):
+        from dexmani_policy.datasets.variants.tactile import InterActDexDataset
+        from dexmani_policy.test_tools.smoke_test import make_source
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.zarr'
+            source = make_source(path)
+            force = np.arange(12 * 5 * 3, dtype=np.float32).reshape(12, 5, 3) / 255
+            source.create_dataset('data/finger_tactile_force', data=force)
+            source.attrs.update(format='dexmani.real.canonical', tactile_scale_divisor=255., dt=.05)
+            options = dict(sensor_modalities=['finger_tactile_force'], horizon=4, obs_horizon=2,
+                           pad_before=1, pad_after=1, future_force_horizon=4, include_future_force=True)
+            baseline = InterActDexDataset(path, **options)
+            samples = [baseline[i] for i in range(len(baseline))]
+            for divisor in (None, 1.):
+                with self.subTest(divisor=divisor):
+                    if divisor is None:
+                        del source.attrs['tactile_scale_divisor']
+                    else:
+                        source.attrs['tactile_scale_divisor'] = divisor
+                    dataset = InterActDexDataset(path, **options)
+                    self.assertEqual(dataset.episode_store.attrs, dict(source.attrs))
+                    np.testing.assert_array_equal(dataset.episode_store.read('finger_tactile_force', slice(None)), force)
+                    np.testing.assert_array_equal(dataset.sampler.indices, baseline.sampler.indices)
+                    for i, expected in enumerate(samples):
+                        torch.testing.assert_close(dataset[i], expected, rtol=0, atol=0)
+                        rows = dataset.sampler.sample_source_rows(i)[:2]
+                        np.testing.assert_array_equal(dataset[i]['obs']['finger_tactile_force'], force[rows])
+
     def test_point_counts_and_contact_head_boundary(self):
         import zarr
         from dexmani_policy.training.common.data import build_dataset

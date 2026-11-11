@@ -103,8 +103,6 @@ def validate_normalization(cfg, field_dims):
 def validate_config(cfg):
     if not 0 <= cfg.training.max_grad_norm < float("inf"):
         raise ValueError("training.max_grad_norm must be finite and nonnegative")
-    if cfg.get("max_updates") is not None:
-        positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
         positive_int(cfg.training.loop[name], f"training.loop.{name}")
     if cfg.training.lr_warmup_steps < 0:

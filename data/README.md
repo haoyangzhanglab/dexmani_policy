@@ -16,6 +16,8 @@
 
 在仓库根目录执行 `bash scripts/utils/download_pretrained.sh <方法名>`。`dp` 下载 DINOv2；`sat`、`dqrise` 下载 DINOv3；`dexlatent` 额外下载手部先验；`r3d` 下载 Uni3D。`all` 下载这些默认所需权重，可选 SigLIP 需单独使用 `siglip`。更换视觉主干时，同时修改对应配方的编码器配置和 `initialization.rgb`。
 
+DP 也支持 `agent.rgb_backbone_name=resnet`，将 `agent.rgb_backbone_config` 替换为 ResNet 配置，例如 `{model_name: resnet18, tune_mode: freeze, norm_mode: group_norm}`，并设置 `initialization.rgb=DEFAULT` 使用 torchvision 预训练权重。ResNet 支持 `freeze`/`full`，不支持 LoRA；`pretrained + freeze + group_norm` 可用于消融。BN→GN 保留卷积权重，但不保留 BN 统计量和 affine 参数，转换后的表征适用性由研究者判断。恢复和部署使用 checkpoint，无需再次下载。
+
 ## 项目内预训练产物
 
 以下产物由本项目训练产生，不属于外部模型权重：
