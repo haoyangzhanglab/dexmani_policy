@@ -160,3 +160,5 @@ P=258 相对 H=16 或 SAT 的 19 个动作 token 较长，可以实验按帧压�
 各组固定数据、动作表示、encoder、训练步数、采样 NFE 与评测 seed；报告 encoder、
 context prefill、单次 expert forward 和完整 action chunk 延迟。跨论文的模型总参数、
 NFE、动作维度和硬件不同，不能直接据其 FPS 排名选结构。
+
+2026 年正式会议、代码状态与更进一步的候选见[2026 顶会源码复核](2026顶会VLA与WAM优化.md)。
