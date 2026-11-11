@@ -106,10 +106,13 @@ decoder = RectifiedFlow(model=backbone, num_inference_steps=5)
 FFN 中间维度沿用 SmolVLA 的约 8D/3 并向上取整到 256，默认不使用 attention dropout。
 `timestep_embed_dim` 可显式设置；默认与 hidden_dim 相等。
 
-它没有 DiTX 的 `qk_norm`、SAT `action_io` 或 ConsistencyDiTX 的 `target_t`。
-SAT 按关节组织 token，不能直接采用此处的时间 causal 假设；ManiFlow 的一致性目标
-需要另一套双时间条件。因此不应批量替换所有 policy 的 import。普通动作 token 的
-policy 接入时，需要同步改构造器参数，再进行训练和评测。
+当前实现尚未移植 DiTX 的 `action_io` 分支，也没有 `qk_norm` 或
+ConsistencyDiTX 的 `target_t`。这是实现边界，不表示 SAT 与这种 Transformer
+结构不兼容：可以直接复用已有 `SATActionIO.encode/decode_velocity` 协议，
+同时保留它自己的初始化。SAT 编码后的 token 轴是关节，不是时间，因此应采用
+双向关节交互，并单独决定是否使用一维 RoPE；不能原样套用当前时间 causal mask。
+SAT 构造器还传递 `qk_norm`，接入时也需明确处理该参数。ManiFlow 则需要另一套
+双时间条件。具体改进建议与其他小型策略的源码对照见[调研说明](小型VLA与DiT优化.md)。
 
 ## 缓存与验证
 
