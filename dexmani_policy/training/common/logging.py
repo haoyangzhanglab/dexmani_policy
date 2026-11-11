@@ -1,9 +1,7 @@
 import json
 import os
-import sys
 import uuid
 from collections.abc import Mapping
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -65,12 +63,11 @@ class ExperimentLogger:
             self.wandb_run.log(data, step=step)
 
     def close(self):
-        stack = ExitStack()
-        if self.wandb_run is not None:
-            stack.callback(self.wandb_run.finish)
-        stack.callback(self.metrics_file.close)
-        # Forward an active training error through nested cleanup.
-        stack.__exit__(*sys.exc_info())
+        try:
+            self.metrics_file.close()
+        finally:
+            if self.wandb_run is not None:
+                self.wandb_run.finish()
 
 
 def accumulate_metrics(totals, metrics):

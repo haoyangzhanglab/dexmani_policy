@@ -1,8 +1,6 @@
 import copy
 import os
 import signal
-import sys
-from contextlib import ExitStack
 from typing import Any, cast
 
 import hydra
@@ -129,11 +127,10 @@ class PolicyTrainer:
                 model.compile_backbone(mode=mode)
 
     def close(self):
-        stack = ExitStack()
-        stack.callback(self.logger.close)
-        stack.callback(close_data_loader, self.train_loader)
-        # close() can run while the training exception is still active.
-        stack.__exit__(*sys.exc_info())
+        try:
+            close_data_loader(self.train_loader)
+        finally:
+            self.logger.close()
 
     def optimizer_step(self):
         self.last_grad_norm = torch.nn.utils.clip_grad_norm_(

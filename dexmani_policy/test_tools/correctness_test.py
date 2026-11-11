@@ -2,7 +2,7 @@
 import json
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -207,36 +207,20 @@ class CorrectnessTest(unittest.TestCase):
                 self.assertIsNotNone(iterator)
                 self.assertFalse(trainer.model.training)
 
-    def test_cleanup_attempts_all_resources_and_preserves_training_error(self):
+    def test_cleanup_attempts_all_resources(self):
         trainer = PolicyTrainer.__new__(PolicyTrainer)
         trainer.train_loader = Mock()
         trainer.logger = ExperimentLogger.__new__(ExperimentLogger)
-        errors = [RuntimeError(name) for name in ('workers', 'metrics', 'wandb')]
         trainer.logger.metrics_file = Mock()
-        trainer.logger.metrics_file.close.side_effect = errors[1]
+        trainer.logger.metrics_file.close.side_effect = RuntimeError('metrics')
         trainer.logger.wandb_run = Mock()
-        trainer.logger.wandb_run.finish.side_effect = errors[2]
-        for primary in (None, ValueError('training failed')):
-            with self.subTest(primary=primary), patch(
-                'dexmani_policy.training.trainer.close_data_loader', side_effect=errors[0],
-            ) as close_loader:
-                try:
-                    with closing(trainer):
-                        if primary is not None:
-                            raise primary
-                except RuntimeError as error:
-                    self.assertIs(error, errors[2])
-                    if primary is not None:
-                        self.assertIs(error.__context__, errors[1])
-                        self.assertIs(errors[1].__context__, errors[0])
-                        self.assertIs(errors[0].__context__, primary)
-                else:
-                    self.fail('Cleanup errors must propagate')
-                close_loader.assert_called_once_with(trainer.train_loader)
-            trainer.logger.metrics_file.close.assert_called_once()
-            trainer.logger.wandb_run.finish.assert_called_once()
-            trainer.logger.metrics_file.close.reset_mock()
-            trainer.logger.wandb_run.finish.reset_mock()
+        with patch('dexmani_policy.training.trainer.close_data_loader',
+                   side_effect=RuntimeError('workers')) as close_loader:
+            with self.assertRaises(RuntimeError):
+                trainer.close()
+            close_loader.assert_called_once_with(trainer.train_loader)
+        trainer.logger.metrics_file.close.assert_called_once()
+        trainer.logger.wandb_run.finish.assert_called_once()
 
     def test_atomic_publication_and_failure_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,6 +242,24 @@ class CorrectnessTest(unittest.TestCase):
                 temporary.write_bytes(b'new')
             self.assertEqual(path.read_bytes(), b'new')
 
+    def test_simulation_shutdown(self):
+        runner = SimRunner('test', 1, ['joint_state'], {})
+        for early, fail in ((False, False), (True, False), (False, True), (True, True)):
+            env = Mock()
+            env.close.side_effect = RuntimeError('close') if fail else None
+            with self.subTest(early=early, fail=fail), patch.object(runner, 'make_env', return_value=env), \
+                    patch.object(runner, '_run_episode', return_value=(True, 1)), \
+                    patch('dexmani_policy.env_runner.sim_runner.asdict', return_value={}):
+                results = runner.run(Mock(requires_prev_action=False), seeds=[0],
+                                     inference_steps=1, action_steps=1)
+                with self.assertRaisesRegex(RuntimeError, 'close') if fail else nullcontext():
+                    if early:
+                        next(results)
+                        results.close()
+                    else:
+                        self.assertEqual(len(list(results)), 1)
+                env.close.assert_called_once()
+
     def test_simulation_error_survives_close_failure(self):
         runner = SimRunner('test', 1, ['joint_state'], {})
         env = Mock()
@@ -266,14 +268,10 @@ class CorrectnessTest(unittest.TestCase):
         with patch.object(runner, 'make_env', return_value=env), patch.object(
             runner, '_run_episode', side_effect=primary,
         ), patch('dexmani_policy.env_runner.sim_runner.asdict', return_value={}):
-            try:
+            with self.assertLogs(level='ERROR') as logs, self.assertRaisesRegex(ValueError, 'simulation'):
                 list(runner.run(Mock(requires_prev_action=False), seeds=[0],
                                 inference_steps=1, action_steps=1))
-            except RuntimeError as error:
-                self.assertIs(error, cleanup)
-                self.assertIs(error.__context__, primary)
-            else:
-                self.fail('Simulation must fail')
+        self.assertIn('RuntimeError: close', '\n'.join(logs.output))
         env.close.assert_called_once()
 
         class BrokenEnv:
@@ -283,9 +281,9 @@ class CorrectnessTest(unittest.TestCase):
                 raise primary
 
         with patch.dict('sys.modules', {'dexmani_sim': SimpleNamespace(resolve_env_class=lambda _: BrokenEnv)}):
-            with self.assertRaises(RuntimeError) as caught:
+            with self.assertLogs(level='ERROR') as logs, self.assertRaisesRegex(ValueError, 'simulation'):
                 runner.make_env(record_video=False)
-        self.assertIs(caught.exception.__context__, primary)
+        self.assertIn('RuntimeError: close', '\n'.join(logs.output))
         BrokenEnv.close.assert_called_once()
 
     def test_contact_temporary_directory_cleanup(self):

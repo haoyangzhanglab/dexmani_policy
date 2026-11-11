@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -159,7 +160,17 @@ class SimRunner:
                     "total_steps": env.action_cnt,
                     "video": video,
                 }
-        finally:
+        except BaseException as error:
+            if env is not None:
+                try:
+                    env.close()
+                except BaseException:
+                    # Generator.close() is a normal shutdown, so report cleanup failures.
+                    if isinstance(error, GeneratorExit):
+                        raise
+                    logging.exception("Failed to close environment after simulation error")
+            raise
+        else:
             if env is not None:
                 env.close()
 
@@ -173,6 +184,9 @@ class SimRunner:
         try:
             env_class.__init__(env, record_video=record_video, **kwargs)
         except BaseException:
-            env.close()
+            try:
+                env.close()
+            except BaseException:
+                logging.exception("Failed to close environment after initialization error")
             raise
         return env
