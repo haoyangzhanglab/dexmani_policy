@@ -148,16 +148,21 @@ attention workspace 或整个模型显存。
 OMP_NUM_THREADS=1 python -m unittest dexmani_policy.test_tools.dit_test -v
 ```
 
-Python 3.12、PyTorch 2.4.1+cpu、torchvision 0.19.1+cpu、timm 1.0.22：
-9 项回归通过，覆盖普通动作 flow 梯度、时间/观测依赖、因果性与 prefix feature、
+本次整合 main 后，在 Python 3.10.20、PyTorch 2.4.1+cu124、torchvision 0.19.1+cu124、
+timm 1.0.22 环境中使用 CPU 验证：10 项回归通过，覆盖普通动作 flow 梯度、时间/观测依赖、因果性与 prefix feature、
 缓存等价和只读、多步 Euler、BF16 autocast/整模 BF16、SAT 初始化与两步训练、
-双向关节梯度、关节置换等变、帧内观测置换不变与跨帧身份、RTC。
+双向关节梯度、关节置换等变、帧内观测置换不变与跨帧身份、RTC。新增 SAT 的 Hydra
+默认/显式骨干选择和 checkpoint 保存恢复回归；使用真实的小尺寸随机初始化 encoder，
+检查严格权重恢复与非零 velocity 输出一致，旧配方缺少 backbone_type 时仍恢复为 DiTX。
 
-另已检查实际 H=16/P=258/D=768 配置的 BF16 有限输出与缓存等价，以及小型 SAT
+本次另通过 14 项 correctness 回归、现有 DP3/CordViP CPU smoke（各训练 2 步后续训
+2 步，并检查部署输出）、相关 Python 编译及 git diff --check。
+
+历史检查（本次未重跑）：实际 H=16/P=258/D=768 配置的 BF16 有限输出与缓存等价，以及小型 SAT
 模型在 CPU `torch.compile(backend="aot_eager", fullgraph=True)` 下的缓存 forward
 与 action gradient 等价。AOT 图捕获不等于 GPU Inductor 验证。
 
-未运行完整 RGB-point encoder、训练/续训/部署流程、GPU kernel/延迟测量或机器人
+本次未运行 SAT 完整 RGB-point encoder 前向、端到端训练/续训/部署流程、GPU kernel/延迟测量或机器人
 闭环评测。下一步固定数据、encoder、动作表示、训练步数、NFE 和评测 seed，分别
 比较 DiTX 与本版；报告成功率、轨迹质量、encoder/prefill/单步/整 chunk 延迟及峰值显存。
 目标是以更小的动作主干达到可接受或更好的任务表现，不能先验保证“最佳”。

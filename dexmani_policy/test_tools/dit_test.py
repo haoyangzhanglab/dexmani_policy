@@ -1,14 +1,21 @@
 """CPU regressions for the standalone SmolVLA-style action expert."""
 
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import hydra
 import torch
+from omegaconf import OmegaConf
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
+from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, restore_policy, save_checkpoint
+from dexmani_policy.training.common.config import load_policy_config
 
 
 class DiTTest(unittest.TestCase):
@@ -261,6 +268,63 @@ class DiTTest(unittest.TestCase):
             (guided[:, :2] - prefix).square().mean().item(),
             (unguided[:, :2] - prefix).square().mean().item(),
         )
+
+    @torch.no_grad()
+    def test_sat_config_and_checkpoint_round_trip(self):
+        for kind, backbone_class in (("ditx", DiTX), ("dit", DiT)):
+            with self.subTest(backbone=kind):
+                overrides = [] if kind == "ditx" else ["agent.backbone_type=dit"]
+                cfg = load_policy_config("sat", overrides)
+                self.assertEqual(cfg.agent.backbone_type, kind)
+                config = {"agent": OmegaConf.to_container(cfg.agent, resolve=True)}
+                # Real encoder construction with a tiny, randomly initialized ViT.
+                config["agent"].update(
+                    horizon=5, n_action_steps=2, hidden_dim=24, n_layers=2,
+                    n_head=4, timestep_embed_dim=16, p_drop_attn=0.0,
+                    pc_encoder_config=dict(channels=24, num_patches=2, group_size=2,
+                                           depth=1, num_heads=4),
+                    rgb_backbone_name="dino",
+                    rgb_backbone_config=dict(
+                        image_size=[32, 32], tune_mode="full",
+                        architecture=dict(model_type="dinov2", hidden_size=24,
+                                          num_hidden_layers=1, num_attention_heads=4,
+                                          image_size=32, patch_size=16),
+                    ),
+                )
+                policy = hydra.utils.instantiate(config["agent"], _convert_="all").eval()
+                self.assertIsInstance(policy.action_decoder.model, backbone_class)
+                self.assertEqual(policy.action_decoder.time_shift_alpha, 3.0)
+                config["agent"].update(policy.effective_config)
+                self.assertEqual(config["agent"]["backbone_type"], kind)
+                config["normalization_dims"] = {"action": 19}
+                config["normalization"] = {"action": "limits"}
+                policy.configure_normalizer({"action": 19}, {"action": (19,)})
+                torch.nn.init.normal_(
+                    policy.action_decoder.model.action_io.final_layer.ffn_final.fc2.weight,
+                    std=0.02,
+                )
+                actions = torch.randn(2, 5, 19)
+                context = torch.randn(2, 6, policy.obs_encoder.out_dim)
+                expected = policy.action_decoder.model(actions, self.time, context)
+                self.assertGreater(expected.abs().sum().item(), 0)
+                checkpoint = Checkpoint(
+                    global_step=0, model_state=policy.state_dict(), ema_model_state=None,
+                    optimizer_state={}, scheduler_state={}, rng_state={}, effective_config=config,
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    path = save_checkpoint(Path(directory) / "policy.pt", checkpoint)
+                    saved = load_checkpoint(path)
+                recipes = [saved.effective_config]
+                if kind == "ditx":
+                    legacy = copy.deepcopy(saved.effective_config)
+                    del legacy["agent"]["backbone_type"]
+                    recipes.append(legacy)
+                for recipe in recipes:
+                    restored = restore_policy(recipe, saved.model_state, "cpu")
+                    self.assertIsInstance(restored.action_decoder.model, backbone_class)
+                    torch.testing.assert_close(restored.state_dict(), policy.state_dict())
+                    actual = restored.action_decoder.model(actions, self.time, context)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
