@@ -50,6 +50,88 @@ class CorrectnessTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '1024'):
                 CordViPPretrainDataset(path)
 
+    def test_cordvip_pretrain_windows(self):
+        import hydra
+        import zarr
+        from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
+        with tempfile.TemporaryDirectory() as directory:
+            source = zarr.open_group(directory, mode='w')
+            source.create_dataset('meta/episode_ends', data=np.array([6, 12]))
+            shapes = {'joint_state': (19,), 'hand_pointcloud': (7, 3),
+                      'object_pointcloud': (1024, 3), 'contact_map': (1024,)}
+            for key, shape in shapes.items():
+                values = np.broadcast_to(np.arange(12, dtype=np.float32).reshape(
+                    (12,) + (1,) * len(shape)), (12, *shape))
+                source.create_dataset('data/' + key, data=values)
+            for n in range(1, 6):
+                with self.subTest(n=n):
+                    cfg = load_policy_config('pretrain/obs/cordvip', [
+                        f'zarr_path={directory}', f'n_obs_steps={n}'])
+                    dataset = hydra.utils.instantiate(cfg.dataset, _convert_='all')
+                    self.assertEqual(len(dataset), 12)
+                    self.assertEqual(dataset.pad_before, n - 1)
+                    for i in range(12):
+                        rows = np.maximum(np.arange(i - n + 1, i + 1), (i // 6) * 6)
+                        np.testing.assert_array_equal(dataset.sampler.sample_source_rows(i), rows)
+                        sample = dataset[i]
+                        for key, value in {**sample['obs'], 'contact_map': sample['contact_map']}.items():
+                            self.assertEqual(tuple(value.shape), (n, *shapes[key]))
+                            np.testing.assert_array_equal(value, source['data/' + key][:][rows])
+            default = CordViPPretrainDataset(directory)
+            legacy = CordViPPretrainDataset(directory, horizon=4, obs_horizon=4, pad_before=3, pad_after=0)
+            np.testing.assert_array_equal(default.sampler.indices, legacy.sampler.indices)
+            for i in range(len(default)):
+                np.testing.assert_array_equal(default.sampler.sample_source_rows(i), legacy.sampler.sample_source_rows(i))
+            for padding in (0, 1):
+                cfg = load_policy_config('pretrain/obs/cordvip', [
+                    f'zarr_path={directory}', 'dataset.horizon=6',
+                    f'+dataset.pad_before={padding}', '+dataset.pad_after=1'])
+                explicit = hydra.utils.instantiate(cfg.dataset, _convert_='all')
+                self.assertEqual((explicit.pad_before, explicit.pad_after), (padding, 1))
+                np.testing.assert_array_equal(explicit.sampler.sample_source_rows(0),
+                                              np.maximum(np.arange(6) - padding, 0))
+            independent = CordViPPretrainDataset(directory, horizon=6, obs_horizon=2)
+            self.assertEqual(independent.pad_before, 1)
+            self.assertEqual(independent[0]['contact_map'].shape, (2, 1024))
+            with self.assertRaisesRegex(ValueError, 'padding'):
+                CordViPPretrainDataset(directory, horizon=2, obs_horizon=2, pad_before=3)
+
+    def test_evaluation_without_environment_report(self):
+        from dexmani_policy.evaluation.rollout import evaluate_policy
+        observation = {'joint_state': np.zeros(19, np.float32)}
+        envs = [SimpleNamespace(action_cnt=1, reset=Mock(return_value=(observation, {})),
+                    step=Mock(return_value=(observation, 0, True, False,
+                              {'success': success, 'success_condition': success})), close=Mock())
+                for success in (True, False)]
+        agent = torch.nn.Linear(1, 1)
+        agent.n_obs_steps = agent.n_action_steps = agent.future_steps = 1
+        agent.requires_prev_action = False
+        agent.normalization_dims = {'joint_state': 19}
+        agent.force_predictor = SimpleNamespace(num_inference_steps=7)
+        cfg = dict(env_runner=dict(task_name='test', env_rebuild_interval=1),
+                   eval=dict(use_ema=False, inference_steps=2), dataset={},
+                   normalization_dims=agent.normalization_dims)
+        loaded = SimpleNamespace(effective_config=cfg, model_state={}, global_step=10)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / 'candidate.pt'
+            checkpoint.touch()
+            with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
+                    patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
+                    patch.object(SimRunner, 'make_env', side_effect=envs), \
+                    patch.object(SimRunner, 'predict_action_chunk', return_value=np.zeros((1, 19))):
+                result, path = evaluate_policy(checkpoint, seeds=[11, 22], device='cpu', video=False,
+                                               output_dir=Path(directory) / 'eval')
+            self.assertEqual(result, json.loads(path.read_text()))
+            self.assertTrue({'runner_options', 'environment', 'runtime'}.isdisjoint(result))
+            self.assertEqual(result['seeds'], [11, 22])
+            self.assertEqual(result['statistics']['success_rate'], .5)
+            self.assertEqual(result['statistics']['avg_steps'], 1)
+            self.assertEqual(result['force_inference_steps'], 7)
+            self.assertEqual((result['global_step'], result['weights'], result['inference_steps']), (10, 'raw', 2))
+            for env, seed in zip(envs, result['seeds']):
+                env.reset.assert_called_once_with(seed=seed)
+                env.close.assert_called_once()
+
     def test_sampling_position(self):
         sampler = EpochBatchSampler(range(10), 2, False, shuffle=True, seed=42)
         for step in range(7):
@@ -248,8 +330,7 @@ class CorrectnessTest(unittest.TestCase):
             env = Mock()
             env.close.side_effect = RuntimeError('close') if fail else None
             with self.subTest(early=early, fail=fail), patch.object(runner, 'make_env', return_value=env), \
-                    patch.object(runner, '_run_episode', return_value=(True, 1)), \
-                    patch('dexmani_policy.env_runner.sim_runner.asdict', return_value={}):
+                    patch.object(runner, '_run_episode', return_value=(True, 1)):
                 results = runner.run(Mock(requires_prev_action=False), seeds=[0],
                                      inference_steps=1, action_steps=1)
                 with self.assertRaisesRegex(RuntimeError, 'close') if fail else nullcontext():
@@ -267,7 +348,7 @@ class CorrectnessTest(unittest.TestCase):
         env.close.side_effect = cleanup
         with patch.object(runner, 'make_env', return_value=env), patch.object(
             runner, '_run_episode', side_effect=primary,
-        ), patch('dexmani_policy.env_runner.sim_runner.asdict', return_value={}):
+        ):
             with self.assertLogs(level='ERROR') as logs, self.assertRaisesRegex(ValueError, 'simulation'):
                 list(runner.run(Mock(requires_prev_action=False), seeds=[0],
                                 inference_steps=1, action_steps=1))

@@ -71,11 +71,11 @@ bash scripts/training/train.sh dp3 task_name=pick_apple_messy hydra.run.dir="$RU
 python -m dexmani_policy.training.common.resume --run "$RUN"
 ```
 
-新实验使用新目录。省略 `hydra.run.dir` 时自动生成带时间标识的目录。`config.yaml` 记录初始配置快照；checkpoint 的 `effective_config` 是恢复训练的权威配方，`metrics.jsonl` 只追加指标，恢复不解析或裁剪旧内容（允许坏行、残行和重复 step），`checkpoints/` 保存完整训练状态和 `latest.pt`。默认 W&B 为离线模式，可用 `workspace.wandb_cfg=null` 关闭。
+新实验使用新目录。省略 `hydra.run.dir` 时自动生成带时间标识的目录。`config.yaml` 记录初始配置快照，续训时保留原文件；checkpoint 的 `effective_config` 是恢复训练的权威配方，`metrics.jsonl` 只追加指标，恢复不解析或裁剪旧内容（允许坏行、残行和重复 step），`checkpoints/` 保存完整训练状态和 `latest.pt`。默认 W&B 为离线模式，可用 `workspace.wandb_cfg=null` 关闭。
 
 Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。只检查必要的模型输入和动作维度，不比较数据内容、episode 布局或新旧 metadata。允许同 shape 的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
 
-续训恢复 raw/EMA、优化器、学习率调度器、步数和随机数状态；本地日志回退到 checkpoint 步数后继续追加。`--max-updates 100` 只限制本次续训执行量，不修改总预算。多进程数据增强的 worker 状态不在 checkpoint 中，因此不承诺跨中断逐位复现。
+续训恢复 raw/EMA、优化器、学习率调度器、步数和随机数状态。`--max-updates 100` 只限制本次续训执行量，不修改总预算。多进程数据增强的 worker 状态不在 checkpoint 中，因此不承诺跨中断逐位复现。
 
 常用配置的含义：
 

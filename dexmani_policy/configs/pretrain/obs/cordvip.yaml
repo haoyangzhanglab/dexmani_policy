@@ -15,8 +15,6 @@ dataset:
   zarr_path: ${zarr_path}
   horizon: ${n_obs_steps}
   obs_horizon: ${n_obs_steps}
-  pad_before: 3
-  pad_after: 0
   seed: 42
   val_episodes: 0
   max_train_episodes: null

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +30,6 @@ class SimRunner:
 
         self.obs_buffer: dict[str, np.ndarray] = {}
         self.obs_cursor = 0
-        self.environment: dict[str, Any] = {}
 
     def update_obs(self, observation: dict[str, np.ndarray]):
         position = self.obs_cursor % self.n_obs_steps
@@ -118,7 +116,6 @@ class SimRunner:
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
         if agent.requires_prev_action and action_steps != agent.n_action_steps:
             raise ValueError("ODE execution requires action_steps == n_action_steps")
-        self.environment = {}
         unsupported = (TACTILE_FEATURE_SHAPES.keys() & set(self.sensor_modalities)) - {"finger_tactile_force"}
         if unsupported:
             raise ValueError(f"Sim has no dense tactile producer for: {sorted(unsupported)}")
@@ -132,15 +129,6 @@ class SimRunner:
                         previous, env = env, None
                         previous.close()
                     env = self.make_env(record_video=video_save_dir is not None)
-                    if index == 0:
-                        self.environment = {
-                            "control_dt_s": env.dt,
-                            "frame_skip": env.frame_skip,
-                            "action_cnt_limit": env.action_cnt_limit,
-                            "success_hold_steps": env.success_hold_steps,
-                            "randomization": asdict(env.randomization),
-                            "stability": asdict(env.stability),
-                        }
 
                 success, steps = self._run_episode(
                     agent, env, seed, inference_steps, action_steps=action_steps

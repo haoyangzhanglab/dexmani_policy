@@ -10,12 +10,13 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
 
     def __init__(self, zarr_path, *, seed=42, val_episodes=0,
                  max_train_episodes=None, horizon=4,
-                 obs_horizon=4, pad_before=3, pad_after=0):
+                 obs_horizon=4, pad_before=None, pad_after=0):
         if not 1 <= obs_horizon <= horizon:
             raise ValueError("obs_horizon must satisfy 1 <= N <= horizon")
         buffer = EpisodeStore(zarr_path, keys=(*self.sensor_modalities, "contact_map"))
         self.horizon, self.obs_horizon = horizon, obs_horizon
-        self.pad_before, self.pad_after = pad_before, pad_after
+        self.pad_before = obs_horizon - 1 if pad_before is None else pad_before
+        self.pad_after = pad_after
         for key in self.sensor_modalities[:2]:
             shape = buffer[key].shape
             if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
