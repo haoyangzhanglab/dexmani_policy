@@ -30,6 +30,13 @@ class DiTTest(unittest.TestCase):
         self.context = torch.randn(2, 6, 7)
         self.time = torch.tensor([0.2, 0.7])
 
+    def test_backbones_reject_condition_batch_broadcast(self):
+        for cls in (DiT, DiTX):
+            model = cls(horizon=5, action_dim=3, n_obs_steps=2, obs_token_dim=7,
+                        hidden_dim=24, n_head=4, n_layers=2)
+            with self.assertRaisesRegex(ValueError, 'same batch size'):
+                model(self.actions, self.time, self.context[:1])
+
     def test_conditioning_and_flow_gradients(self):
         actions = self.actions.clone().requires_grad_()
         context = self.context.clone().requires_grad_()
@@ -313,17 +320,11 @@ class DiTTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     path = save_checkpoint(Path(directory) / "policy.pt", checkpoint)
                     saved = load_checkpoint(path)
-                recipes = [saved.effective_config]
-                if kind == "ditx":
-                    legacy = copy.deepcopy(saved.effective_config)
-                    del legacy["agent"]["backbone_type"]
-                    recipes.append(legacy)
-                for recipe in recipes:
-                    restored = restore_policy(recipe, saved.model_state, "cpu")
-                    self.assertIsInstance(restored.action_decoder.model, backbone_class)
-                    torch.testing.assert_close(restored.state_dict(), policy.state_dict())
-                    actual = restored.action_decoder.model(actions, self.time, context)
-                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                restored = restore_policy(saved.effective_config, saved.model_state, "cpu")
+                self.assertIsInstance(restored.action_decoder.model, backbone_class)
+                torch.testing.assert_close(restored.state_dict(), policy.state_dict())
+                actual = restored.action_decoder.model(actions, self.time, context)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

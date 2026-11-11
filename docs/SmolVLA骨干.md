@@ -83,7 +83,7 @@ FlashAttention 已启用或 GPU 已加速。参见
 
 ## 配置与接入
 
-SAT 增加 `backbone_type: ditx | dit`，默认 ditx，已有配方和 checkpoint 可继续使用。
+SAT 使用 `backbone_type: ditx | dit` 选择骨干，默认 ditx。
 `effective_config` 会记录所选骨干。新实验只需：
 
 ```bash
@@ -148,7 +148,7 @@ timm 1.0.22 环境中使用 CPU 验证：10 项回归通过，覆盖普通动作
 缓存等价和只读、多步 Euler、BF16 autocast/整模 BF16、SAT 初始化与两步训练、
 双向关节梯度、关节置换等变、帧内观测置换不变与跨帧身份、RTC。新增 SAT 的 Hydra
 默认/显式骨干选择和 checkpoint 保存恢复回归；使用真实的小尺寸随机初始化 encoder，
-检查严格权重恢复与非零 velocity 输出一致，旧配方缺少 backbone_type 时仍恢复为 DiTX。
+检查两种骨干的当前配方、严格权重恢复与非零 velocity 输出一致。
 
 PR 整合时另通过 14 项 correctness 回归、现有 DP3/CordViP CPU smoke（各训练 2 步后续训
 2 步，并检查部署输出）、相关 Python 编译及 git diff --check。

@@ -107,7 +107,7 @@ class PolicyTrainer:
 
         print_param_count(model)
         print_training_recipe(self.cfg, batches_per_epoch=self.batches_per_epoch)
-        self.logger = ExperimentLogger(**cfg.workspace, resume_step=self.global_step if checkpoint is not None else None)
+        self.logger = ExperimentLogger(**cfg.workspace, resuming=checkpoint is not None)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
             self.logger.save_config(self.cfg)

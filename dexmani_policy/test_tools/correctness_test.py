@@ -308,6 +308,58 @@ class CorrectnessTest(unittest.TestCase):
             self.assertEqual(zarr.open_group(str(root / 'output.zarr'))['data/contact_map'].shape, (1, 1024))
             self.assertFalse(list(root.glob('.contact-*')))
 
+    def test_resume_logger_preserves_history_and_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = b'{"step": 999}\ninvalid\n{"step": 1}\n{"partial":'
+            (root / 'metrics.jsonl').write_bytes(history)
+            (root / 'config.yaml').write_text('original: true\n')
+            with closing(ExperimentLogger(directory, resuming=True, wandb_enabled=False)) as logger:
+                logger.save_config(OmegaConf.create({'original': False}))
+                self.assertEqual((root / 'metrics.jsonl').read_bytes(), history)
+                logger.log({'loss': 2}, 1)
+            self.assertEqual((root / 'metrics.jsonl').read_bytes(), history + b'{"step": 1, "loss": 2}\n')
+            self.assertEqual((root / 'config.yaml').read_text(), 'original: true\n')
+            with closing(ExperimentLogger(directory, resuming=True, wandb_enabled=False)) as logger:
+                with patch.object(logger.metrics_file, 'write', side_effect=OSError('disk full')):
+                    with self.assertRaises(OSError):
+                        logger.log({'loss': 1}, 2)
+
+    def test_selection_only_requires_same_task(self):
+        from dexmani_policy.evaluation.seeds import split_evaluation_seeds
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoints = [root / 'a.pt', root / 'b.pt']
+            for checkpoint in checkpoints:
+                checkpoint.touch()
+            configs = [SimpleNamespace(effective_config={'env_runner': {
+                'task_name': 'test', 'env_kwargs': {'friction': value}}}) for value in (0.1, 0.9)]
+            calls = []
+            def evaluate(checkpoint, **kwargs):
+                calls.append((Path(checkpoint).resolve(), kwargs))
+                return dict(statistics=dict(success_rate=1, avg_steps=2),
+                            global_step=1 if Path(checkpoint).resolve() == checkpoints[0] else 2,
+                            weights='raw', inference_steps=3, action_steps=2), kwargs['output_dir'] / 'result.json'
+            with patch('dexmani_policy.evaluation.selection.load_checkpoint', side_effect=configs), \
+                    patch('dexmani_policy.evaluation.selection.load_seed_pool', return_value=list(range(10))), \
+                    patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=evaluate):
+                result = run_pipeline(checkpoints, selection_episodes=2, test_episodes=3,
+                                      seed=42, output_dir=root / 'eval')
+            test, selection = split_evaluation_seeds(list(range(10)), 42, 3, 2)
+            self.assertFalse(set(test) & set(selection))
+            self.assertEqual([item[1]['seeds'] for item in calls], [selection, selection, test])
+            self.assertEqual([item[0] for item in calls], [*checkpoints, checkpoints[1]])
+            self.assertIsNone(calls[0][1]['weights'])
+            self.assertIsNone(calls[1][1]['inference_steps'])
+            self.assertEqual(calls[2][1]['inference_steps'], 3)
+            self.assertEqual(json.loads(result.read_text())['global_step'], 2)
+            configs[1].effective_config['env_runner']['task_name'] = 'other'
+            with patch('dexmani_policy.evaluation.selection.load_checkpoint', side_effect=configs), \
+                    patch('dexmani_policy.evaluation.selection.evaluate_policy') as evaluate:
+                with self.assertRaisesRegex(ValueError, 'task_name'):
+                    run_pipeline(checkpoints)
+                evaluate.assert_not_called()
+
     def test_logger_rejects_nonfinite(self):
         with tempfile.TemporaryDirectory() as directory:
             with closing(ExperimentLogger(directory, wandb_enabled=False)) as logger:

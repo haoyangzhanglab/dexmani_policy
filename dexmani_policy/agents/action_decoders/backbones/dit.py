@@ -14,8 +14,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.common.config import positive_int
-
 from .modules import WEIGHT_INIT_STD, add_temporal_embedding, batch_timesteps
 
 
@@ -177,25 +175,23 @@ class DiT(nn.Module):
         self_attn_every_n_layers: int = 2,
     ) -> None:
         super().__init__()
-        for name, value in (
-            ("horizon", horizon), ("action_dim", action_dim), ("n_obs_steps", n_obs_steps),
-            ("obs_token_dim", obs_token_dim), ("n_layers", n_layers), ("hidden_dim", hidden_dim),
-            ("n_head", n_head), ("n_kv_head", n_kv_head),
-            ("self_attn_every_n_layers", self_attn_every_n_layers),
-        ):
-            positive_int(value, name)
+        if n_layers <= 0 or self_attn_every_n_layers <= 0:
+            raise ValueError("n_layers and self_attn_every_n_layers must be positive")
+        if n_head <= 0 or n_kv_head <= 0:
+            raise ValueError("attention head counts must be positive")
         if n_head % n_kv_head:
             raise ValueError("n_head must be divisible by n_kv_head")
         if head_dim is None:
             if hidden_dim % n_head:
                 raise ValueError("hidden_dim must be divisible by n_head when head_dim is omitted")
             head_dim = hidden_dim // n_head
-        positive_int(head_dim, "head_dim")
+        if head_dim <= 0:
+            raise ValueError("head_dim must be positive")
         if action_io is None and head_dim % 2:
             raise ValueError("head_dim must be even for RoPE")
         timestep_embed_dim = hidden_dim if timestep_embed_dim is None else timestep_embed_dim
-        if positive_int(timestep_embed_dim, "timestep_embed_dim") % 2:
-            raise ValueError("timestep_embed_dim must be even")
+        if timestep_embed_dim <= 0 or timestep_embed_dim % 2:
+            raise ValueError("timestep_embed_dim must be positive and even")
         if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be finite and positive")
         if not 0 <= p_drop_attn < 1:
@@ -205,10 +201,6 @@ class DiT(nn.Module):
         if intermediate_dim == 0:
             raise ValueError("hidden_dim and mlp_ratio produce an empty MLP")
 
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.n_obs_steps = n_obs_steps
-        self.obs_token_dim = obs_token_dim
         self.action_io = action_io
         if action_io is None:
             self.input_embedder = nn.Linear(action_dim, hidden_dim)
@@ -255,8 +247,6 @@ class DiT(nn.Module):
         return tuple(block.prepare_context_kv(context) for block in self.dit_blocks)
 
     def forward(self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None):
-        if x.ndim != 3 or x.shape[1:] != (self.horizon, self.action_dim):
-            raise ValueError("actions must have shape [B, horizon, action_dim]")
         hidden = self._forward_hidden(x, timestep, context, context_kv=context_kv)
         if self.action_io is not None:
             return self.action_io.decode_velocity(hidden)

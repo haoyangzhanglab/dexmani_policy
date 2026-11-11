@@ -5,8 +5,6 @@ from torch import nn
 from torch.nn import functional as F
 from timm.models.vision_transformer import Mlp, RmsNorm
 
-from dexmani_policy.common.config import positive_int
-
 from .modules import (
     TimestepMLP,
     WEIGHT_INIT_STD,
@@ -177,12 +175,6 @@ class DiTX(nn.Module):
         action_io: nn.Module | None = None,
     ) -> None:
         super().__init__()
-        positive_int(n_obs_steps, "n_obs_steps")
-
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.n_obs_steps = n_obs_steps
-        self.obs_token_dim = obs_token_dim
 
         self.action_io = action_io
         if self.action_io is None:
@@ -242,8 +234,6 @@ class DiTX(nn.Module):
     def forward(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
     ) -> torch.Tensor:
-        if x.ndim != 3 or x.shape[1] != self.horizon:
-            raise ValueError("actions must have shape [B, horizon, action_dim]")
         hidden = self._forward_hidden(x, timestep, context, context_kv=context_kv)
         if self.action_io is None:
             return self.final_layer(hidden)
@@ -290,12 +280,6 @@ class ConsistencyDiTX(nn.Module):
         pre_norm_modality: bool = False,
     ):
         super().__init__()
-        positive_int(n_obs_steps, "n_obs_steps")
-
-        self.horizon = horizon
-        self.n_obs_steps = n_obs_steps
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
 
         self.pre_norm_modality = pre_norm_modality
 
@@ -310,7 +294,7 @@ class ConsistencyDiTX(nn.Module):
         self.timestep_embedder = TimestepMLP(pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
         self.target_t_embedder = TimestepMLP(pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
 
-        self.timestep_and_target_t_fusion = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+        self.timestep_and_target_t_fusion = nn.Linear(hidden_dim * 2, hidden_dim)
 
         self.ditx_blocks = nn.ModuleList(
             [

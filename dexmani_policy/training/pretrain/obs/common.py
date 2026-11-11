@@ -202,7 +202,7 @@ def train(method, model_class, argv=None):
     if resuming:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace, resume_step=step if resuming else None)
+    logger = ExperimentLogger(**cfg.workspace, resuming=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
     stop_requested = False

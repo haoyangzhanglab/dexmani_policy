@@ -162,7 +162,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 
 续训恢复 checkpoint 保存的训练配方与状态，不再次传入方法名或模型配置。`--` 后传续训入口的运行参数，例如 `--num-workers`；可追加 `--max-updates 100` 限制本次执行步数，不改变实验总预算。
 
-`metrics.jsonl` 仅保留步数不超过 checkpoint 的完整记录，再继续追加；崩溃前已写入但尚未保存到 checkpoint 的更新记录会被移除。保留部分中完整行的损坏 JSON 会明确报错。
+`metrics.jsonl` 只追加当前指标，恢复时不读取、修复或截断历史。旧坏行、崩溃残行、重复或回退后的 step 均保留，不保证整个历史可完整解析；实际写入失败仍报错。初始 config.yaml 不被覆盖，checkpoint.effective_config 是恢复配方。
 
 需要前台续训时，在 `--` 前加入 `--fg`。源码仍由启动脚本同步，数据沿用已准备的远端目录。
 
