@@ -9,6 +9,7 @@ import hydra
 import torch
 from omegaconf import OmegaConf, open_dict
 
+from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import set_project_root
 from dexmani_policy.common.normalizer import normalization_feature_shapes, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import set_seed
@@ -29,7 +30,7 @@ def _train(cfg):
 def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
     method = cfg.policy_name
     if checkpoint is not None and field_dims != cfg.normalization_dims:
-        raise ValueError("Resume data/model mismatch: normalization_dims")
+        raise ValueError("Checkpoint data/model mismatch: normalization_dims")
 
     codebook = hand_affine = None
     if checkpoint is None and method == "dqrise":
@@ -58,8 +59,6 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
             hand_affine = model.hand_prior.initialize_weights(cfg.initialization.dexlatent)
         elif method in {"afro", "cordvip"}:
             source = cfg.initialization.encoder
-            if source is None and method == "afro" and model.freeze_visual:
-                raise ValueError("AFRO frozen visual requires initialization.encoder; scratch requires freeze_visual=false")
             if source is not None:
                 payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
                 encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
@@ -72,14 +71,12 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
                         cfg.normalization[key] = payload["normalization"][key]
                 inherited_fields = tuple(key for key in inherited_fields if cfg.normalization[key] == "limits")
                 del payload
-    validate_normalization(cfg)
-    model.configure_normalizer(
-        field_dims,
-        normalization_feature_shapes(field_dims, cfg.normalization),
-    )
+    validate_normalization(cfg, field_dims)
+    feature_shapes = normalization_feature_shapes(field_dims, cfg.normalization)
+    model.configure_normalizer(field_dims, feature_shapes)
     if checkpoint is None:
         fit_normalizer(
-            dataset, cfg.normalization, model.normalizer, initial_state=pretrained_state,
+            dataset, model.normalizer, feature_shapes, initial_state=pretrained_state,
             inherited_fields=inherited_fields, hand_affine=hand_affine,
         )
         print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
@@ -96,11 +93,42 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
 
 def build_trainer(cfg, *, checkpoint=None):
     cfg = copy.deepcopy(cfg)
+    source = cfg.initialization.policy
+    if checkpoint is not None and source is not None:
+        raise ValueError("initialization.policy and resume are mutually exclusive")
+    model_checkpoint = checkpoint
+    if source is not None:
+        model_checkpoint = load_checkpoint(Path(source).expanduser())
+        saved = model_checkpoint.effective_config
+        if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
+            raise ValueError("Policy initialization requires the same policy and action semantics")
+        with open_dict(cfg):
+            cfg.normalization = saved["normalization"]
+            cfg.normalization_dims = saved["normalization_dims"]
+            if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
+                if cfg.agent.rgb_backbone_name != saved["agent"]["rgb_backbone_name"]:
+                    raise ValueError("RGB backbone differs from initialization policy")
+                rgb = dict(cfg.agent.get("rgb_backbone_config") or {})
+                if rgb.get("architecture") is None:
+                    architecture = saved["agent"]["rgb_backbone_config"].get("architecture")
+                    if architecture is not None:
+                        rgb["architecture"] = architecture
+                cfg.agent.rgb_backbone_config = rgb
+            if cfg.policy_name == "dqrise" and cfg.agent.get("num_codes") is None:
+                cfg.agent.num_codes = saved["agent"]["num_codes"]
+            if cfg.policy_name == "adaptac":
+                tactile = cfg.agent.tactile_encoder
+                saved_tactile = saved["agent"]["tactile_encoder"]
+                if tactile._target_ != saved_tactile["_target_"]:
+                    raise ValueError("Tactile encoder differs from initialization policy")
+                if "region_ids" in saved_tactile and tactile.get("region_ids") is None:
+                    tactile.region_ids = saved_tactile["region_ids"]
+            cfg.initialization.policy = None
     if checkpoint is None:
         prepare_training(cfg)
     else:
         validate_config(cfg)
-    set_seed(cfg.training.seed)
+    set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
     with open_dict(cfg):
@@ -108,7 +136,7 @@ def build_trainer(cfg, *, checkpoint=None):
         cfg.dataset.zarr_path = cfg.zarr_path
         if checkpoint is None:
             cfg.deployment_metadata = data_description["deployment_metadata"]
-    model = _prepare_policy(cfg, dataset, data_description["field_dims"], checkpoint=checkpoint)
+    model = _prepare_policy(cfg, dataset, data_description["field_dims"], checkpoint=model_checkpoint)
     if checkpoint is None:
         with open_dict(cfg):
             cfg.pop("max_updates", None)

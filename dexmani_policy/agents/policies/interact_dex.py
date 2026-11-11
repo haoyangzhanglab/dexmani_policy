@@ -96,8 +96,6 @@ class InterActDex(Policy):
                  num_inference_steps=10, future_force_loss_weight=0.1, future_force_loss_beta=1.0,
                  future_force_horizon=8, time_shift_alpha=1.0):
         positive_int(future_force_horizon, "future_force_horizon")
-        if future_force_horizon > horizon - n_obs_steps + 1:
-            raise ValueError("future_force_horizon exceeds future actions")
         if not math.isfinite(future_force_loss_weight) or future_force_loss_weight < 0:
             raise ValueError("future_force_loss_weight must be finite and non-negative")
         if not math.isfinite(future_force_loss_beta) or future_force_loss_beta <= 0:
@@ -137,13 +135,6 @@ class InterActDex(Policy):
         self.future_force_loss_beta = future_force_loss_beta
         self.future_force_horizon = future_force_horizon
         self.future_force_head = FutureForceHead(n_obs_steps) if future_force_loss_weight > 0 else None
-
-    @property
-    def effective_config(self):
-        return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha,
-                "future_force_loss_weight": self.future_force_loss_weight,
-                "future_force_loss_beta": self.future_force_loss_beta,
-                "future_force_horizon": self.future_force_horizon}
 
     def configure_normalizer(self, feature_dims, feature_shapes):
         if TACTILE_FEATURE_SHAPES.keys() & feature_dims.keys() != {"finger_tactile_force"}:

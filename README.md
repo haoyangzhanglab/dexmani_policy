@@ -57,7 +57,7 @@ DP3、ODE、ManiFlow、CordViP、AdapTac 和 InterAct-Dex 可直接从示教训�
 | DP | `bash scripts/utils/download_pretrained.sh dp`：DINOv2 |
 | SAT / DexLatent / R3D | 将脚本参数换成 `sat` / `dexlatent` / `r3d`；分别准备 DINOv3、DINOv3 + 手部先验、Uni3D |
 | DQ-RISE | `download_pretrained.sh dqrise` 准备 DINOv3；另外提供 `initialization.codebook`，见[手部动作表示](docs/手部动作表示.md) |
-| AFRO | 提供 `initialization.encoder`；从头训练时显式设置 `agent.freeze_visual=false` |
+| AFRO | 可选 `initialization.encoder`；允许随机初始化后冻结，也可设置 `agent.freeze_visual=false` |
 | CordViP | 使用包含手点云、物体点云、joint_state、action 的 `.cordvip.zarr`，可直接训练；预训练编码器可用 `initialization.encoder` 加载 |
 
 AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/观测预训练.md)。外部权重与可选主干见 [data/README](data/README.md)。完整 checkpoint 已包含部署所需权重和归一化参数，续训、推理不再读取初始化文件。
@@ -67,7 +67,7 @@ AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/�
 ```bash
 RUN="$PWD/experiments/train/dp3/pick_apple_messy/run_01"
 bash scripts/training/train.sh dp3 task_name=pick_apple_messy hydra.run.dir="$RUN"
-# 中断后在同一输出目录恢复；总预算继续使用 checkpoint 中的配方。
+# 中断后在同一输出目录恢复；默认沿用 checkpoint 总预算，可用 --total-steps 延长。
 python -m dexmani_policy.training.common.resume --run "$RUN"
 ```
 
@@ -75,7 +75,22 @@ python -m dexmani_policy.training.common.resume --run "$RUN"
 
 Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。只检查必要的模型输入和动作维度，不比较数据内容、episode 布局或新旧 metadata。允许同 shape 的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
 
-续训恢复 raw/EMA、优化器、学习率调度器、步数和随机数状态。`--max-updates 100` 只限制本次续训执行量，不修改总预算。多进程数据增强的 worker 状态不在 checkpoint 中，因此不承诺跨中断逐位复现。
+续训恢复 raw/EMA、优化器、学习率调度器、步数和 normalizer。`--max-updates 100` 只限制本次续训执行量，不修改总预算。恢复使用 seed + global_step 开始新的随机过程和数据遍历，不恢复旧 batch、RNG 或 worker 状态，不承诺逐位复现。
+
+延长预算先更新调度器的总预算，再按累计步数恢复 LR；已结束的实验也可继续：
+
+```bash
+python -m dexmani_policy.training.common.resume --run "$RUN" --total-steps 150000 --max-updates 100
+# 更改 LR、loss 系数、batch size 或冻结策略，使用新目录初始化实验。
+bash scripts/training/train.sh dp3 initialization.policy="$RUN/checkpoints/latest.pt" \
+  optimizer.lr=5e-5 hydra.run.dir="$PWD/experiments/train/dp3/initialized_run"
+```
+
+`initialization.policy` 使用来源 raw 权重和配套 normalizer，补齐构造需要的 architecture、num_codes 等信息；不读取原始预训练文件，不重新拟合归一化。当前配方必须保持同结构；optimizer、scheduler 和 EMA 新建，step 从 0 开始。它与 resume 互斥，不支持 LoRA/非 LoRA 结构转换或部分权重加载。
+
+normalization 可以包含未使用字段，实际使用字段仍必须提供正确模式；这不使 encoder 自动适配缺失模态。梯度累积对本组 microbatch 等权平均，接受尾批较小 microbatch 的样本权重略高。训练采用标准流式 DataLoader，不缓存整轮 batch。
+
+本次简化不维护旧 checkpoint、旧实验配置和报告的兼容性；不提供迁移工具。原始数据与第三方预训练权重格式不变。
 
 常用配置的含义：
 
@@ -98,6 +113,8 @@ bash scripts/eval/eval_pipeline.sh \
   --checkpoints "$RUN/checkpoints/step_00020000.pt" "$RUN/checkpoints/step_00040000.pt" \
   --selection-episodes 25 --test-episodes 100
 ```
+
+默认不录像；快速实验使用 `--episodes 5`，需要录像时显式加 `--video`。pipeline 的 `--video` 仅用于胜者 test。
 
 将候选替换为实际存在的 checkpoint。默认每个候选使用自己的 raw/EMA、推理步数和执行长度；只有显式传 `--weights`、`--inference-steps` 或 `--action-steps` 才统一对应项。胜者在独立 test 回合继续使用选模时的实际设置，结果文件记录这些设置。跨方法比较的条件见[仿真评测机制](docs/仿真评测机制.md)。
 

@@ -15,6 +15,9 @@ dataset:
   val_episodes: 0
   max_train_episodes: null
 
+initialization:
+  policy: null
+
 normalization:
   action: limits
 

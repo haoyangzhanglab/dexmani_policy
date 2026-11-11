@@ -201,13 +201,11 @@ def train(cfg):
             file.write(json.dumps({"epoch": epoch, **metrics}, allow_nan=False) + "\n")
 
         checkpoint_paths = []
-        if epoch % recipe.save_epochs == 0 and epoch != recipe.num_epochs:
-            checkpoint_paths.append(checkpoint_dir / f"epoch_{epoch:04d}.pt")
+        if epoch % recipe.save_epochs == 0 or epoch == recipe.num_epochs:
+            checkpoint_paths.append(checkpoint_dir / "last.pt")
         if val_loader is not None and metrics["val_lookup_mse"] < best_lookup_mse:
             best_lookup_mse = metrics["val_lookup_mse"]
             checkpoint_paths.append(checkpoint_dir / "best.pt")
-        if epoch == recipe.num_epochs:
-            checkpoint_paths.append(checkpoint_dir / "last.pt")
         if checkpoint_paths:
             payload = {
                 "epoch": int(epoch),

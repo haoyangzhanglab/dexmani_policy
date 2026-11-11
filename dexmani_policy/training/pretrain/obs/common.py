@@ -17,7 +17,7 @@ from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rn
 from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.data import (
-    build_train_loader, close_data_loader, epoch_position, fit_normalizer,
+    build_train_loader, close_data_loader, fit_normalizer,
 )
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
@@ -34,6 +34,7 @@ def load_run(method, argv=None):
     parser.add_argument("--zarr-path")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--max-updates", type=int)
+    parser.add_argument("--total-steps", type=int)
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args(argv)
     checkpoint = None
@@ -53,6 +54,10 @@ def load_run(method, argv=None):
         cfg = load_policy_config(args.config or f"pretrain/obs/{method}", args.overrides)
         if args.output_dir is not None:
             cfg.workspace.output_dir = args.output_dir
+    if args.total_steps is not None:
+        if checkpoint is None:
+            parser.error("--total-steps requires --resume-from")
+        cfg.training.loop.total_train_steps = positive_int(args.total_steps, "total_steps")
     if args.no_wandb:
         with open_dict(cfg):
             cfg.workspace.wandb_enabled = False
@@ -96,7 +101,7 @@ def save_run(model, optimizer, scheduler, cfg, step):
     checkpoint = {
         "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict(), "global_step": step,
-        "rng_state": get_rng_state(cfg.training.device), "effective_config": config,
+        "effective_config": config,
     }
     checkpoint_dir = output / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -105,14 +110,13 @@ def save_run(model, optimizer, scheduler, cfg, step):
     return checkpoint
 
 
-def restore_run(model, optimizer, scheduler, checkpoint) -> int:
+def restore_run(model, optimizer, checkpoint) -> int:
     # The optimizer already owns these Parameters, so restore their values in place.
     model.load_state_dict(checkpoint["model_state"], strict=True)
     validate_normalizer_state(model.normalizer)
     if optimizer.param_groups[0]["param_names"] != checkpoint["optimizer_state"]["param_groups"][0]["param_names"]:
         raise ValueError("Optimizer parameter order changed")
     optimizer.load_state_dict(checkpoint["optimizer_state"])
-    scheduler.load_state_dict(checkpoint["scheduler_state"])
     return checkpoint["global_step"]
 
 
@@ -164,7 +168,7 @@ def train(method, model_class, argv=None):
         positive_int(cfg.training.loop.total_train_steps, "training.loop.total_train_steps")
         positive_int(cfg.training.loop.gradient_accumulation_steps, "training.loop.gradient_accumulation_steps")
 
-    set_seed(cfg.training.seed)
+    set_seed(cfg.training.seed + (checkpoint["global_step"] if resuming else 0))
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     cfg.zarr_path = dataset.episode_store.path
     cfg.dataset.zarr_path = cfg.zarr_path
@@ -174,7 +178,7 @@ def train(method, model_class, argv=None):
         positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
         print(f"[Dataset] val windows={len(validation):,}")
     loader = build_train_loader(cfg, dataset)
-    batches_per_epoch = loader.batch_sampler.batches_per_epoch
+    batches_per_epoch = len(loader)
     accumulation = cfg.training.loop.gradient_accumulation_steps
     model: torch.nn.Module
     if is_afro:
@@ -185,22 +189,19 @@ def train(method, model_class, argv=None):
     else:
         model = model_class(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
     if not resuming:
-        fit_normalizer(dataset, cfg.normalization, model.normalizer)
+        fit_normalizer(dataset, model.normalizer, model.normalizer.fields)
     device = torch.device(cfg.training.device)
     model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
     optimizer = torch.optim.AdamW([dict(params=parameters, param_names=list(names))], **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
-    scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
-    step = 0
-    rng_state = None
-    if resuming:
-        step = restore_run(model, optimizer, scheduler, checkpoint)
-        rng_state = checkpoint["rng_state"]
+    step = restore_run(model, optimizer, checkpoint) if resuming else 0
+    scheduler = build_scheduler(
+        optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total,
+        state=checkpoint["scheduler_state"] if resuming else None,
+    )
     del checkpoint
-    epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
-    if resuming:
-        print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
+    updates_per_epoch = (batches_per_epoch + accumulation - 1) // accumulation
     stop_step = total if max_updates is None else min(total, step + max_updates)
     logger = ExperimentLogger(**cfg.workspace, resuming=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
@@ -220,17 +221,13 @@ def train(method, model_class, argv=None):
         stack.callback(logger.close)
         stack.callback(lambda: close_data_loader(loader, iterator))
         logger.save_config(cfg)
-        if rng_state is not None:
-            set_rng_state(rng_state, device)
         with training_signal_handlers(request_stop):
             initial_step = step
-            while step < stop_step and not stop_requested:
-                epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
-                loader.batch_sampler.set_epoch(epoch, start_batch)
+            while step < stop_step:
                 model.train()
-                current_epoch = epoch
                 iterator = iter(loader)
-                for group_start in range(start_batch, batches_per_epoch, accumulation):
+                for group_start in range(0, batches_per_epoch, accumulation):
+                    current_epoch = step // updates_per_epoch
                     group_size = min(accumulation, batches_per_epoch - group_start)
                     record = (
                         step == initial_step
@@ -258,8 +255,6 @@ def train(method, model_class, argv=None):
                     optimizer.step()
                     scheduler.step()
                     step += 1
-                    if group_start + group_size == batches_per_epoch:
-                        epoch = current_epoch + 1
                     if record:
                         logger.log(
                             to_log_scalars(
@@ -271,30 +266,23 @@ def train(method, model_class, argv=None):
                             ),
                             step,
                         )
+                    epoch = step // updates_per_epoch
+                    epoch_end = step % updates_per_epoch == 0
+                    if validation is not None and epoch_end and epoch % cfg.training.val_every_epochs == 0:
+                        metrics = evaluate(model, validation, cfg.dataloader.batch_size, device,
+                                           stop_requested=lambda: stop_requested)
+                        if metrics is not None:
+                            logger.log(to_log_scalars(metrics), step)
+                    periodic = (
+                        epoch_end and epoch % cfg.training.save_every_epochs == 0
+                        if is_afro else step % cfg.training.save_every_updates == 0
+                    )
+                    if periodic or step >= stop_step or stop_requested:
+                        saved = save_run(model, optimizer, scheduler, cfg, step)
                     if step >= stop_step or stop_requested:
                         break
-                    if not is_afro and step % cfg.training.save_every_updates == 0:
-                        save_run(model, optimizer, scheduler, cfg, step)
                 if stop_requested:
                     break
-                if (
-                    validation is not None
-                    and epoch > current_epoch
-                    and epoch % cfg.training.val_every_epochs == 0
-                ):
-                    metrics = evaluate(
-                        model, validation, cfg.dataloader.batch_size, device,
-                        stop_requested=lambda: stop_requested,
-                    )
-                    if metrics is not None:
-                        logger.log(to_log_scalars(metrics), step)
-                if (
-                    is_afro and epoch > current_epoch
-                    and epoch % cfg.training.save_every_epochs == 0
-                    and step < stop_step and not stop_requested
-                ):
-                    save_run(model, optimizer, scheduler, cfg, step)
-            saved = save_run(model, optimizer, scheduler, cfg, step)
             export_encoder(saved, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[{type(model).__name__}] Saved raw encoder.pt and checkpoints/latest.pt at epoch={epoch}, step={step}/{total}")
 

@@ -29,7 +29,7 @@ def create_run_directory(root, directory=None):
 
 
 def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_steps=None,
-                    seeds=None, episodes=100, seed=1024, device="cuda:0", video=True, output_dir=None):
+                    seeds=None, episodes=100, seed=1024, device="cuda:0", video=False, output_dir=None):
     """Run one checkpoint with explicit or deterministically sampled evaluation seeds."""
     checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
     loaded = load_checkpoint(checkpoint)

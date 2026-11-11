@@ -39,8 +39,8 @@ class DexLatent(Policy):
         num_inference_steps: int = 5,
         time_shift_alpha: float = 1.0,
     ) -> None:
-        if (n_obs_steps, action_dim) != (2, 19):
-            raise ValueError("DexLatent requires two observations and 19D joint actions/state")
+        if action_dim != 19:
+            raise ValueError("DexLatent requires 19D joint actions/state")
         obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=19,
@@ -80,10 +80,6 @@ class DexLatent(Policy):
             action_dim=action_dim,
         )
         self.hand_prior = DexLatentHandPrior()
-
-    @property
-    def effective_config(self) -> dict:
-        return {**super().effective_config, "time_shift_alpha": self.action_decoder.time_shift_alpha}
 
     def configure_normalizer(self, feature_dims, feature_shapes) -> None:
         super().configure_normalizer(

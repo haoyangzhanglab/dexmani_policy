@@ -39,8 +39,8 @@ class SAT(Policy):
         time_shift_alpha: float = 1.0,
         backbone_type: Literal["ditx", "dit"] = "ditx",
     ) -> None:
-        if n_obs_steps != 2 or action_dim != 19 or hidden_dim % 4:
-            raise ValueError("SAT requires n_obs_steps=2, joint action_dim=19 and hidden_dim divisible by 4")
+        if action_dim != 19 or hidden_dim % 4:
+            raise ValueError("SAT requires joint action_dim=19 and hidden_dim divisible by 4")
         if backbone_type not in {"ditx", "dit"}:
             raise ValueError("SAT backbone_type must be 'ditx' or 'dit'")
         obs_encoder = RGBPointObservationEncoder(
@@ -83,12 +83,3 @@ class SAT(Policy):
             n_action_steps=n_action_steps,
             action_dim=action_dim,
         )
-        self.backbone_type = backbone_type
-
-    @property
-    def effective_config(self) -> dict:
-        return {
-            **super().effective_config,
-            "backbone_type": self.backbone_type,
-            "time_shift_alpha": self.action_decoder.time_shift_alpha,
-        }

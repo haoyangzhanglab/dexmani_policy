@@ -17,7 +17,6 @@ class Checkpoint:
     ema_model_state: dict[str, Any] | None
     optimizer_state: dict[str, Any]
     scheduler_state: dict[str, Any]
-    rng_state: dict[str, Any]
     effective_config: dict[str, Any]
 
 

@@ -15,8 +15,8 @@ from dexmani_policy.common.checkpoint import (
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
-from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
+from dexmani_policy.common.pytorch_util import dict_apply
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader
 from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
@@ -67,17 +67,13 @@ class PolicyTrainer:
         self.model, self.ema_model, self.ema_updater = model, ema_model, ema_updater
         self.train_loader = build_train_loader(cfg, dataset)
         self.optimizer = build_optimizer(model, **cfg.optimizer)
-        self.scheduler = build_scheduler(
-            self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
-            cfg.training.loop.total_train_steps,
-        )
         self.cfg = cfg
         self.total_train_steps = cfg.training.loop.total_train_steps
         self.log_interval_steps = cfg.training.loop.log_interval_steps
         self.gradient_accumulation_steps = cfg.training.loop.gradient_accumulation_steps
         self.max_grad_norm = cfg.training.max_grad_norm
         self.use_bfloat16 = cfg.training.use_bfloat16
-        self.batches_per_epoch = self.train_loader.batch_sampler.batches_per_epoch
+        self.batches_per_epoch = len(self.train_loader)
         self.global_step = 0
 
         if checkpoint is not None:
@@ -88,21 +84,24 @@ class PolicyTrainer:
             ):
                 raise ValueError("Optimizer parameter groups changed")
             self.optimizer.load_state_dict(checkpoint.optimizer_state)
-            self.scheduler.load_state_dict(checkpoint.scheduler_state)
-            if ema_updater is not None:
-                ema_updater.optimization_step = checkpoint.global_step
             self.global_step = checkpoint.global_step
             if self.global_step > self.total_train_steps:
                 raise ValueError("Checkpoint global_step exceeds the training budget")
 
+        self.scheduler = build_scheduler(
+            self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
+            self.total_train_steps, state=checkpoint.scheduler_state if checkpoint is not None else None,
+        )
+        self.updates_per_epoch = (
+            self.batches_per_epoch + self.gradient_accumulation_steps - 1
+        ) // self.gradient_accumulation_steps
         self.trainable_parameters = [
             param for group in self.optimizer.param_groups for param in group["params"]
         ]
         self.last_grad_norm = None
         self.stop_requested = False
-        self.last_checkpoint_step = None
         self.milestone_steps = {
-            (pct * self.total_train_steps + 99) // 100: pct for pct in (20, 40, 60, 80, 100)
+            (pct * self.total_train_steps + 99) // 100 for pct in (20, 40, 60, 80, 100)
         }
 
         print_param_count(model)
@@ -111,8 +110,6 @@ class PolicyTrainer:
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
             self.logger.save_config(self.cfg)
-            if checkpoint is not None:
-                set_rng_state(checkpoint.rng_state, device=device)
         except BaseException:
             self.logger.close()
             raise
@@ -141,7 +138,7 @@ class PolicyTrainer:
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
         if self.ema_updater is not None:
-            self.ema_updater.step()
+            self.ema_updater.step(self.global_step)
 
     def train_microbatch(
         self,
@@ -162,10 +159,8 @@ class PolicyTrainer:
         (raw_loss / loss_divisor).backward()
         return raw_loss.detach(), log_dict
 
-    def save_checkpoint(self, reason: str):
+    def save_checkpoint(self):
         global_step = self.global_step
-        if self.last_checkpoint_step == global_step:
-            return
         checkpoint = Checkpoint(
             global_step=global_step,
             model_state=policy_state_dict(self.model),
@@ -175,14 +170,12 @@ class PolicyTrainer:
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             effective_config=cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True)),
-            rng_state=get_rng_state(self.device),
         )
         checkpoint_path = save_checkpoint(self.checkpoint_dir / f"step_{global_step:08d}.pt", checkpoint)
         with atomic_path(self.checkpoint_dir / "latest.pt") as temporary:
             temporary.unlink()
             temporary.symlink_to(checkpoint_path.name)
-        self.last_checkpoint_step = global_step
-        print(f"Saved {checkpoint_path} ({reason})")
+        print(f"Saved {checkpoint_path}")
 
     def signal_handler(self, signum, frame):
         if self.stop_requested:
@@ -228,7 +221,7 @@ class PolicyTrainer:
         if self.global_step >= self.total_train_steps:
             return
         if self.global_step:
-            epoch, _ = epoch_position(self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps)
+            epoch = self.global_step // self.updates_per_epoch
             print(f"Resuming at step {self.global_step}, logical epoch {epoch}")
 
         if self.ema_model is not None:
@@ -250,16 +243,12 @@ class PolicyTrainer:
             iterator = None
             try:
                 while self.global_step < stop_step:
-                    epoch, start_batch = epoch_position(
-                        self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
-                    )
-                    self.train_loader.batch_sampler.set_epoch(epoch, start_batch)
-
                     num_batches = self.batches_per_epoch
                     iterator = iter(self.train_loader)
                     for group_start in range(
-                        start_batch, num_batches, self.gradient_accumulation_steps
+                        0, num_batches, self.gradient_accumulation_steps
                     ):
+                        epoch = self.global_step // self.updates_per_epoch
                         group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
                         record_group = (
                             self.global_step == initial_step
@@ -290,23 +279,12 @@ class PolicyTrainer:
                             }
                             self.log_step(group_metrics, pbar, lr=lr, epoch=epoch)
 
-                        pct = self.milestone_steps.get(self.global_step)
-                        if pct is not None:
-                            self.save_checkpoint(f"milestone={pct:02d}pct")
+                        if self.global_step in self.milestone_steps or self.global_step >= stop_step or self.stop_requested:
+                            self.save_checkpoint()
                         if self.global_step >= stop_step or self.stop_requested:
                             break
                     if self.stop_requested:
                         break
-
-                if self.stop_requested and self.global_step > 0:
-                    print(
-                        f"Training interrupted at step {self.global_step}/{self.total_train_steps}",
-                        flush=True,
-                    )
-                    self.save_checkpoint("interrupt")
-                elif self.global_step < self.total_train_steps:
-                    self.save_checkpoint("bounded")
-                    print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
 
             finally:
                 try:

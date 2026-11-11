@@ -18,7 +18,6 @@ from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.deployment.runtime import PolicyRuntime
 from dexmani_policy.evaluation.selection import run_pipeline
 from dexmani_policy.training.common.config import load_policy_config, validate_config
-from dexmani_policy.training.common.data import EpochBatchSampler, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.pretrain.obs.common import export_encoder, save_run
 from dexmani_policy.training.trainer import PolicyTrainer
@@ -78,10 +77,10 @@ class CorrectnessTest(unittest.TestCase):
                             self.assertEqual(tuple(value.shape), (n, *shapes[key]))
                             np.testing.assert_array_equal(value, source['data/' + key][:][rows])
             default = CordViPPretrainDataset(directory)
-            legacy = CordViPPretrainDataset(directory, horizon=4, obs_horizon=4, pad_before=3, pad_after=0)
-            np.testing.assert_array_equal(default.sampler.indices, legacy.sampler.indices)
+            explicit = CordViPPretrainDataset(directory, horizon=4, obs_horizon=4, pad_before=3, pad_after=0)
+            np.testing.assert_array_equal(default.sampler.indices, explicit.sampler.indices)
             for i in range(len(default)):
-                np.testing.assert_array_equal(default.sampler.sample_source_rows(i), legacy.sampler.sample_source_rows(i))
+                np.testing.assert_array_equal(default.sampler.sample_source_rows(i), explicit.sampler.sample_source_rows(i))
             for padding in (0, 1):
                 cfg = load_policy_config('pretrain/obs/cordvip', [
                     f'zarr_path={directory}', 'dataset.horizon=6',
@@ -119,7 +118,7 @@ class CorrectnessTest(unittest.TestCase):
                     patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
                     patch.object(SimRunner, 'make_env', side_effect=envs), \
                     patch.object(SimRunner, 'predict_action_chunk', return_value=np.zeros((1, 19))):
-                result, path = evaluate_policy(checkpoint, seeds=[11, 22], device='cpu', video=False,
+                result, path = evaluate_policy(checkpoint, seeds=[11, 22], device='cpu',
                                                output_dir=Path(directory) / 'eval')
             self.assertEqual(result, json.loads(path.read_text()))
             self.assertTrue({'runner_options', 'environment', 'runtime'}.isdisjoint(result))
@@ -132,20 +131,11 @@ class CorrectnessTest(unittest.TestCase):
                 env.reset.assert_called_once_with(seed=seed)
                 env.close.assert_called_once()
 
-    def test_sampling_position(self):
-        sampler = EpochBatchSampler(range(10), 2, False, shuffle=True, seed=42)
-        for step in range(7):
-            epoch, start = epoch_position(step, sampler.batches_per_epoch, 2)
-            sampler.set_epoch(epoch)
-            full = list(sampler)
-            sampler.set_epoch(epoch, start)
-            self.assertEqual(list(sampler), full[start:])
-        self.assertEqual(epoch_position(3, 5, 2), (1, 0))
-
     def test_optimizer_boundary(self):
         trainer = PolicyTrainer.__new__(PolicyTrainer)
         parameter = torch.nn.Parameter(torch.tensor([1.0]))
         trainer.trainable_parameters = [parameter]
+        trainer.global_step = 0
         trainer.max_grad_norm = 0
         trainer.optimizer = torch.optim.Adam([parameter], lr=0.1)
         trainer.scheduler = Mock()
@@ -166,11 +156,6 @@ class CorrectnessTest(unittest.TestCase):
             self.assertFalse(trainer.optimizer.state)
             trainer.scheduler.step.assert_not_called()
             trainer.ema_updater.step.assert_not_called()
-        gradient = torch.tensor([3.0, 4.0])
-        parameter = torch.nn.Parameter(torch.ones(2))
-        parameter.grad = gradient.clone()
-        torch.nn.utils.clip_grad_norm_([parameter], float('inf'), error_if_nonfinite=True)
-        self.assertTrue(torch.equal(parameter.grad, gradient))
         for value in (-1, float('nan'), float('inf')):
             cfg = load_policy_config('dp3')
             cfg.training.max_grad_norm = value
@@ -429,6 +414,9 @@ class CorrectnessTest(unittest.TestCase):
             test, selection = split_evaluation_seeds(list(range(10)), 42, 3, 2)
             self.assertFalse(set(test) & set(selection))
             self.assertEqual([item[1]['seeds'] for item in calls], [selection, selection, test])
+            self.assertTrue(all(not item[1]['video'] for item in calls))
+            self.assertEqual(calls[2][1]['weights'], 'raw')
+            self.assertEqual(calls[2][1]['action_steps'], 2)
             self.assertEqual([item[0] for item in calls], [*checkpoints, checkpoints[1]])
             self.assertIsNone(calls[0][1]['weights'])
             self.assertIsNone(calls[1][1]['inference_steps'])

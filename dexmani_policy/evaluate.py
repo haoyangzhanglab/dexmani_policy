@@ -15,7 +15,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--output-dir")
     args = parser.parse_args(argv)
     evaluate_policy(**vars(args))

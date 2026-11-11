@@ -58,28 +58,33 @@ class EMA:
         self.power = power
         self.min_value = min_value
         self.max_value = max_value
-        self.optimization_step = 0
 
-    def get_decay(self, optimization_step: int) -> float:
-        step = max(0, optimization_step - self.update_after_step - 1)
+    def get_decay(self, global_step: int) -> float:
+        step = max(0, global_step - self.update_after_step - 1)
         if step == 0:
             return 0.0
         value = 1 - (1 + step / self.inv_gamma) ** -self.power
         return max(self.min_value, min(value, self.max_value))
 
     @torch.no_grad()
-    def step(self) -> None:
-        decay = self.get_decay(self.optimization_step)
+    def step(self, global_step: int) -> None:
+        decay = self.get_decay(global_step)
         update = get_ema_multi_avg_fn(decay)
-        update(self.ema_parameters, self.parameters, self.optimization_step)
-
-        self.optimization_step += 1
+        update(self.ema_parameters, self.parameters, global_step)
 
 
-def build_scheduler(optimizer, name, num_warmup_steps, num_training_steps):
+def build_scheduler(optimizer, name, num_warmup_steps, num_training_steps, *, state=None):
     from diffusers.optimization import get_scheduler as diffusion_scheduler
 
-    return diffusion_scheduler(
+    scheduler = diffusion_scheduler(
         name, optimizer=optimizer, num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
     )
+    if state is not None:
+        scheduler.load_state_dict(state)
+        # LambdaLR state does not capture the budget held by its new closures.
+        rates = [base * fn(scheduler.last_epoch) for base, fn in zip(scheduler.base_lrs, scheduler.lr_lambdas)]
+        for group, rate in zip(optimizer.param_groups, rates):
+            group["lr"] = rate
+        scheduler._last_lr = rates
+    return scheduler

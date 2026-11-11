@@ -16,7 +16,7 @@ def candidate_score(candidate):
 
 def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_steps=None,
                  selection_episodes=25, test_episodes=100, seed=1024, device="cuda:0",
-                 video=True, output_dir=None):
+                 video=False, output_dir=None):
     checkpoints = [Path(path).expanduser().resolve(strict=True) for path in checkpoints]
     if not checkpoints or len(set(checkpoints)) != len(checkpoints):
         raise ValueError("Candidates must be a nonempty list of distinct checkpoint files")

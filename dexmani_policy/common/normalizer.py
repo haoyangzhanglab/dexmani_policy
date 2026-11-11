@@ -1,5 +1,4 @@
 from collections.abc import Iterable
-from math import prod
 
 import torch
 from torch import nn
@@ -9,10 +8,10 @@ from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_S
 
 def normalization_feature_shapes(dims, spec):
     missing = dims.keys() - spec.keys()
-    unknown = spec.keys() - dims.keys()
-    if missing or unknown:
-        raise ValueError(f"Invalid normalization fields: missing={sorted(missing)}, unknown={sorted(unknown)}")
-    for key, mode in spec.items():
+    if missing:
+        raise ValueError(f"Missing normalization fields: {sorted(missing)}")
+    for key in dims:
+        mode = spec[key]
         if mode not in {"identity", "limits"}:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}; expected identity or limits")
         if key == "action" and mode != "limits":
@@ -75,7 +74,7 @@ class LinearNormalizer(nn.Module):
                 feature_shape = FIELD_FEATURE_SHAPES.get(key, values.shape[-1:])
             if values.shape[-len(feature_shape):] != feature_shape:
                 raise ValueError(f"Normalization data for {key} requires trailing shape {tuple(feature_shape)}")
-            values = values.reshape(-1, prod(feature_shape))
+            values = values.reshape(-1, *feature_shape)
             chunk_min, chunk_max = torch.aminmax(values, dim=0)
             if limits is not None:
                 chunk_min = torch.minimum(limits[0], chunk_min)
@@ -85,7 +84,7 @@ class LinearNormalizer(nn.Module):
 
         if limits is None:
             raise ValueError(f"Insufficient samples for {key} with mode=limits")
-        low, high = (value.float().reshape(feature_shape) for value in limits)
+        low, high = (value.float() for value in limits)
         span = high - low
         constant = span < 1e-4
         scale = 2 / span.masked_fill(constant, 2)

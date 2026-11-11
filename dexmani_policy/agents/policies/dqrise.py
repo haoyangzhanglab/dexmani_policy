@@ -43,8 +43,8 @@ class DQRISE(Policy):
         num_inference_steps: int = 5,
         time_shift_alpha: float = 1.0,
     ) -> None:
-        if (n_obs_steps, action_dim) != (2, 19):
-            raise ValueError("DQ-RISE requires n_obs_steps=2 and joint action=7+12")
+        if action_dim != 19:
+            raise ValueError("DQ-RISE requires joint action=7+12")
         obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -93,7 +93,6 @@ class DQRISE(Policy):
         return {
             **super().effective_config,
             "num_codes": self.hand_codebook.num_codes,
-            "time_shift_alpha": self.action_decoder.time_shift_alpha,
         }
 
     def compute_loss(

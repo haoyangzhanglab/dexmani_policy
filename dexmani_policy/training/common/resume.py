@@ -1,4 +1,4 @@
-"""Resume latest.pt in the specified run using only explicit execution settings."""
+"""Resume latest.pt with optional execution settings and a new total step budget."""
 
 import argparse
 from pathlib import Path
@@ -10,11 +10,13 @@ from dexmani_policy.common.config import positive_int, set_project_root
 
 
 def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
-                   use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None):
+                   use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None, total_steps=None):
     directory = Path(run).expanduser().resolve(strict=True)
     source = directory / "checkpoints" / "latest.pt"
     checkpoint = load_checkpoint(source)
     cfg = OmegaConf.create(checkpoint.effective_config)
+    if total_steps is not None:
+        cfg.training.loop.total_train_steps = positive_int(total_steps, "total_steps")
     if checkpoint.global_step >= cfg.training.loop.total_train_steps:
         print(f"Training already complete at step {checkpoint.global_step}/{cfg.training.loop.total_train_steps}")
         return None
@@ -50,6 +52,7 @@ def main(argv=None):
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--max-updates", type=int)
+    parser.add_argument("--total-steps", type=int)
     parser.add_argument("--compile", dest="use_compile", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--compile-mode")
     parser.add_argument("--cudnn-benchmark", action=argparse.BooleanOptionalAction, default=None)

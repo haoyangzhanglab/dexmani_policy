@@ -12,7 +12,6 @@ import torch
 import zarr
 
 from dexmani_policy.common.checkpoint import load_checkpoint
-from dexmani_policy.common.pytorch_util import get_rng_state
 from dexmani_policy.common.config import positive_int, set_project_root
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
@@ -46,10 +45,6 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
         assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
         assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
         assert dict(trainer.cfg.deployment_metadata) == checkpoint.effective_config["deployment_metadata"]
-        rng = get_rng_state(cfg.training.device)
-        assert rng["python"] == checkpoint.rng_state["python"]
-        np.testing.assert_equal(rng["numpy"], checkpoint.rng_state["numpy"])
-        torch.testing.assert_close(rng["torch"], checkpoint.rng_state["torch"])
         del checkpoint, optimizer_state
         trainer.compile_models()
         trainer.train(max_updates=resume_updates)
@@ -86,8 +81,8 @@ def check_dataset(cfg, source):
             torch.testing.assert_close(sample["obs"][key], raw[key][rows[:2]], rtol=0, atol=0)
 
     normalizer = LinearNormalizer(normalization_feature_shapes(description["field_dims"], cfg.normalization))
-    fit_normalizer(dataset, cfg.normalization, normalizer)
-    assert set(normalizer.fields) == {key for key, mode in cfg.normalization.items() if mode == "limits"}
+    fit_normalizer(dataset, normalizer, normalizer.fields)
+    assert set(normalizer.fields) == {key for key in description["field_dims"] if cfg.normalization[key] == "limits"}
     for key, field in normalizer.fields.items():
         values = raw[key]
         normalized = field.normalize(values)

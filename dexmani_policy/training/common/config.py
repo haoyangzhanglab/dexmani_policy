@@ -83,7 +83,7 @@ def prepare_training(cfg) -> None:
                 cfg.agent.rgb_backbone_config = rgb
 
 
-def validate_normalization(cfg):
+def validate_normalization(cfg, field_dims):
     spec = cfg.normalization
 
     physical = set()
@@ -95,7 +95,7 @@ def validate_normalization(cfg):
         physical = {"point_cloud"}
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         physical.add("rgb")
-    for key in physical:
+    for key in physical.intersection(field_dims):
         if key in spec and spec[key] != "identity":
             raise ValueError(f"{key} must use identity for image preprocessing or physical geometry")
 

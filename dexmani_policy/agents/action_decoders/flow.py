@@ -33,8 +33,8 @@ class RectifiedFlow(nn.Module):
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
         time_shift_alpha = float(time_shift_alpha)
-        if not math.isfinite(time_shift_alpha) or time_shift_alpha < 1.0:
-            raise ValueError("time_shift_alpha must be finite and >= 1")
+        if not math.isfinite(time_shift_alpha) or time_shift_alpha <= 0.0:
+            raise ValueError("time_shift_alpha must be finite and > 0")
 
         self.model = model
         self.num_inference_steps = num_inference_steps

@@ -315,7 +315,7 @@ class DiTTest(unittest.TestCase):
                 self.assertGreater(expected.abs().sum().item(), 0)
                 checkpoint = Checkpoint(
                     global_step=0, model_state=policy.state_dict(), ema_model_state=None,
-                    optimizer_state={}, scheduler_state={}, rng_state={}, effective_config=config,
+                    optimizer_state={}, scheduler_state={}, effective_config=config,
                 )
                 with tempfile.TemporaryDirectory() as directory:
                     path = save_checkpoint(Path(directory) / "policy.pt", checkpoint)
