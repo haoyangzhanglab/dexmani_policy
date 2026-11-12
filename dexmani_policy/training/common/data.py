@@ -1,4 +1,5 @@
 from math import prod
+from typing import Any
 
 import hydra
 import torch
@@ -60,9 +61,7 @@ def build_dataset(cfg):
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     print(f"[Dataset] {dataset.training_summary()}")
-    deployment = {}
-    if "dt" in buffer.attrs:
-        deployment["control_dt_s"] = buffer.attrs["dt"]
+    deployment: dict[str, Any] = {"control_dt_s": float(buffer.attrs["dt"])}
     for modality, attr in (
         ("point_cloud", "pointcloud_config"),
         ("fingertip_xyz", "fingertip_link_names"),

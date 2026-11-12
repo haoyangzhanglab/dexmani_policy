@@ -81,6 +81,14 @@ class ResearchTest(unittest.TestCase):
             source = root / 'run/checkpoints/latest.pt'
             checkpoint = load_checkpoint(source)
             self.assertNotIn('rng_state', vars(checkpoint))
+            replacement = make_source(root / 'replacement.zarr')
+            replacement.attrs['dt'] = .1
+            with self.assertRaisesRegex(ValueError, 'dataset dt=0.1.*checkpoint control_dt_s=0.05'):
+                prepare_resume(root / 'run', total_steps=4, zarr_path=root / 'replacement.zarr')
+            replacement.attrs['dt'] = .05 + 1e-8
+            with closing(prepare_resume(root / 'run', total_steps=4,
+                                        zarr_path=root / 'replacement.zarr')) as trainer:
+                self.assertEqual(trainer.cfg.deployment_metadata.control_dt_s, .05)
             with closing(prepare_resume(root / 'run', total_steps=4, log_interval=2)) as trainer:
                 self.assertEqual(trainer.global_step, 2)
                 self.assertEqual(trainer.log_interval_steps, 2)

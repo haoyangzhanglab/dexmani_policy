@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 import hydra
+import numpy as np
 import torch
 from omegaconf import OmegaConf, open_dict
 
@@ -131,6 +132,14 @@ def build_trainer(cfg, *, checkpoint=None):
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
+    if checkpoint is not None:
+        data_dt = data_description["deployment_metadata"]["control_dt_s"]
+        policy_dt = cfg.deployment_metadata.control_dt_s
+        if not np.isclose(data_dt, policy_dt, rtol=1e-6, atol=1e-9):
+            raise ValueError(
+                f"Resume control_dt_s mismatch: dataset dt={data_dt} s, "
+                f"checkpoint control_dt_s={policy_dt} s"
+            )
     with open_dict(cfg):
         cfg.zarr_path = dataset.episode_store.path
         cfg.dataset.zarr_path = cfg.zarr_path

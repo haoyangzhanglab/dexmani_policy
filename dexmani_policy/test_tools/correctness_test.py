@@ -60,6 +60,7 @@ class CorrectnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'source.zarr'
             source = zarr.open_group(str(path), mode='w')
+            source.attrs['dt'] = .05
             source.create_dataset('meta/episode_ends', data=np.array([4]))
             for key, shape in (('joint_state', (4, 19)), ('action', (4, 19)),
                                ('hand_pointcloud', (4, 7, 6)), ('object_pointcloud', (4, 11, 6)),
@@ -68,7 +69,11 @@ class CorrectnessTest(unittest.TestCase):
             cfg = load_policy_config('cordvip', [f'zarr_path={path}', 'horizon=4', 'n_obs_steps=2', 'n_action_steps=2'])
             dataset, description = build_dataset(cfg)
             self.assertEqual(set(description), {'field_dims', 'deployment_metadata'})
-            self.assertEqual(description['deployment_metadata'], {})
+            self.assertEqual(description['deployment_metadata'], {'control_dt_s': .05})
+            self.assertIs(type(description['deployment_metadata']['control_dt_s']), float)
+            del source.attrs['dt']
+            with self.assertRaisesRegex(KeyError, 'dt'):
+                build_dataset(cfg)
             self.assertEqual(description['field_dims']['object_pointcloud'], 3)
             self.assertEqual(dataset[0]['obs']['object_pointcloud'].shape, (2, 11, 3))
             self.assertEqual(dataset[0]['obs']['object_pointcloud'].dtype, torch.float32)
@@ -137,14 +142,19 @@ class CorrectnessTest(unittest.TestCase):
         agent.force_predictor = SimpleNamespace(num_inference_steps=7)
         cfg = dict(env_runner=dict(task_name='test', env_rebuild_interval=1),
                    eval=dict(use_ema=False, inference_steps=2), dataset={},
-                   normalization_dims=agent.normalization_dims)
+                   normalization_dims=agent.normalization_dims,
+                   deployment_metadata={'control_dt_s': .05})
+        pending_envs = iter(envs)
+        def make_env(runner, **kwargs):
+            self.assertEqual(runner.control_dt_s, .05)
+            return next(pending_envs)
         loaded = SimpleNamespace(effective_config=cfg, model_state={}, global_step=10)
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / 'candidate.pt'
             checkpoint.touch()
             with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
                     patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
-                    patch.object(SimRunner, 'make_env', side_effect=envs), \
+                    patch.object(SimRunner, 'make_env', autospec=True, side_effect=make_env), \
                     patch.object(SimRunner, 'predict_action_chunk', return_value=np.zeros((1, 19))):
                 result, path = evaluate_policy(checkpoint, seeds=[11, 22], device='cpu',
                                                output_dir=Path(directory) / 'eval')
@@ -218,7 +228,8 @@ class CorrectnessTest(unittest.TestCase):
             result = dict(statistics=dict(success_rate=1, avg_steps=2), global_step=1,
                           weights='raw', inference_steps=2, action_steps=2)
             with patch('dexmani_policy.evaluation.selection.load_checkpoint', return_value=SimpleNamespace(
-                    effective_config={'env_runner': {'task_name': 'test'}})), patch(
+                    effective_config={'env_runner': {'task_name': 'test', 'env_kwargs': {}},
+                                      'deployment_metadata': {'control_dt_s': .05}})), patch(
                     'dexmani_policy.evaluation.selection.load_seed_pool', return_value=list(range(5))), patch(
                     'dexmani_policy.evaluation.selection.evaluate_policy') as evaluate:
                 for fail in (True, False):
@@ -337,8 +348,52 @@ class CorrectnessTest(unittest.TestCase):
                 temporary.write_bytes(b'new')
             self.assertEqual(path.read_bytes(), b'new')
 
+    def test_policy_info_requires_control_period(self):
+        from dexmani_policy.deployment.metadata import policy_info
+        cfg = dict(task_name='test', action_key='action', dataset={},
+                   deployment_metadata={'control_dt_s': .05})
+        agent = SimpleNamespace(normalization_dims={'joint_state': 19}, n_obs_steps=1,
+                                n_action_steps=1, future_steps=1, control_action_dim=19,
+                                supports_rtc=False, requires_prev_action=False)
+        self.assertEqual(policy_info('test.pt', cfg, agent, weights='raw',
+                                     inference_steps=1).control_dt_s, .05)
+        del cfg['deployment_metadata']['control_dt_s']
+        with self.assertRaisesRegex(KeyError, 'control_dt_s'):
+            policy_info('test.pt', cfg, agent, weights='raw', inference_steps=1)
+
+    def test_default_randomization(self):
+        cfg = load_policy_config('dp3')
+        self.assertFalse(cfg.env_runner.env_kwargs.randomize_model_id)
+        self.assertTrue(cfg.env_runner.env_kwargs.randomize_table_height)
+        explicit = load_policy_config('dp3', ['env_runner.env_kwargs.randomize_model_id=true'])
+        self.assertTrue(explicit.env_runner.env_kwargs.randomize_model_id)
+
+    def test_simulation_control_period(self):
+        runner = SimRunner('test', 1, ['joint_state'], {}, control_dt_s=.05,
+                           env_rebuild_interval=1)
+        instances = []
+        periods = iter([.05, .05 + 1e-8, .1])
+        class Env:
+            def __init__(self, **kwargs):
+                self.dt = next(periods)
+                self.action_cnt = 1
+                self.close = Mock()
+                instances.append(self)
+        with patch.dict('sys.modules', {'dexmani_sim': SimpleNamespace(resolve_env_class=lambda _: Env)}), \
+                patch.object(runner, '_run_episode', return_value=(True, 1)) as episode:
+            results = runner.run(Mock(requires_prev_action=False), seeds=[1, 2, 3],
+                                 inference_steps=1, action_steps=1)
+            self.assertTrue(next(results)['success'])
+            self.assertTrue(next(results)['success'])
+            with self.assertRaisesRegex(ValueError, r'Sim dt=0.1.*Policy control_dt_s=0.05'):
+                next(results)
+            self.assertEqual(episode.call_count, 2)
+        self.assertEqual(len(instances), 3)
+        for env in instances:
+            env.close.assert_called_once()
+
     def test_simulation_shutdown(self):
-        runner = SimRunner('test', 1, ['joint_state'], {})
+        runner = SimRunner('test', 1, ['joint_state'], {}, control_dt_s=.05)
         for early, fail in ((False, False), (True, False), (False, True), (True, True)):
             env = Mock()
             env.close.side_effect = RuntimeError('close') if fail else None
@@ -355,7 +410,7 @@ class CorrectnessTest(unittest.TestCase):
                 env.close.assert_called_once()
 
     def test_simulation_error_survives_close_failure(self):
-        runner = SimRunner('test', 1, ['joint_state'], {})
+        runner = SimRunner('test', 1, ['joint_state'], {}, control_dt_s=.05)
         env = Mock()
         primary, cleanup = ValueError('simulation'), RuntimeError('close')
         env.close.side_effect = cleanup
@@ -386,6 +441,8 @@ class CorrectnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = zarr.open_group(str(root / 'source.zarr'), mode='w')
+            source.attrs.update(task_name='test', dt=.05, action_space='joint',
+                                format='obsolete', action_semantics='obsolete')
             source.create_dataset('meta/episode_ends', data=np.array([1]))
             for key, shape in (('joint_state', (1, 19)), ('hand_pointcloud', (1, 2, 3)),
                                ('object_pointcloud', (1, 1024, 3))):
@@ -399,7 +456,9 @@ class CorrectnessTest(unittest.TestCase):
             with patch('dexmani_policy.datasets.preprocess.contact_map.frame_contact_map',
                        return_value=np.ones(1024, np.float32)):
                 generate(root / 'source.zarr', root / 'output.zarr')
-            self.assertEqual(zarr.open_group(str(root / 'output.zarr'))['data/contact_map'].shape, (1, 1024))
+            output = zarr.open_group(str(root / 'output.zarr'))
+            self.assertEqual(output['data/contact_map'].shape, (1, 1024))
+            self.assertEqual(dict(output.attrs), dict(task_name='test', dt=.05, action_space='joint'))
             self.assertFalse(list(root.glob('.contact-*')))
 
     def test_resume_logger_preserves_history_and_config(self):
@@ -419,7 +478,7 @@ class CorrectnessTest(unittest.TestCase):
                     with self.assertRaises(OSError):
                         logger.log({'loss': 1}, 2)
 
-    def test_selection_only_requires_same_task(self):
+    def test_selection_environment_contract(self):
         from dexmani_policy.evaluation.seeds import split_evaluation_seeds
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -427,7 +486,11 @@ class CorrectnessTest(unittest.TestCase):
             for checkpoint in checkpoints:
                 checkpoint.touch()
             configs = [SimpleNamespace(effective_config={'env_runner': {
-                'task_name': 'test', 'env_kwargs': {'friction': value}}}) for value in (0.1, 0.9)]
+                'task_name': 'test', 'env_kwargs': {'friction': .1}},
+                'deployment_metadata': {'control_dt_s': .05 + value * 1e-8},
+                'agent': {'architecture': str(value)},
+                'normalization_dims': {'joint_state': 19} if value == 0 else {'point_cloud': 6}})
+                for value in (0, 1)]
             calls = []
             def evaluate(checkpoint, **kwargs):
                 calls.append((Path(checkpoint).resolve(), kwargs))
@@ -450,12 +513,19 @@ class CorrectnessTest(unittest.TestCase):
             self.assertIsNone(calls[1][1]['inference_steps'])
             self.assertEqual(calls[2][1]['inference_steps'], 3)
             self.assertEqual(json.loads(result.read_text())['global_step'], 2)
-            configs[1].effective_config['env_runner']['task_name'] = 'other'
-            with patch('dexmani_policy.evaluation.selection.load_checkpoint', side_effect=configs), \
-                    patch('dexmani_policy.evaluation.selection.evaluate_policy') as evaluate:
-                with self.assertRaisesRegex(ValueError, 'task_name'):
-                    run_pipeline(checkpoints)
-                evaluate.assert_not_called()
+            for field, value in (('task_name', 'other'), ('env_kwargs', {'friction': .9}),
+                                 ('control_dt_s', .1)):
+                config = configs[1].effective_config
+                section = config['deployment_metadata'] if field == 'control_dt_s' else config['env_runner']
+                original = section[field]
+                section[field] = value
+                with self.subTest(field=field), patch(
+                        'dexmani_policy.evaluation.selection.load_checkpoint', side_effect=configs), patch(
+                        'dexmani_policy.evaluation.selection.evaluate_policy') as evaluate:
+                    with self.assertRaisesRegex(ValueError, field):
+                        run_pipeline(checkpoints)
+                    evaluate.assert_not_called()
+                section[field] = original
 
     def test_logger_rejects_nonfinite(self):
         with tempfile.TemporaryDirectory() as directory:

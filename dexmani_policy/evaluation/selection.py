@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import numpy as np
+
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import write_json
@@ -22,14 +24,26 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
         raise ValueError("Candidates must be a nonempty list of distinct checkpoint files")
     root = checkpoints[0].parent.parent
     loaded = load_checkpoint(checkpoints[0])
-    task_name = loaded.effective_config["env_runner"]["task_name"]
+    cfg = loaded.effective_config
+    reference_task_name = cfg["env_runner"]["task_name"]
+    reference_env_kwargs = cfg["env_runner"]["env_kwargs"]
+    reference_control_dt_s = cfg["deployment_metadata"]["control_dt_s"]
     del loaded
     for checkpoint in checkpoints[1:]:
         loaded = load_checkpoint(checkpoint)
-        if loaded.effective_config["env_runner"]["task_name"] != task_name:
+        cfg = loaded.effective_config
+        if cfg["env_runner"]["task_name"] != reference_task_name:
             raise ValueError("Candidates must use the same task_name")
+        if cfg["env_runner"]["env_kwargs"] != reference_env_kwargs:
+            raise ValueError("Candidates must use the same env_kwargs")
+        control_dt_s = cfg["deployment_metadata"]["control_dt_s"]
+        if not np.isclose(control_dt_s, reference_control_dt_s, rtol=1e-6, atol=1e-9):
+            raise ValueError(
+                f"Candidates must use the same control_dt_s: "
+                f"reference={reference_control_dt_s}, candidate={control_dt_s} ({checkpoint})"
+            )
         del loaded
-    test, selection = split_evaluation_seeds(load_seed_pool(task_name), seed, test_episodes,
+    test, selection = split_evaluation_seeds(load_seed_pool(reference_task_name), seed, test_episodes,
                                              positive_int(selection_episodes, "selection_episodes"))
     directory = create_run_directory(root / "eval", output_dir)
     path = directory / "selection_result.json"

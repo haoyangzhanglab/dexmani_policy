@@ -18,10 +18,12 @@ class SimRunner:
         n_obs_steps: int,
         sensor_modalities: list[str],
         rgb_preprocessing: dict[str, Any],
+        control_dt_s: float,
         env_kwargs: dict[str, Any] | None = None,
         env_rebuild_interval: int = 25,
     ):
         self.task_name = task_name
+        self.control_dt_s = control_dt_s
         self.env_kwargs = env_kwargs or {}
         self.env_rebuild_interval = env_rebuild_interval
         self.n_obs_steps = n_obs_steps
@@ -171,6 +173,11 @@ class SimRunner:
         env = env_class.__new__(env_class)
         try:
             env_class.__init__(env, record_video=record_video, **kwargs)
+            if not np.isclose(env.dt, self.control_dt_s, rtol=1e-6, atol=1e-9):
+                raise ValueError(
+                    f"Control period mismatch: Sim dt={env.dt} s, "
+                    f"Policy control_dt_s={self.control_dt_s} s"
+                )
         except BaseException:
             try:
                 env.close()

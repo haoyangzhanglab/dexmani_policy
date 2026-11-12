@@ -48,7 +48,7 @@ eval:
 
 env_runner:
   env_kwargs:
-    randomize_model_id: true
+    randomize_model_id: false
     randomize_table_height: true
 
 workspace:

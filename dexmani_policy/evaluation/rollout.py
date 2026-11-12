@@ -57,7 +57,8 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     action_steps = positive_int(agent.n_action_steps if action_steps is None else action_steps, "action_steps")
     if action_steps > agent.future_steps:
         raise ValueError(f"action_steps must not exceed future_steps ({agent.future_steps})")
-    options.update(n_obs_steps=agent.n_obs_steps,
+    options.update(control_dt_s=cfg["deployment_metadata"]["control_dt_s"],
+                   n_obs_steps=agent.n_obs_steps,
                    sensor_modalities=[key for key in cfg["normalization_dims"] if key != "action"],
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     from dexmani_policy.env_runner.sim_runner import SimRunner

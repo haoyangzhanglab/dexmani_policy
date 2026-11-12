@@ -66,12 +66,12 @@ def generate(zarr_path, output, num_workers=1):
     if "action" in keys and buffer["action"].shape[1:] != (19,):
         raise ValueError("CordViP policy requires action[T,19]")
     rows = int(buffer.episode_ends[-1])
+    attrs = {key: buffer.attrs[key] for key in ("task_name", "dt", "action_space")}
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".contact-", dir=output.parent) as directory:
         temporary = Path(directory) / "data.zarr"
         group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
-        retained_attrs = ("format", "dt", "action_semantics")
-        group.attrs.update({key: buffer.attrs[key] for key in retained_attrs if key in buffer.attrs})
+        group.attrs.update(attrs)
         group.create_group("meta").create_dataset("episode_ends", data=buffer.episode_ends)
         data = group.create_group("data")
         for key in keys:

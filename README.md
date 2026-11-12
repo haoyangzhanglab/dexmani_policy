@@ -75,7 +75,7 @@ python -m dexmani_policy.training.common.resume --run "$RUN"
 
 第一次 `Ctrl-C` 或 `SIGTERM` 请求在更新边界保存退出。停止请求若晚于本次更新的结束判断到达，可能再完成一次更新后保存退出；第二次信号强制退出，不保证保存。正常到达总预算或 `max_updates` 时同样先保存，与周期保存重合时只保存一次。
 
-Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。只检查必要的模型输入和动作维度，不比较数据内容、episode 布局或新旧 metadata。允许同 shape 的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
+Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。检查必要的模型输入、动作维度及控制周期（`rtol=1e-6`、`atol=1e-9`），不比较数据内容或 episode 布局。允许同 shape 且控制周期一致的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
 
 续训恢复 raw/EMA、优化器、学习率调度器、步数和 normalizer。`--max-updates 100` 只限制本次续训执行量，不修改总预算。恢复使用 seed + global_step 开始新的随机过程和数据遍历，不恢复旧 batch、RNG 或 worker 状态，不承诺逐位复现。
 

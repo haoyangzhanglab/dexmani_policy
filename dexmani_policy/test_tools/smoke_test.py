@@ -43,6 +43,8 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
         assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
         assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
         assert dict(trainer.cfg.deployment_metadata) == checkpoint.effective_config["deployment_metadata"]
+        data_dt = float(zarr.open_group(cfg.dataset.zarr_path, mode="r").attrs["dt"])
+        assert checkpoint.effective_config["deployment_metadata"]["control_dt_s"] == data_dt
         del checkpoint, optimizer_state
         trainer.compile_models()
         trainer.train(max_updates=resume_updates)
@@ -56,6 +58,7 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
 
 def make_source(path):
     source = zarr.open_group(str(path), mode="w-")
+    source.attrs.update(task_name="test", dt=0.05, action_space="joint")
     source.create_dataset("meta/episode_ends", data=np.array([6, 12], dtype=np.int64))
     rng = np.random.default_rng(11)
     for key, shape in (
@@ -94,12 +97,10 @@ def check_dataset(cfg, source):
 
 def check_synthetic(root, device, *, max_updates, resume_updates):
     source = make_source(root / "source.zarr")
-    source.attrs["dt"] = 0.05
     replacement_path = root / "replacement.zarr"
     replacement = make_source(replacement_path)
     replacement.create_dataset("meta/episode_ends", data=np.array([3, 6, 9, 12]), overwrite=True)
     replacement["data/action"][:] += 1
-    replacement.attrs["dt"] = 0.1
     cfg = load_policy_config("dp3", [
         f"zarr_path={root / 'source.zarr'}", f"training.device={device}",
         "horizon=4", "n_obs_steps=2", "n_action_steps=2",
@@ -142,11 +143,9 @@ def check_cordvip(root, device, *, max_updates, resume_updates):
     rng = np.random.default_rng(17)
     for key, count in (("hand_pointcloud", 8), ("object_pointcloud", 12)):
         source.create_dataset(f"data/{key}", data=rng.normal(size=(12, count, 3)))
-    source.attrs["dt"] = .05
     replacement = root / "replacement.zarr"
     shutil.copytree(root / "source.zarr", replacement)
     replaced = zarr.open_group(str(replacement), mode="a")
-    replaced.attrs["dt"] = .1
     replaced["data/action"][:] += 1
     replaced["meta/episode_ends"][:] = [4, 12]
     cfg = load_policy_config("cordvip", [
