@@ -145,7 +145,7 @@ ssh "$HOST" 'tail -F -- "/absolute/path/to/<session>.log"'
 ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 ```
 
-等待当前更新结束并保存。重复中断或强杀可能丢失最近更新；续训或下载前，确认进程已退出，并检查日志与 checkpoint。
+等待训练在更新边界保存退出；若信号晚于本次更新的结束判断到达，可能再完成一次更新。重复中断或强杀可能丢失最近更新；续训或下载前，确认进程已退出，并检查日志与 checkpoint。
 
 ## 6. 原目录续训
 

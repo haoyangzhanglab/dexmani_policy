@@ -210,10 +210,11 @@ def train(method, model_class, argv=None):
 
     def request_stop(signum, frame):
         nonlocal stop_requested
+        signame = signal.Signals(signum).name
         if stop_requested:
-            print(f"\nSecond {signal.Signals(signum).name} — forcing exit.", flush=True)
+            print(f"\nSecond {signame} — forcing exit.", flush=True)
             os._exit(1)
-        print(f"\n{signal.Signals(signum).name} — finishing current update, then saving.", flush=True)
+        print(f"\n{signame} — stopping and saving at the next update boundary.", flush=True)
         stop_requested = True
 
     iterator = None
@@ -277,11 +278,12 @@ def train(method, model_class, argv=None):
                         epoch_end and epoch % cfg.training.save_every_epochs == 0
                         if is_afro else step % cfg.training.save_every_updates == 0
                     )
-                    if periodic or step >= stop_step or stop_requested:
+                    should_stop = stop_requested or step >= stop_step
+                    if periodic or should_stop:
                         saved = save_run(model, optimizer, scheduler, cfg, step)
-                    if step >= stop_step or stop_requested:
+                    if should_stop:
                         break
-                if stop_requested:
+                if should_stop:
                     break
             export_encoder(saved, Path(cfg.workspace.output_dir) / "encoder.pt")
             print(f"[{type(model).__name__}] Saved raw encoder.pt and checkpoints/latest.pt at epoch={epoch}, step={step}/{total}")

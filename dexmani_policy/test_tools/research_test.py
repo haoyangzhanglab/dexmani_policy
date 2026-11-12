@@ -1,8 +1,11 @@
 """Small real-model regressions for research training and initialization."""
+import inspect
 import os
+import signal
+import sys
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +22,32 @@ from dexmani_policy.training.common.resume import prepare_resume
 from dexmani_policy.training.common.optimization import EMA
 
 DEVICE = os.environ.get('DEXMANI_TEST_DEVICE', 'cpu')
+
+
+@contextmanager
+def stop_before_break_check(function, boundary):
+    lines, first = inspect.getsourcelines(function)
+    target = [first + i - 1 for i, line in enumerate(lines) if line.strip() == 'break'][boundary]
+    previous = sys.gettrace()
+    fired = False
+
+    def trace(frame, event, arg):
+        nonlocal fired
+        if frame.f_code is not function.__code__:
+            return None
+        if event == 'line' and frame.f_lineno == target and not fired:
+            fired = True
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            # CPython trace synchronization must retain the handler's closure update.
+            frame.f_locals
+        return trace
+
+    try:
+        sys.settrace(trace)
+        yield
+    finally:
+        sys.settrace(previous)
+    assert fired, 'Stop injection did not reach the requested loop boundary'
 
 
 class ResearchTest(unittest.TestCase):
@@ -46,6 +75,8 @@ class ResearchTest(unittest.TestCase):
                 with patch.object(trainer, 'save_checkpoint', wraps=trainer.save_checkpoint) as save:
                     trainer.train()
                     self.assertEqual(save.call_count, 2)
+                    trainer.train()
+                    self.assertEqual(save.call_count, 2)
                 self.assertEqual(trainer.global_step, 2)
             source = root / 'run/checkpoints/latest.pt'
             checkpoint = load_checkpoint(source)
@@ -55,7 +86,9 @@ class ResearchTest(unittest.TestCase):
                 self.assertEqual(trainer.log_interval_steps, 2)
                 self.assertAlmostEqual(trainer.optimizer.param_groups[0]['lr'], cfg.optimizer.lr * .5)
                 torch.testing.assert_close(trainer.optimizer.state_dict()['state'], checkpoint.optimizer_state['state'], check_device=False)
-                trainer.train(max_updates=1)
+                with patch.object(trainer, 'save_checkpoint', wraps=trainer.save_checkpoint) as save:
+                    trainer.train(max_updates=1)
+                    save.assert_called_once()
                 self.assertEqual(trainer.global_step, 3)
             checkpoint = load_checkpoint(source)
             cfg.workspace.output_dir = str(root / 'initialized')
@@ -74,6 +107,80 @@ class ResearchTest(unittest.TestCase):
             with closing(prepare_resume(root / 'initialized')) as trainer:
                 self.assertEqual(trainer.global_step, 1)
                 trainer.train(max_updates=1)
+
+    def test_policy_stop_boundaries(self):
+        from dexmani_policy.training.trainer import PolicyTrainer
+        for boundary in (0, 1):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                make_source(root / 'source.zarr')
+                cfg = self.config(root)
+                cfg.training.loop.total_train_steps = 20
+                cfg.training.loop.gradient_accumulation_steps = 1
+                cfg.dataloader.batch_size = 10
+                with closing(build_trainer(cfg)) as trainer:
+                    with patch.object(trainer, 'save_checkpoint', wraps=trainer.save_checkpoint) as save, \
+                            stop_before_break_check(PolicyTrainer.train, boundary):
+                        trainer.train(max_updates=3)
+                    self.assertEqual(trainer.global_step, 2)
+                    save.assert_called_once()
+                    checkpoint = load_checkpoint(root / 'run/checkpoints/latest.pt')
+                    self.assertEqual(checkpoint.global_step, 2)
+                    torch.testing.assert_close(checkpoint.model_state, trainer.model.state_dict(),
+                                               check_device=False, rtol=0, atol=0)
+                    torch.testing.assert_close(checkpoint.ema_model_state, trainer.ema_model.state_dict(),
+                                               check_device=False, rtol=0, atol=0)
+
+    def test_pretrain_stop_and_save_boundaries(self):
+        from dexmani_policy.training.pretrain.obs import common
+        from dexmani_policy.training.pretrain.obs.afro import AFRO
+        for mode in ('inner', 'outer', 'validation', 'total', 'max_updates'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                make_source(root / 'source.zarr')
+                bounded = mode in ('total', 'max_updates')
+                args = ['--output-dir', str(root / 'run'), '--zarr-path', str(root / 'source.zarr'),
+                        '--device', DEVICE, '--num-workers', '0', '--no-wandb']
+                if mode != 'total':
+                    args += ['--max-updates', '1' if mode == 'max_updates' else '3']
+                args += ['dataset.horizon=3', 'dataset.frame_stride=1', 'dataset.pad_after=0',
+                         'dataloader.batch_size=8', f'training.num_epochs={2 if bounded else 20}',
+                         f'training.save_every_epochs={1 if bounded else 20}']
+                if mode == 'validation':
+                    args += ['dataset.val_episodes=1', 'training.val_every_epochs=1']
+                evaluate = common.evaluate
+
+                def stop_after_validation(*args, **kwargs):
+                    metrics = evaluate(*args, **kwargs)
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                    return metrics
+
+                if mode in ('inner', 'outer'):
+                    injection = stop_before_break_check(common.train, ('inner', 'outer').index(mode))
+                elif mode == 'validation':
+                    injection = patch.object(common, 'evaluate', side_effect=stop_after_validation)
+                else:
+                    injection = nullcontext()
+                with patch.object(common, 'save_run', wraps=common.save_run) as save, injection:
+                    common.train('afro', AFRO, args)
+                expected = 1 if mode in ('validation', 'max_updates') else 2
+                self.assertEqual([call.args[-1] for call in save.call_args_list],
+                                 [1, 2] if mode == 'total' else [expected])
+                checkpoint = torch.load(root / 'run/checkpoints/latest.pt', weights_only=False)
+                encoder = torch.load(root / 'run/encoder.pt', weights_only=True)
+                self.assertEqual(checkpoint['global_step'], expected)
+                self.assertEqual(encoder['global_step'], expected)
+                torch.testing.assert_close(checkpoint['model_state'], save.call_args.args[0].state_dict(), rtol=0, atol=0)
+                for name in ('encoder', 'normalizer'):
+                    state = {key.removeprefix(name + '.'): value for key, value in checkpoint['model_state'].items()
+                             if key.startswith(name + '.')}
+                    torch.testing.assert_close(encoder[name + '_state'], state, check_device=False, rtol=0, atol=0)
+                self.assertEqual(encoder['normalization'], checkpoint['effective_config']['normalization'])
+                if mode == 'total':
+                    with patch.object(common, 'save_run') as save, patch.object(common, 'export_encoder') as export:
+                        common.train('afro', AFRO, ['--resume-from', str(root / 'run'), '--no-wandb'])
+                    save.assert_not_called()
+                    export.assert_not_called()
 
     def test_initialization_without_original_sources(self):
         import numpy as np

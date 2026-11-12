@@ -73,6 +73,8 @@ python -m dexmani_policy.training.common.resume --run "$RUN"
 
 新实验使用新目录。省略 `hydra.run.dir` 时自动生成带时间标识的目录。`config.yaml` 记录初始配置快照，续训时保留原文件；checkpoint 的 `effective_config` 是恢复训练的权威配方，`metrics.jsonl` 只追加指标，恢复不解析或裁剪旧内容（允许坏行、残行和重复 step），`checkpoints/` 保存完整训练状态和 `latest.pt`。默认 W&B 为离线模式，可用 `workspace.wandb_cfg=null` 关闭。
 
+第一次 `Ctrl-C` 或 `SIGTERM` 请求在更新边界保存退出。停止请求若晚于本次更新的结束判断到达，可能再完成一次更新后保存退出；第二次信号强制退出，不保证保存。正常到达总预算或 `max_updates` 时同样先保存，与周期保存重合时只保存一次。
+
 Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。只检查必要的模型输入和动作维度，不比较数据内容、episode 布局或新旧 metadata。允许同 shape 的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
 
 续训恢复 raw/EMA、优化器、学习率调度器、步数和 normalizer。`--max-updates 100` 只限制本次续训执行量，不修改总预算。恢复使用 seed + global_step 开始新的随机过程和数据遍历，不恢复旧 batch、RNG 或 worker 状态，不承诺逐位复现。
@@ -89,8 +91,6 @@ bash scripts/training/train.sh dp3 initialization.policy="$RUN/checkpoints/lates
 `initialization.policy` 使用来源 raw 权重和配套 normalizer，补齐构造需要的 architecture、num_codes 等信息；不读取原始预训练文件，不重新拟合归一化。当前配方必须保持同结构；optimizer、scheduler 和 EMA 新建，step 从 0 开始。它与 resume 互斥，不支持 LoRA/非 LoRA 结构转换或部分权重加载。
 
 normalization 可以包含未使用字段，实际使用字段仍必须提供正确模式；这不使 encoder 自动适配缺失模态。梯度累积对本组 microbatch 等权平均，接受尾批较小 microbatch 的样本权重略高。训练采用标准流式 DataLoader，不缓存整轮 batch。
-
-本次简化不维护旧 checkpoint、旧实验配置和报告的兼容性；不提供迁移工具。原始数据与第三方预训练权重格式不变。
 
 常用配置的含义：
 

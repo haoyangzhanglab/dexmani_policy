@@ -178,15 +178,11 @@ class PolicyTrainer:
         print(f"Saved {checkpoint_path}")
 
     def signal_handler(self, signum, frame):
+        signame = signal.Signals(signum).name
         if self.stop_requested:
-            signame = signal.Signals(signum).name
             print(f"\nSecond {signame} — forcing exit.", flush=True)
             os._exit(1)
-        signame = signal.Signals(signum).name
-        print(
-            f"\n=== {signame} — finishing current step, then saving checkpoint... ===",
-            flush=True,
-        )
+        print(f"\n{signame} — stopping and saving at the next update boundary.", flush=True)
         self.stop_requested = True
 
     def log_step(self, group_metrics, pbar, *, lr, epoch):
@@ -279,11 +275,12 @@ class PolicyTrainer:
                             }
                             self.log_step(group_metrics, pbar, lr=lr, epoch=epoch)
 
-                        if self.global_step in self.milestone_steps or self.global_step >= stop_step or self.stop_requested:
+                        should_stop = self.stop_requested or self.global_step >= stop_step
+                        if self.global_step in self.milestone_steps or should_stop:
                             self.save_checkpoint()
-                        if self.global_step >= stop_step or self.stop_requested:
+                        if should_stop:
                             break
-                    if self.stop_requested:
+                    if should_stop:
                         break
 
             finally:
