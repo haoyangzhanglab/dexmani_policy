@@ -11,8 +11,8 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
-from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX, DiTX
+from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
 from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, restore_policy, save_checkpoint
 from dexmani_policy.training.common.config import load_policy_config
@@ -47,11 +47,15 @@ class DiTTest(unittest.TestCase):
         self.assertFalse(torch.allclose(output, self.model(actions, self.time, changed_context)))
 
         decoder = RectifiedFlow(self.model)
-        loss, metrics = decoder.compute_loss(context, self.actions, training_pair=(
-            actions, self.time, torch.randn_like(actions),
-        ))
+        training_pair = (actions, self.time, torch.randn_like(actions))
+        loss, metrics = decoder.compute_loss(context, self.actions, training_pair=training_pair)
         self.assertTrue(torch.isfinite(loss))
-        self.assertIn("loss_action", metrics)
+        self.assertEqual(set(metrics), {"loss", "loss_action"})
+        unlogged_loss, metrics = decoder.compute_loss(
+            context, self.actions, training_pair=training_pair, log_metrics=False,
+        )
+        self.assertEqual(metrics, {})
+        torch.testing.assert_close(unlogged_loss, loss, rtol=0, atol=0)
         loss.backward()
         for name, gradient in (("actions", actions.grad), ("context", context.grad)):
             with self.subTest(gradient=name):
@@ -63,6 +67,27 @@ class DiTTest(unittest.TestCase):
                 self.assertIsNotNone(parameter.grad)
                 self.assertTrue(torch.isfinite(parameter.grad).all())
                 self.assertGreater(parameter.grad.abs().sum().item(), 0)
+
+    def test_consistency_flow_loss_metrics(self):
+        decoder = ConsistencyFlow(ConsistencyDiTX(
+            horizon=5, action_dim=3, n_obs_steps=2, obs_token_dim=7,
+            hidden_dim=24, n_layers=2, n_head=4, p_drop_attn=0.,
+        ))
+        ema = copy.deepcopy(decoder).eval()
+        torch.manual_seed(23)
+        loss, metrics = decoder.compute_loss(self.context, self.actions, ema_decoder=ema)
+        self.assertEqual(set(metrics), {"loss", "loss_action", "loss_flow", "loss_consistency"})
+        torch.testing.assert_close(loss, metrics["loss_flow"] + metrics["loss_consistency"])
+        gradients = torch.autograd.grad(loss, tuple(decoder.parameters()))
+        torch.manual_seed(23)
+        unlogged_loss, metrics = decoder.compute_loss(
+            self.context, self.actions, ema_decoder=ema, log_metrics=False,
+        )
+        self.assertEqual(metrics, {})
+        torch.testing.assert_close(unlogged_loss, loss, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(unlogged_loss, tuple(decoder.parameters())), gradients, rtol=0, atol=0,
+        )
 
     @torch.no_grad()
     def test_causal_actions(self):

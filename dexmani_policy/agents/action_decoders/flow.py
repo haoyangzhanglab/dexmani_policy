@@ -90,14 +90,10 @@ class RectifiedFlow(nn.Module):
             loss = torch.stack(group_losses).sum()
 
         if log_metrics:
-            with torch.no_grad():
-                metrics.update({
-                    "loss": loss.detach(),
-                    "loss_action": loss.detach(),
-                    "pred_v_magnitude": torch.sqrt(torch.mean(pred_v_fp32**2)),
-                    "target_v_magnitude": torch.sqrt(torch.mean(target_v_fp32**2)),
-                    "t_mean": t.mean(),
-                })
+            metrics.update({
+                "loss": loss.detach(),
+                "loss_action": loss.detach(),
+            })
         return loss, metrics
 
     @torch.no_grad()
@@ -247,7 +243,7 @@ class ConsistencyFlow(nn.Module):
         *,
         ema_decoder: nn.Module,
         log_metrics: bool = True,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | int]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         ema_model = ema_decoder.model
         batch_size = actions.shape[0]
 
@@ -258,7 +254,6 @@ class ConsistencyFlow(nn.Module):
             )
 
         flow_batch_size = max(1, min(batch_size - 1, int(batch_size * self.flow_batch_ratio)))
-        consistency_batch_size = batch_size - flow_batch_size
 
         flow_targets = self.sample_flow_targets(actions[:flow_batch_size])
         consistency_targets = self.sample_consistency_targets(
@@ -284,19 +279,12 @@ class ConsistencyFlow(nn.Module):
         if not log_metrics:
             return loss, {}
 
-        with torch.no_grad():
-            metrics: dict[str, torch.Tensor | int] = {
-                "loss": loss.detach(),
-                "loss_action": loss.detach(),
-                "loss_flow": loss_flow.detach(),
-                "loss_consistency": loss_consistency.detach(),
-                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_flow.float()**2)),
-                "pred_vt_consistency_magnitude": torch.sqrt(torch.mean(pred_consistency.float()**2)),
-                "flow_batch_size": flow_batch_size,
-                "consistency_batch_size": consistency_batch_size,
-                "t_flow_mean": flow_targets["t"].mean(),
-                "t_consistency_mean": consistency_targets["t"].mean(),
-            }
+        metrics = {
+            "loss": loss.detach(),
+            "loss_action": loss.detach(),
+            "loss_flow": loss_flow.detach(),
+            "loss_consistency": loss_consistency.detach(),
+        }
         return loss, metrics
 
     @torch.no_grad()

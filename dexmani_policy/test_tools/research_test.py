@@ -370,15 +370,23 @@ class ResearchTest(unittest.TestCase):
                    eef_pose=torch.tensor([0.,0,0,1,0,0,0,1,0],device=DEVICE).repeat(2,2,1),
                    fingertip_xyz=torch.randn(2,2,5,3,device=DEVICE),
                    finger_tactile_force=torch.randn(2,2,5,3,device=DEVICE))
-        loss, _ = model(dict(obs=obs, action=torch.randn(2,4,19,device=DEVICE),
+        loss, metrics = model(dict(obs=obs, action=torch.randn(2,4,19,device=DEVICE),
                             future_force=torch.randn(2,5,3,device=DEVICE),
                             future_force_valid=torch.tensor([True,False],device=DEVICE)))
         self.assertTrue(torch.isfinite(loss))
+        self.assertEqual(set(metrics), {'loss', 'loss_action', 'loss_arm', 'loss_hand',
+                                       'loss_future_force', 'loss_future_force_weighted',
+                                       'future_force_valid_fraction', 'future_force_mae_scaled'})
+        self.assertEqual(metrics['future_force_valid_fraction'].item(), .5)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'), error_if_nonfinite=True)
         prediction = torch.randn(2,5,3, requires_grad=True)
-        loss, _ = model._compute_future_force_loss(prediction, dict(future_force=torch.randn_like(prediction),
-                                     future_force_valid=torch.zeros(2, dtype=torch.bool)), log_metrics=True)
+        batch = dict(future_force=torch.randn_like(prediction), future_force_valid=torch.zeros(2, dtype=torch.bool))
+        loss, metrics = model._compute_future_force_loss(prediction, batch, log_metrics=True)
+        self.assertTrue(all(value.item() == 0 for value in metrics.values()))
+        unlogged_loss, metrics = model._compute_future_force_loss(prediction, batch, log_metrics=False)
+        self.assertEqual(metrics, {})
+        torch.testing.assert_close(unlogged_loss, loss, rtol=0, atol=0)
         loss.backward()
         self.assertEqual(loss.item(), 0)
         torch.testing.assert_close(prediction.grad, torch.zeros_like(prediction))

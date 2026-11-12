@@ -172,7 +172,6 @@ class InterActDex(Policy):
                         "loss_future_force": loss.detach(),
                         "future_force_valid_fraction": mask.mean(),
                         "future_force_mae_scaled": mae,
-                        "future_force_mae_sdk": mae * 255.0,
                     }
         return loss, metrics
 
