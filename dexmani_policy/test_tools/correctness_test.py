@@ -52,6 +52,30 @@ class CorrectnessTest(unittest.TestCase):
                         rows = dataset.sampler.sample_source_rows(i)[:2]
                         np.testing.assert_array_equal(dataset[i]['obs']['finger_tactile_force'], force[rows])
 
+    def test_dataset_semantics(self):
+        from dexmani_policy.test_tools.smoke_test import make_source
+        from dexmani_policy.training.common.data import build_dataset
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.zarr'
+            source = make_source(path)
+            cfg = load_policy_config('dp3', [f'zarr_path={path}', 'horizon=4',
+                                            'n_obs_steps=2', 'n_action_steps=2'])
+            for field, values, message in (
+                ('task_name', ['other'], 'Dataset task mismatch'),
+                ('action_space', ['ee'], 'Simulation dataset must use joint actions'),
+                ('dt', [float('nan'), float('inf'), -float('inf'), 0, -.05], 'Invalid dataset dt'),
+            ):
+                original = source.attrs[field]
+                for value in values:
+                    with self.subTest(field=field, value=value):
+                        source.attrs[field] = value
+                        with self.assertRaisesRegex(ValueError, message):
+                            build_dataset(cfg)
+                source.attrs[field] = original
+            del source.attrs['dt']
+            with self.assertRaisesRegex(KeyError, 'dt'):
+                build_dataset(cfg)
+
     def test_point_counts_and_contact_head_boundary(self):
         import zarr
         from dexmani_policy.training.common.data import build_dataset
@@ -60,7 +84,7 @@ class CorrectnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'source.zarr'
             source = zarr.open_group(str(path), mode='w')
-            source.attrs['dt'] = .05
+            source.attrs.update(task_name='pick_apple_messy', action_space='joint', dt=.05)
             source.create_dataset('meta/episode_ends', data=np.array([4]))
             for key, shape in (('joint_state', (4, 19)), ('action', (4, 19)),
                                ('hand_pointcloud', (4, 7, 6)), ('object_pointcloud', (4, 11, 6)),
@@ -68,12 +92,9 @@ class CorrectnessTest(unittest.TestCase):
                 source.create_dataset('data/' + key, data=np.ones(shape, np.float16))
             cfg = load_policy_config('cordvip', [f'zarr_path={path}', 'horizon=4', 'n_obs_steps=2', 'n_action_steps=2'])
             dataset, description = build_dataset(cfg)
-            self.assertEqual(set(description), {'field_dims', 'deployment_metadata'})
-            self.assertEqual(description['deployment_metadata'], {'control_dt_s': .05})
-            self.assertIs(type(description['deployment_metadata']['control_dt_s']), float)
-            del source.attrs['dt']
-            with self.assertRaisesRegex(KeyError, 'dt'):
-                build_dataset(cfg)
+            self.assertEqual(set(description), {'field_dims', 'control_dt_s'})
+            self.assertEqual(description['control_dt_s'], .05)
+            self.assertIs(type(description['control_dt_s']), float)
             self.assertEqual(description['field_dims']['object_pointcloud'], 3)
             self.assertEqual(dataset[0]['obs']['object_pointcloud'].shape, (2, 11, 3))
             self.assertEqual(dataset[0]['obs']['object_pointcloud'].dtype, torch.float32)
@@ -88,6 +109,7 @@ class CorrectnessTest(unittest.TestCase):
         from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
         with tempfile.TemporaryDirectory() as directory:
             source = zarr.open_group(directory, mode='w')
+            source.attrs.update(task_name='pick_apple_messy', action_space='joint', dt=.05)
             source.create_dataset('meta/episode_ends', data=np.array([6, 12]))
             shapes = {'joint_state': (19,), 'hand_pointcloud': (7, 3),
                       'object_pointcloud': (1024, 3), 'contact_map': (1024,)}
@@ -143,7 +165,7 @@ class CorrectnessTest(unittest.TestCase):
         cfg = dict(env_runner=dict(task_name='test', env_rebuild_interval=1),
                    eval=dict(use_ema=False, inference_steps=2), dataset={},
                    normalization_dims=agent.normalization_dims,
-                   deployment_metadata={'control_dt_s': .05})
+                   control_dt_s=.05)
         pending_envs = iter(envs)
         def make_env(runner, **kwargs):
             self.assertEqual(runner.control_dt_s, .05)
@@ -229,7 +251,7 @@ class CorrectnessTest(unittest.TestCase):
                           weights='raw', inference_steps=2, action_steps=2)
             with patch('dexmani_policy.evaluation.selection.load_checkpoint', return_value=SimpleNamespace(
                     effective_config={'env_runner': {'task_name': 'test', 'env_kwargs': {}},
-                                      'deployment_metadata': {'control_dt_s': .05}})), patch(
+                                      'control_dt_s': .05})), patch(
                     'dexmani_policy.evaluation.selection.load_seed_pool', return_value=list(range(5))), patch(
                     'dexmani_policy.evaluation.selection.evaluate_policy') as evaluate:
                 for fail in (True, False):
@@ -351,13 +373,16 @@ class CorrectnessTest(unittest.TestCase):
     def test_policy_info_requires_control_period(self):
         from dexmani_policy.deployment.metadata import policy_info
         cfg = dict(task_name='test', action_key='action', dataset={},
-                   deployment_metadata={'control_dt_s': .05})
+                   control_dt_s=.05)
         agent = SimpleNamespace(normalization_dims={'joint_state': 19}, n_obs_steps=1,
                                 n_action_steps=1, future_steps=1, control_action_dim=19,
                                 supports_rtc=False, requires_prev_action=False)
-        self.assertEqual(policy_info('test.pt', cfg, agent, weights='raw',
-                                     inference_steps=1).control_dt_s, .05)
-        del cfg['deployment_metadata']['control_dt_s']
+        info = policy_info('test.pt', cfg, agent, weights='raw', inference_steps=1)
+        self.assertEqual(info.control_dt_s, .05)
+        self.assertIsNone(info.pointcloud_config)
+        self.assertIsNone(info.fingertip_link_names)
+        self.assertIsNone(info.depth_config)
+        del cfg['control_dt_s']
         with self.assertRaisesRegex(KeyError, 'control_dt_s'):
             policy_info('test.pt', cfg, agent, weights='raw', inference_steps=1)
 
@@ -487,7 +512,7 @@ class CorrectnessTest(unittest.TestCase):
                 checkpoint.touch()
             configs = [SimpleNamespace(effective_config={'env_runner': {
                 'task_name': 'test', 'env_kwargs': {'friction': .1}},
-                'deployment_metadata': {'control_dt_s': .05 + value * 1e-8},
+                'control_dt_s': .05 + value * 1e-8,
                 'agent': {'architecture': str(value)},
                 'normalization_dims': {'joint_state': 19} if value == 0 else {'point_cloud': 6}})
                 for value in (0, 1)]
@@ -516,7 +541,7 @@ class CorrectnessTest(unittest.TestCase):
             for field, value in (('task_name', 'other'), ('env_kwargs', {'friction': .9}),
                                  ('control_dt_s', .1)):
                 config = configs[1].effective_config
-                section = config['deployment_metadata'] if field == 'control_dt_s' else config['env_runner']
+                section = config if field == 'control_dt_s' else config['env_runner']
                 original = section[field]
                 section[field] = value
                 with self.subTest(field=field), patch(

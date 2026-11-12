@@ -133,8 +133,8 @@ def build_trainer(cfg, *, checkpoint=None):
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
     if checkpoint is not None:
-        data_dt = data_description["deployment_metadata"]["control_dt_s"]
-        policy_dt = cfg.deployment_metadata.control_dt_s
+        data_dt = data_description["control_dt_s"]
+        policy_dt = cfg.control_dt_s
         if not np.isclose(data_dt, policy_dt, rtol=1e-6, atol=1e-9):
             raise ValueError(
                 f"Resume control_dt_s mismatch: dataset dt={data_dt} s, "
@@ -144,7 +144,7 @@ def build_trainer(cfg, *, checkpoint=None):
         cfg.zarr_path = dataset.episode_store.path
         cfg.dataset.zarr_path = cfg.zarr_path
         if checkpoint is None:
-            cfg.deployment_metadata = data_description["deployment_metadata"]
+            cfg.control_dt_s = data_description["control_dt_s"]
     model = _prepare_policy(cfg, dataset, data_description["field_dims"], checkpoint=model_checkpoint)
     if checkpoint is None:
         with open_dict(cfg):

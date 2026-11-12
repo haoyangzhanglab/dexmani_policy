@@ -17,7 +17,7 @@ from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
 from dexmani_policy.test_tools.smoke_test import make_source
 from dexmani_policy.train import build_trainer
-from dexmani_policy.training.common.config import load_policy_config
+from dexmani_policy.training.common.config import assemble_policy_config, load_policy_config
 from dexmani_policy.training.common.resume import prepare_resume
 from dexmani_policy.training.common.optimization import EMA
 
@@ -66,6 +66,29 @@ class ResearchTest(unittest.TestCase):
             cfg.normalization.unused = 'not-a-mode'
         return cfg
 
+    def test_joint_collection_with_joint_and_ee_policies(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / 'source.zarr')
+            actions = np.zeros((12, 21), dtype=np.float32)
+            actions[:, :3] = source['data/action'][:, :3]
+            actions[:, 3:9] = [1, 0, 0, 0, 1, 0]
+            actions[:, 9:] = source['data/action'][:, 7:]
+            source.create_dataset('data/action_ee', data=actions)
+            for key in ('action', 'action_ee'):
+                with self.subTest(action_key=key):
+                    cfg = self.config(root)
+                    cfg.action_key = key
+                    cfg = assemble_policy_config(cfg)
+                    cfg.workspace.output_dir = str(root / key)
+                    with closing(build_trainer(cfg)) as trainer:
+                        trainer.train(max_updates=1)
+                        self.assertEqual(trainer.global_step, 1)
+                    saved = load_checkpoint(root / key / 'checkpoints/latest.pt')
+                    self.assertEqual(saved.effective_config['control_dt_s'], .05)
+                    self.assertNotIn('deployment_metadata', saved.effective_config)
+
     def test_training_extension_and_initialization(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -88,7 +111,7 @@ class ResearchTest(unittest.TestCase):
             replacement.attrs['dt'] = .05 + 1e-8
             with closing(prepare_resume(root / 'run', total_steps=4,
                                         zarr_path=root / 'replacement.zarr')) as trainer:
-                self.assertEqual(trainer.cfg.deployment_metadata.control_dt_s, .05)
+                self.assertEqual(trainer.cfg.control_dt_s, .05)
             with closing(prepare_resume(root / 'run', total_steps=4, log_interval=2)) as trainer:
                 self.assertEqual(trainer.global_step, 2)
                 self.assertEqual(trainer.log_interval_steps, 2)

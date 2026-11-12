@@ -27,7 +27,7 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     cfg = loaded.effective_config
     reference_task_name = cfg["env_runner"]["task_name"]
     reference_env_kwargs = cfg["env_runner"]["env_kwargs"]
-    reference_control_dt_s = cfg["deployment_metadata"]["control_dt_s"]
+    reference_control_dt_s = cfg["control_dt_s"]
     del loaded
     for checkpoint in checkpoints[1:]:
         loaded = load_checkpoint(checkpoint)
@@ -36,7 +36,7 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
             raise ValueError("Candidates must use the same task_name")
         if cfg["env_runner"]["env_kwargs"] != reference_env_kwargs:
             raise ValueError("Candidates must use the same env_kwargs")
-        control_dt_s = cfg["deployment_metadata"]["control_dt_s"]
+        control_dt_s = cfg["control_dt_s"]
         if not np.isclose(control_dt_s, reference_control_dt_s, rtol=1e-6, atol=1e-9):
             raise ValueError(
                 f"Candidates must use the same control_dt_s: "

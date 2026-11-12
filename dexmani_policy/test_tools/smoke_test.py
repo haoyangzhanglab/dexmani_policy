@@ -42,9 +42,10 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
         torch.testing.assert_close(optimizer_state["state"], checkpoint.optimizer_state["state"], check_device=False)
         assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
         assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
-        assert dict(trainer.cfg.deployment_metadata) == checkpoint.effective_config["deployment_metadata"]
+        assert trainer.cfg.control_dt_s == checkpoint.effective_config["control_dt_s"]
+        assert "deployment_metadata" not in checkpoint.effective_config
         data_dt = float(zarr.open_group(cfg.dataset.zarr_path, mode="r").attrs["dt"])
-        assert checkpoint.effective_config["deployment_metadata"]["control_dt_s"] == data_dt
+        assert checkpoint.effective_config["control_dt_s"] == data_dt
         del checkpoint, optimizer_state
         trainer.compile_models()
         trainer.train(max_updates=resume_updates)
@@ -53,12 +54,14 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
     assert final == expected, "Resume update count mismatch"
     saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
     assert saved.global_step == final, "Resumed checkpoint mismatch"
+    assert saved.effective_config["control_dt_s"] == data_dt
+    assert "deployment_metadata" not in saved.effective_config
     return step, final
 
 
 def make_source(path):
     source = zarr.open_group(str(path), mode="w-")
-    source.attrs.update(task_name="test", dt=0.05, action_space="joint")
+    source.attrs.update(task_name="pick_apple_messy", dt=0.05, action_space="joint")
     source.create_dataset("meta/episode_ends", data=np.array([6, 12], dtype=np.int64))
     rng = np.random.default_rng(11)
     for key, shape in (

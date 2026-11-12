@@ -12,7 +12,7 @@
 - **动作表示**：直接生成关节目标，或借助手姿码本、连续手部潜表示生成动作。
 - **学习目标**：在动作学习之外，引入观测预训练、一致性学习或未来触觉监督。
 
-本仓库负责策略学习与推理；`dexmani_sim` 提供仿真环境，`dexmani_real` 负责真实观测构建和硬件执行。模块分工见[项目架构](docs/项目架构.md)。
+当前链路为 `dexmani_sim` 数据生成 → 本仓库策略训练 → `dexmani_sim` 闭环评测，不包含 Real 数据训练或 Sim-to-Real。模块分工见[项目架构](docs/项目架构.md)。
 
 ## 策略方向
 
@@ -44,7 +44,7 @@ python -m pip check
 
 点云 FPS / KNN 路径还需要针对当前 Torch/CUDA 编译的 PyTorch3D 0.7.8；它是独立的编译依赖，`pip install -e .` 不会自动安装。离线接触标签额外使用 Open3D，可安装 `python -m pip install -e '.[preprocess]'`。
 
-仿真评测需要安装 `dexmani_sim` 并准备其任务资源与评测 seed 池；若它位于相邻目录，可执行 `python -m pip install -e ../dexmani_sim`，然后重新运行 `pip check`。硬件执行由 `dexmani_real` 提供。
+仿真评测需要安装 `dexmani_sim` 并准备其任务资源与评测 seed 池；若它位于相邻目录，可执行 `python -m pip install -e ../dexmani_sim`，然后重新运行 `pip check`。
 
 ## 数据与初始化权重
 
@@ -60,7 +60,7 @@ DP3、ODE、ManiFlow、CordViP、AdapTac 和 InterAct-Dex 可直接从示教训�
 | AFRO | 可选 `initialization.encoder`；允许随机初始化后冻结，也可设置 `agent.freeze_visual=false` |
 | CordViP | 使用包含手点云、物体点云、joint_state、action 的 `.cordvip.zarr`，可直接训练；预训练编码器可用 `initialization.encoder` 加载 |
 
-AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/观测预训练.md)。外部权重与可选主干见 [data/README](data/README.md)。完整 checkpoint 已包含部署所需权重和归一化参数，续训、推理不再读取初始化文件。
+AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/观测预训练.md)。外部权重与可选主干见 [data/README](data/README.md)。完整 checkpoint 已包含推理所需权重和归一化参数，续训、推理不再读取初始化文件。
 
 ## 训练与续训
 
@@ -75,7 +75,7 @@ python -m dexmani_policy.training.common.resume --run "$RUN"
 
 第一次 `Ctrl-C` 或 `SIGTERM` 请求在更新边界保存退出。停止请求若晚于本次更新的结束判断到达，可能再完成一次更新后保存退出；第二次信号强制退出，不保证保存。正常到达总预算或 `max_updates` 时同样先保存，与周期保存重合时只保存一次。
 
-Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。检查必要的模型输入、动作维度及控制周期（`rtol=1e-6`、`atol=1e-9`），不比较数据内容或 episode 布局。允许同 shape 且控制周期一致的不同数据集继续训练，数据适用性由研究者负责。部署 metadata 和归一化参数沿用 checkpoint。
+Resume 默认使用 checkpoint 保存的 Zarr 路径；可直接通过 `--zarr-path /new/data.zarr` 替换。检查数据任务名与训练配置一致、采集动作空间为 joint，以及必要的模型输入、动作维度和控制周期（`rtol=1e-6`、`atol=1e-9`），不比较数据内容或 episode 布局。允许同任务、同 shape 且控制周期一致的 joint 采集数据继续训练，数据适用性由研究者负责。顶层 `effective_config.control_dt_s` 和归一化参数沿用 checkpoint。
 
 续训恢复 raw/EMA、优化器、学习率调度器、步数和 normalizer。`--max-updates 100` 只限制本次续训执行量，不修改总预算。恢复使用 seed + global_step 开始新的随机过程和数据遍历，不恢复旧 batch、RNG 或 worker 状态，不承诺逐位复现。
 
@@ -118,7 +118,7 @@ bash scripts/eval/eval_pipeline.sh \
 
 将候选替换为实际存在的 checkpoint。默认每个候选使用自己的 raw/EMA、推理步数和执行长度；只有显式传 `--weights`、`--inference-steps` 或 `--action-steps` 才统一对应项。胜者在独立 test 回合继续使用选模时的实际设置，结果文件记录这些设置。跨方法比较的条件见[仿真评测机制](docs/仿真评测机制.md)。
 
-## 部署与检查
+## 推理与检查
 
 下面以 DP3 为例，`observation` 是外部执行端提供的观测历史字典，字段和长度由 `runtime.info` 描述：
 
@@ -140,7 +140,7 @@ with closing(load_policy("/path/to/run")) as runtime:
 python -m dexmani_policy.test_tools.smoke_test --device cpu --max-updates 2 --resume-updates 2
 ```
 
-上述检查使用临时数据；真实任务成功率需要独立仿真或实机评测。
+上述检查使用合成数据；任务成功率需要独立的仿真闭环评测。
 
 ## 阅读导航
 

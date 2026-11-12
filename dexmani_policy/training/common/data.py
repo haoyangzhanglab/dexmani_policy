@@ -1,5 +1,4 @@
-from math import prod
-from typing import Any
+from math import isfinite, prod
 
 import hydra
 import torch
@@ -49,6 +48,15 @@ def build_dataset(cfg):
     """Construct training samples and describe their stored field dimensions."""
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
+    if buffer.attrs["task_name"] != cfg.task_name:
+        raise ValueError(
+            f"Dataset task mismatch: dataset={buffer.attrs['task_name']}, config={cfg.task_name}"
+        )
+    if buffer.attrs["action_space"] != "joint":
+        raise ValueError("Simulation dataset must use joint actions")
+    dt = float(buffer.attrs["dt"])
+    if not isfinite(dt) or dt <= 0:
+        raise ValueError(f"Invalid dataset dt: {dt}")
     dims = {
         key: int(buffer[key].shape[-1]) for key in dataset.sensor_modalities
     }
@@ -61,19 +69,7 @@ def build_dataset(cfg):
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     print(f"[Dataset] {dataset.training_summary()}")
-    deployment: dict[str, Any] = {"control_dt_s": float(buffer.attrs["dt"])}
-    for modality, attr in (
-        ("point_cloud", "pointcloud_config"),
-        ("fingertip_xyz", "fingertip_link_names"),
-    ):
-        if modality in dataset.sensor_modalities and attr in buffer.attrs:
-            deployment[attr] = buffer.attrs[attr]
-    if "depth" in dataset.sensor_modalities:
-        deployment["depth_config"] = {
-            "shape": list(buffer["depth"].shape[1:]),
-            "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
-        }
-    return dataset, {"field_dims": dims, "deployment_metadata": deployment}
+    return dataset, {"field_dims": dims, "control_dt_s": dt}
 
 
 def close_data_loader(loader, iterator=None):
