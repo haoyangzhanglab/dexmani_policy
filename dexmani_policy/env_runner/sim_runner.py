@@ -129,7 +129,10 @@ class SimRunner:
                 ):
                     if env is not None:
                         previous, env = env, None
-                        previous.close()
+                        try:
+                            previous.close()
+                        finally:
+                            del previous
                     env = self.make_env(record_video=video_save_dir is not None)
 
                 success, steps = self._run_episode(

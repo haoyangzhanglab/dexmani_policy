@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+import weakref
 from contextlib import closing, nullcontext, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -739,6 +740,58 @@ class CorrectnessTest(unittest.TestCase):
         self.assertEqual(len(instances), 3)
         for env in instances:
             env.close.assert_called_once()
+
+    def test_simulation_rebuild_releases_previous_environment(self):
+        for failure in (None, 'close', 'make'):
+            with self.subTest(failure=failure):
+                runner = SimRunner('test', 1, ['joint_state'], {}, control_dt_s=.05,
+                                   env_rebuild_interval=1)
+                references, made, closed = [], [], []
+                error = RuntimeError(failure)
+
+                class Scene:
+                    pass
+
+                class Env:
+                    def __init__(self, index):
+                        self.index = index
+                        self.action_cnt = 1
+                        self.task = SimpleNamespace(scene=Scene())
+
+                    def close(self):
+                        closed.append(self.index)
+                        if failure == 'close':
+                            raise error
+
+                def make_env(*, record_video):
+                    made.append(record_video)
+                    if references:
+                        for reference in references[-1]:
+                            self.assertIsNone(reference())
+                        if failure == 'make':
+                            raise error
+                    env = Env(len(references))
+                    references.append((weakref.ref(env), weakref.ref(env.task.scene)))
+                    return env
+
+                # Mock call histories would themselves keep the old env alive.
+                runner.make_env = make_env
+                runner._run_episode = lambda *args, **kwargs: (True, 1)
+                results = runner.run(SimpleNamespace(requires_prev_action=False), seeds=[0, 1],
+                                     inference_steps=1, action_steps=1)
+                self.assertTrue(next(results)['success'])
+                if failure is None:
+                    self.assertTrue(next(results)['success'])
+                    with self.assertRaises(StopIteration):
+                        next(results)
+                    self.assertEqual(closed, [0, 1])
+                    self.assertTrue(all(ref() is None for pair in references for ref in pair))
+                else:
+                    with self.assertRaises(RuntimeError) as caught:
+                        next(results)
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(closed, [0])
+                self.assertEqual(made, [False] if failure == 'close' else [False, False])
 
     def test_simulation_shutdown(self):
         runner = SimRunner('test', 1, ['joint_state'], {}, control_dt_s=.05)
