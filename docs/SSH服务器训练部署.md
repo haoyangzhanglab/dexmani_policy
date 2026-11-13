@@ -122,7 +122,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --fg -- \
 
 后台与前台命令二选一。前台输出直接显示在终端，SSH 连接需保持。
 
-`--gpu` 设置远端 GPU 可见性。前台和后台启动都会将本次 `CUDA_VISIBLE_DEVICES` 显式传给训练进程；复用已有 tmux 服务时也会使用本次设置。修改公共参数中的 GPU 编号即可切换，进程内部的 `cuda:0` 表示第一张可见 GPU。
+`--gpu` 设置远端 GPU 可见性，前台、后台及复用 tmux 服务时均使用本次设置。修改公共参数中的 GPU 编号即可切换，进程内部的 `cuda:0` 表示第一张可见 GPU。
 
 ## 5. 查看进度与停止
 
@@ -162,7 +162,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 
 续训恢复 checkpoint 保存的训练配方与状态，不再次传入方法名或模型配置。`--` 后传续训入口的运行参数，例如 `--num-workers`；可追加 `--max-updates 100` 限制本次执行步数，不改变实验总预算。延长预算使用 `--total-steps 150000`，已完成的实验也可继续；本次数据从新一轮遍历开始，不恢复旧 batch 或 RNG。
 
-`metrics.jsonl` 只追加当前指标，恢复时不读取、修复或截断历史。旧坏行、崩溃残行、重复或回退后的 step 均保留，不保证整个历史可完整解析；实际写入失败仍报错。初始 config.yaml 不被覆盖，checkpoint.effective_config 是恢复配方。
+`metrics.jsonl` 只追加指标，不修复或裁剪历史。`config.yaml` 保留初始配置快照，续训以 checkpoint 的 `effective_config` 为准。
 
 需要前台续训时，在 `--` 前加入 `--fg`。源码仍由启动脚本同步，数据沿用已准备的远端目录。
 
@@ -193,4 +193,4 @@ bash scripts/remote/sync_down.sh --host "$HOST" \
 
 传输成功后再使用本地结果。启动日志位于 `REPO/logs/`，不属于 `RUN`；训练运行中通过远端日志查看进度。
 
-后续选模与测试见[仿真评测机制](仿真评测机制.md)。复现选模胜者时，应同时保留 checkpoint、raw/EMA 权重选择、推理步数与执行长度。
+选模与测试流程见[仿真评测机制](仿真评测机制.md)。复现选模胜者时，应同时保留 checkpoint、raw/EMA 权重选择、推理步数与执行长度。
