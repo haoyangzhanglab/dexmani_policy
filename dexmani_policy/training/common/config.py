@@ -18,7 +18,7 @@ def register_resolvers():
     OmegaConf.register_new_resolver("run_id", lambda: LAUNCH_ID, replace=True)
 
 
-def load_policy_config(config, overrides=()):
+def load_config(config, overrides=()):
     path = Path(config)
     if path.is_absolute() or ".." in path.parts or not str(config) or str(config).startswith("~"):
         raise ValueError("Config must be a name or relative path under dexmani_policy/configs")
@@ -26,13 +26,11 @@ def load_policy_config(config, overrides=()):
     register_resolvers()
     with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         cfg = hydra.compose(config_name=name, overrides=list(overrides))
-    return assemble_policy_config(cfg)
+    return assemble_policy_config(cfg) if "policy_name" in cfg else cfg
 
 
 def assemble_policy_config(cfg):
     """Derive action layouts and sampling windows from the recipe."""
-    if "policy_name" not in cfg:
-        return cfg
     with open_dict(cfg):
         action_key = cfg.action_key
         if action_key not in ("action", "action_ee"):
@@ -53,9 +51,6 @@ def assemble_policy_config(cfg):
                                       else "dexmani_policy.datasets.demonstration.DemonstrationDataset")
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
-        if method == "interact-dex":
-            cfg.agent.future_force_horizon = cfg.future_force_horizon
-            cfg.dataset.include_future_force = cfg.agent.future_force_loss_weight > 0
         cfg.env_runner.task_name = cfg.task_name
         cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
     return cfg
@@ -89,8 +84,6 @@ def validate_normalization(cfg, field_dims):
     physical = set()
     if cfg.policy_name in {"sat", "dqrise", "dexlatent"}:
         physical = {"point_cloud", "camera_intrinsic", "camera_extrinsic"}
-    elif cfg.policy_name == "interact-dex":
-        physical = {"point_cloud", "eef_pose", "fingertip_xyz"}
     elif cfg.policy_name == "adaptac":
         physical = {"point_cloud"}
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:

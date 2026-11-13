@@ -86,7 +86,7 @@ class PointPatchEncoder(nn.Module):
             raise ValueError("geometry_scale must be finite and positive")
 
         self.input_channels = input_channels
-        self.channels = channels
+        self.out_dim = channels
         self.num_patches = num_patches
         self.group_size = group_size
         self.fps_random_config = dict(fps_random_config or {})
@@ -112,10 +112,6 @@ class PointPatchEncoder(nn.Module):
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)
         return {"tokens": tokens, "xyz": centers}
-
-    @property
-    def out_dim(self) -> int:
-        return self.channels
 
 
 def _encode_global(
@@ -145,7 +141,7 @@ class GlobalPointTransformer(nn.Module):
             raise ValueError("channels must be divisible by num_heads")
         if int(channels * mlp_ratio) < 1:
             raise ValueError("mlp_ratio must produce a positive hidden dimension")
-        self.channels = channels
+        self.out_dim = channels
         self.rope = RotaryPositionEmbedding3D(channels // num_heads, rope_scale, rope_base)
         self.blocks = nn.ModuleList(
             [GlobalTransformerBlock(channels, num_heads, mlp_ratio) for _ in range(depth)]
@@ -155,10 +151,6 @@ class GlobalPointTransformer(nn.Module):
     def forward(self, tokens: torch.Tensor, xyz: torch.Tensor) -> torch.Tensor:
         cos, sin = self.rope(xyz)
         return _encode_global(tokens, cos, sin, self.blocks, self.norm)
-
-    @property
-    def out_dim(self) -> int:
-        return self.channels
 
 
 class PointTransformerEncoder(PointPatchEncoder):

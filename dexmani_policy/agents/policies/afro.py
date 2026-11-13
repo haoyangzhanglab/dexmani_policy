@@ -64,7 +64,6 @@ class AFRO(Policy):
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-        self.freeze_visual = freeze_visual
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
         return [

@@ -1,4 +1,4 @@
-"""InterAct-only zero-referenced local and global tactile fusion."""
+"""Zero-referenced local and global tactile fusion."""
 
 import torch
 from torch import nn

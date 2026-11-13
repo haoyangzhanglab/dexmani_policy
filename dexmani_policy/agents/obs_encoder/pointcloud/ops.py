@@ -3,12 +3,6 @@ from __future__ import annotations
 import torch
 
 
-def load_pointcloud_ops():
-    import pytorch3d.ops
-
-    return pytorch3d.ops
-
-
 def resolve_fps_random_config(
     fps_random_config: dict | None,
     training: bool,
@@ -28,13 +22,13 @@ def farthest_point_sample(
     use_shuffle_output: bool = True,
 ) -> torch.Tensor:
     """Sample original points (K <= N) by XYZ distance, preserving all channels."""
-    torch3d_ops = load_pointcloud_ops()
+    from pytorch3d.ops import sample_farthest_points
 
     if pointcloud.size(-1) < 3:
         raise ValueError("pointcloud must have at least three XYZ channels")
 
     xyz = pointcloud[..., :3]
-    sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
+    sampled_xyz, sample_idx = sample_farthest_points(
         points=xyz,
         K=num_samples,
         random_start_point=use_random and use_random_start,
@@ -91,7 +85,9 @@ def knn_indices(
         return distances.topk(num_neighbors, dim=2, largest=False, sorted=False).indices
     if backend != "pytorch3d":
         raise ValueError(f"Unknown kNN backend: {backend}")
-    result = load_pointcloud_ops().knn_points(
+    from pytorch3d.ops import knn_points
+
+    result = knn_points(
         p1=query_xyz,
         p2=support_xyz,
         K=num_neighbors,

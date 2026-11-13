@@ -16,7 +16,7 @@ from dexmani_policy.common.config import positive_int, set_project_root
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
 from dexmani_policy.train import run_training
-from dexmani_policy.training.common.config import load_policy_config
+from dexmani_policy.training.common.config import load_config
 from dexmani_policy.training.common.data import build_dataset, fit_normalizer
 from dexmani_policy.training.common.resume import prepare_resume
 
@@ -104,7 +104,7 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     replacement = make_source(replacement_path)
     replacement.create_dataset("meta/episode_ends", data=np.array([3, 6, 9, 12]), overwrite=True)
     replacement["data/action"][:] += 1
-    cfg = load_policy_config("dp3", [
+    cfg = load_config("dp3", [
         f"zarr_path={root / 'source.zarr'}", f"training.device={device}",
         "horizon=4", "n_obs_steps=2", "n_action_steps=2",
         "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16",
@@ -151,7 +151,7 @@ def check_cordvip(root, device, *, max_updates, resume_updates):
     replaced = zarr.open_group(str(replacement), mode="a")
     replaced["data/action"][:] += 1
     replaced["meta/episode_ends"][:] = [4, 12]
-    cfg = load_policy_config("cordvip", [
+    cfg = load_config("cordvip", [
         f"zarr_path={root / 'source.zarr'}", f"training.device={device}",
         "horizon=4", "n_obs_steps=2", "n_action_steps=2",
         "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=16",
@@ -195,7 +195,7 @@ def main(argv=None):
             check_cordvip(directory / "cordvip", args.device or "cpu",
                           max_updates=max_updates, resume_updates=args.resume_updates)
         else:
-            cfg = load_policy_config(args.config, args.override)
+            cfg = load_config(args.config, args.override)
             if args.device is not None:
                 cfg.training.device = args.device
             step, final = run_smoke(cfg, directory, max_updates=max_updates, resume_updates=args.resume_updates)

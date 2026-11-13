@@ -20,7 +20,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 from dexmani_policy.datasets.split import split_episodes
-from dexmani_policy.training.common.config import load_policy_config
+from dexmani_policy.training.common.config import load_config
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
@@ -231,7 +231,7 @@ def main():
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. vq_vae.device=cpu")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    train(load_policy_config(args.config, args.overrides))
+    train(load_config(args.config, args.overrides))
 
 
 if __name__ == "__main__":

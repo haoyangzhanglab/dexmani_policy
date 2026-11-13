@@ -15,7 +15,7 @@ from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
 from dexmani_policy.training.common import training_signal_handlers
-from dexmani_policy.training.common.config import load_policy_config
+from dexmani_policy.training.common.config import load_config
 from dexmani_policy.training.common.data import (
     build_train_loader, close_data_loader, fit_normalizer,
 )
@@ -51,7 +51,7 @@ def load_run(method, argv=None):
         cfg = OmegaConf.create(checkpoint["effective_config"])
         cfg.workspace.output_dir = str(directory)
     else:
-        cfg = load_policy_config(args.config or f"pretrain/obs/{method}", args.overrides)
+        cfg = load_config(args.config or f"pretrain/obs/{method}", args.overrides)
         if args.output_dir is not None:
             cfg.workspace.output_dir = args.output_dir
     if args.total_steps is not None:

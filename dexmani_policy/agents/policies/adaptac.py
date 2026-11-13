@@ -139,8 +139,7 @@ class AdapTac(Policy):
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
         self.force_key = tactile_encoder.input_key
-        self.force_shape = TACTILE_FEATURE_SHAPES[self.force_key]
-        self.force_dim = math.prod(self.force_shape)
+        self.force_dim = math.prod(TACTILE_FEATURE_SHAPES[self.force_key])
         self.force_predictor = ForceDiffusion(
             ForceTransformer(
                 horizon=self.future_steps,

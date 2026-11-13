@@ -12,12 +12,13 @@ import zarr
 
 from dexmani_policy.agents.obs_encoder.pointcloud.camera_projection import project_to_image
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import farthest_point_sample, preprocess_point_cloud
-from dexmani_policy.training.common.config import load_policy_config
+from dexmani_policy.training.common.config import load_config
 
 
 @torch.no_grad()
 def overlay_frame(ax, data, frame, config):
     rgb = np.asarray(data["rgb"][frame])
+    height, width = rgb.shape[:2]
     cloud = torch.from_numpy(np.asarray(data["point_cloud"][frame]))
     points = preprocess_point_cloud(
         cloud[None], config.num_points, config.fps_random_config, training=False,
@@ -29,10 +30,9 @@ def overlay_frame(ax, data, frame, config):
     intrinsic = torch.from_numpy(np.asarray(data["camera_intrinsic"][frame])).reshape(1, 3, 3)
     extrinsic = torch.from_numpy(np.asarray(data["camera_extrinsic"][frame])).reshape(1, 3, 4)
     projection = project_to_image(
-        centers, intrinsic, extrinsic, torch.eye(3)[None], rgb.shape[:2],
+        centers, intrinsic, extrinsic, torch.eye(3)[None], (height, width),
     )
     grid = projection.grid_xy[0]
-    height, width = rgb.shape[:2]
     uv = ((grid + 1) * grid.new_tensor((width, height)) / 2 - 0.5).numpy()
     valid = projection.valid[0].numpy()
     ax.imshow(rgb)
@@ -48,7 +48,7 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(2)
     args.output.mkdir(parents=True, exist_ok=True)
-    config = load_policy_config("sat").agent
+    config = load_config("sat").agent
     for dataset in args.datasets:
         root = zarr.open_group(str(dataset), mode="r")
         ends = np.asarray(root["meta/episode_ends"][:])

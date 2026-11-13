@@ -1,4 +1,4 @@
-"""InterAct-only cross-attention with Base-frame relative position bias and values."""
+"""Cross-attention with Base-frame relative position bias and values."""
 
 import torch
 from torch import nn

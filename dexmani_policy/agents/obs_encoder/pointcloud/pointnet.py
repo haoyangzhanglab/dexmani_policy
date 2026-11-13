@@ -23,8 +23,7 @@ class PointNet(nn.Module):
         pooling: str = "amax",
     ):
         super().__init__()
-        self.input_channels = input_channels
-        self.output_channels = output_channels
+        self.out_dim = output_channels
         if pooling not in {"amax", "max"}:
             raise ValueError("pooling must be 'amax' or 'max'")
         self.pooling = pooling
@@ -41,10 +40,6 @@ class PointNet(nn.Module):
         global_token = self.output_projection(global_token)
         return global_token
 
-    @property
-    def out_dim(self) -> int:
-        return self.output_channels
-
 
 class PointNetDense(nn.Module):
     """Encode each point independently into a dense token sequence [B, N, D]."""
@@ -55,8 +50,7 @@ class PointNetDense(nn.Module):
         out_channels: int = 128,
     ):
         super().__init__()
-        self.input_channels = input_channels
-        self.out_channels = out_channels
+        self.out_dim = out_channels
 
         self.mlp = build_point_mlp(input_channels)
         self.final_proj = nn.Sequential(
@@ -69,12 +63,8 @@ class PointNetDense(nn.Module):
         return self.final_proj(point_feature)
 
     @property
-    def out_dim(self) -> int:
-        return self.out_channels
-
-    @property
     def effective_config(self) -> dict:
-        return {"out_channels": self.out_channels}
+        return {"out_channels": self.out_dim}
 
 
 class MultiStagePointNet(nn.Module):
@@ -91,8 +81,7 @@ class MultiStagePointNet(nn.Module):
         if num_layers <= 0:
             raise ValueError(f"num_layers must be positive, but got {num_layers}")
 
-        self.input_channels = input_channels
-        self.output_channels = output_channels
+        self.out_dim = output_channels
 
         self.input_projection = nn.Conv1d(input_channels, hidden_channels, kernel_size=1)
         self.activation = nn.ReLU(inplace=False)
@@ -128,7 +117,3 @@ class MultiStagePointNet(nn.Module):
         point_feature = self.output_projection(point_feature)
         global_token = point_feature.amax(dim=-1)
         return global_token
-
-    @property
-    def out_dim(self) -> int:
-        return self.output_channels
