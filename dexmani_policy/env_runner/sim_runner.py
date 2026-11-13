@@ -138,21 +138,26 @@ class SimRunner:
                 success, steps = self._run_episode(
                     agent, env, seed, inference_steps, action_steps=action_steps
                 )
-                video = None
-                if video_save_dir is not None:
-                    from dexmani_policy.env_runner.video import save_episode_video
-
-                    video = save_episode_video(
-                        env.get_video(), env.video_fps, Path(video_save_dir) / f"episode_{seed}.mp4",
-                    )
-                yield {
+                result = {
                     "task_name": self.task_name,
                     "seed": seed,
                     "success": success,
                     "steps": steps,
                     "total_steps": env.action_cnt,
-                    "video": video,
+                    "video": None,
                 }
+                if video_save_dir is not None:
+                    try:
+                        from dexmani_policy.env_runner.video import save_episode_video
+
+                        result["video"] = save_episode_video(
+                            env.get_video(), env.video_fps, Path(video_save_dir) / f"episode_{seed}.mp4",
+                        )
+                    except BaseException:
+                        # Let the consumer publish the completed episode before propagating the error.
+                        yield result
+                        raise
+                yield result
         except BaseException as error:
             if env is not None:
                 try:

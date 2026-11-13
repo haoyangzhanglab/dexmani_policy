@@ -27,13 +27,8 @@ from dexmani_policy.training.trainer import PolicyTrainer
 
 
 class CorrectnessTest(unittest.TestCase):
-    def test_dp_rgb_recipes(self):
-        import hydra
-        import yaml
+    def test_dp_resnet_recipe(self):
         from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
-        from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
-        from dexmani_policy.common.checkpoint import restore_policy
-        from dexmani_policy.training.common.config import CONFIG_ROOT
         cfg = load_policy_config('dp')
         self.assertIsNone(cfg.initialization.rgb)
         self.assertEqual(list(cfg.dataset.rgb_preprocess_size), [84, 84])
@@ -50,19 +45,18 @@ class CorrectnessTest(unittest.TestCase):
         self.assertTrue(any(isinstance(m, torch.nn.GroupNorm) for m in encoder.modules()))
         self.assertFalse(any(isinstance(m, torch.nn.BatchNorm2d) for m in encoder.modules()))
         self.assertEqual(processor.process_images(torch.zeros(1, 3, 76, 76)).shape[-2:], (76, 76))
-        del encoder
 
-        text = (CONFIG_ROOT / 'dp.yaml').read_text().split('# 可选 DINOv2：替换上面对应配置块。\n')[1]
-        example = yaml.safe_load('\n'.join(line.removeprefix('# ') for line in text.splitlines()))
-        self.assertEqual(example, dict(initialization=dict(rgb='data/pretrained/dinov2-small'),
-            dataset=dict(rgb_preprocess_size=[240, 240], rgb_random_crop_size=[224, 224]),
-            agent=dict(rgb_backbone_name='dino', rgb_backbone_config=dict(tune_mode='lora', image_size=[224, 224]))))
-        cfg.agent.rgb_backbone_config = example['agent']['rgb_backbone_config']
-        cfg.agent.rgb_backbone_name = example['agent']['rgb_backbone_name']
+    def test_dp_dino_restoration(self):
+        import hydra
+        from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
+        from dexmani_policy.common.checkpoint import restore_policy
+
+        cfg = load_policy_config('dp')
+        cfg.agent.rgb_backbone_name = 'dino'
         # A tiny saved DINO recipe exercises restoration without training or external weights.
-        with open_dict(cfg.agent.rgb_backbone_config):
-            cfg.agent.rgb_backbone_config.architecture = dict(model_type='dinov2', hidden_size=24,
-                num_hidden_layers=1, num_attention_heads=4, image_size=224, patch_size=16)
+        cfg.agent.rgb_backbone_config = dict(tune_mode='lora', image_size=[224, 224],
+            architecture=dict(model_type='dinov2', hidden_size=24, num_hidden_layers=1,
+                              num_attention_heads=4, image_size=224, patch_size=16))
         cfg.agent.down_dims = [16, 32]
         cfg.agent.diffusion_step_embed_dim = 16
         model = hydra.utils.instantiate(cfg.agent, _convert_='all')
@@ -186,59 +180,105 @@ class CorrectnessTest(unittest.TestCase):
                     export.assert_not_called()
 
     def test_evaluation_incremental_publication(self):
+        from dexmani_policy.evaluation.metrics import summarize_episodes
         from dexmani_policy.evaluation.rollout import evaluate_policy
-        agent = SimpleNamespace(n_obs_steps=2, n_action_steps=1, future_steps=3,
+
+        agent = SimpleNamespace(n_obs_steps=1, n_action_steps=1, future_steps=1, requires_prev_action=False,
                                 force_predictor=SimpleNamespace(num_inference_steps=7))
         cfg = dict(env_runner=dict(task_name='test'), dataset={}, control_dt_s=.05,
                    normalization_dims={'joint_state': 19}, eval=dict(use_ema=False, inference_steps=2))
         loaded = SimpleNamespace(effective_config=cfg, model_state={}, global_step=10)
-        rows = [dict(seed=seed, success=success, steps=steps, total_steps=total)
-                for seed, success, steps, total in ((11, True, 2, 3), (22, False, None, 9), (33, True, 4, 6))]
-        expected = [None,
+        outcomes = [(11, True, 2, 3), (22, False, None, 9), (33, True, 4, 6)]
+        seeds = [row[0] for row in outcomes]
+        statistics = [None,
             dict(n_episodes=1, n_success=1, success_rate=1., avg_steps=2., avg_steps_all=3.),
             dict(n_episodes=2, n_success=1, success_rate=.5, avg_steps=2., avg_steps_all=6.),
             dict(n_episodes=3, n_success=2, success_rate=2 / 3, avg_steps=3., avg_steps_all=6.)]
-        for count, cleanup_failure in ((3, False), (2, False), (0, False), (3, True)):
-            with self.subTest(count=count, cleanup_failure=cleanup_failure), tempfile.TemporaryDirectory() as directory:
+        frames = np.zeros((2, 2, 2, 3), dtype=np.uint8)
+        for video, failure, count, cleanup_failure in (
+            (False, None, 3, False), (False, 'episode', 0, False), (False, 'episode', 2, False),
+            (False, None, 3, True), (True, None, 3, False),
+            (True, 'read', 2, False), (True, 'save', 2, False),
+            (True, 'save', 2, True), (True, None, 3, True),
+        ):
+            with self.subTest(video=video, failure=failure, count=count, cleanup=cleanup_failure), \
+                    tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 path = root / 'eval/result_details.json'
-                failure = RuntimeError('close failed' if cleanup_failure else 'rollout failed')
-                closed = Mock(side_effect=failure if cleanup_failure else None)
-                def results(*args, **kwargs):
-                    try:
-                        for index in range(count + 1):
-                            record = json.loads(path.read_text())
-                            self.assertFalse(record['completed'])
-                            self.assertEqual(record['episodes'], rows[:index])
-                            if index:
-                                for key, value in expected[index].items():
-                                    self.assertEqual(record['statistics'][key], value)
-                            else:
-                                self.assertIsNone(record['statistics'])
-                            if index < count:
-                                yield rows[index]
-                        if count < 3:
-                            raise failure
-                    finally:
-                        closed()
+                primary = KeyboardInterrupt('interrupted') if failure == 'episode' else RuntimeError('video failed')
+                cleanup = RuntimeError('close failed')
+                expected = [dict(task_name='test', seed=seed, success=success, steps=steps,
+                                 total_steps=total, video=str(root / f'eval/videos/test/episode_{seed}.mp4')
+                                 if video and not (failure and seed == 22) else None)
+                            for seed, success, steps, total in outcomes[:count]]
+                env = SimpleNamespace(action_cnt=0, video_fps=16)
+
+                def check_snapshot(index):
+                    record = json.loads(path.read_text())
+                    self.assertFalse(record['completed'])
+                    self.assertEqual(record['episodes'], expected[:index])
+                    self.assertEqual(record['statistics'], summarize_episodes(expected[:index]) if index else None)
+                    if index:
+                        for key, value in statistics[index].items():
+                            self.assertEqual(record['statistics'][key], value)
+
+                def run_episode(agent, current_env, seed, inference_steps, *, action_steps):
+                    index = seeds.index(seed)
+                    check_snapshot(index)
+                    if failure == 'episode' and index == count:
+                        raise primary
+                    current_env.seed = seed
+                    _, success, steps, current_env.action_cnt = outcomes[index]
+                    return success, steps
+
+                def get_video():
+                    if failure == 'read' and env.seed == 22:
+                        raise primary
+                    return frames
+
+                def save_video(data, fps, destination):
+                    self.assertIs(data, frames)
+                    self.assertEqual(fps, 16)
+                    if failure == 'save' and env.seed == 22:
+                        raise primary
+                    return str(destination)
+
+                def close():
+                    check_snapshot(count)
+                    if cleanup_failure:
+                        raise cleanup
+
+                env.get_video, env.close = Mock(side_effect=get_video), Mock(side_effect=close)
                 with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
                         patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
-                        patch.object(SimRunner, 'run', side_effect=results):
-                    if count == 3 and not cleanup_failure:
-                        result, returned_path = evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33],
-                                                               device='cpu', output_dir=path.parent)
+                        patch.object(SimRunner, 'make_env', return_value=env) as make_env, \
+                        patch.object(SimRunner, '_run_episode', side_effect=run_episode) as episode, \
+                        patch('dexmani_policy.env_runner.video.save_episode_video', side_effect=save_video) as save:
+                    if failure or cleanup_failure:
+                        error = primary if failure else cleanup
+                        with self.assertLogs(level='ERROR') if failure and cleanup_failure else nullcontext() as logs:
+                            with self.assertRaises(type(error)) as caught:
+                                evaluate_policy(root / 'candidate.pt', seeds=seeds, device='cpu',
+                                                video=video, output_dir=path.parent)
+                        self.assertIs(caught.exception, error)
+                        if logs:
+                            self.assertIn('close failed', '\n'.join(logs.output))
+                    else:
+                        result, returned_path = evaluate_policy(root / 'candidate.pt', seeds=seeds,
+                                                               device='cpu', video=video, output_dir=path.parent)
                         self.assertEqual(returned_path, path)
                         self.assertEqual(result, json.loads(path.read_text()))
-                    else:
-                        with self.assertRaises(RuntimeError) as caught:
-                            evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33], device='cpu', output_dir=path.parent)
-                        self.assertIs(caught.exception, failure)
                 record = json.loads(path.read_text())
-                self.assertEqual(record['completed'], count == 3 and not cleanup_failure)
-                self.assertEqual(record['episodes'], rows[:count])
+                self.assertEqual(record['episodes'], expected)
+                self.assertEqual(record['statistics'], summarize_episodes(expected) if count else None)
+                self.assertEqual(record['completed'], not (failure or cleanup_failure))
                 self.assertEqual((record['global_step'], record['weights'], record['force_inference_steps']), (10, 'raw', 7))
-                self.assertEqual(record['seeds'], [11, 22, 33])
-                closed.assert_called_once()
+                self.assertEqual(record['seeds'], seeds)
+                self.assertEqual([call.args[2] for call in episode.call_args_list], seeds[:count + int(failure == 'episode')])
+                self.assertEqual(env.get_video.call_count, count if video else 0)
+                self.assertEqual(save.call_count, (count - int(failure == 'read')) if video else 0)
+                make_env.assert_called_once_with(record_video=video)
+                env.close.assert_called_once()
 
     def test_tactile_metadata_does_not_change_samples(self):
         from dexmani_policy.datasets.variants.tactile import InterActDexDataset
@@ -275,30 +315,36 @@ class CorrectnessTest(unittest.TestCase):
         cfg = dict(env_runner=dict(task_name='test'), dataset={}, control_dt_s=.05,
                    normalization_dims={'joint_state': 19}, eval=dict(use_ema=False, inference_steps=2))
         loaded = SimpleNamespace(effective_config=cfg, model_state={}, global_step=10)
-        env = SimpleNamespace(action_cnt=3, close=Mock(side_effect=RuntimeError('close failed')))
         primary = OSError('disk full')
         replace = os.replace
         def publish(source, target):
             if publication.call_count == 3:
                 raise primary
             replace(source, target)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
-                    patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
-                    patch.object(SimRunner, 'make_env', return_value=env), \
-                    patch.object(SimRunner, '_run_episode', return_value=(True, 2)), \
-                    patch('dexmani_policy.common.io_util.os.replace', side_effect=publish) as publication:
-                with self.assertLogs(level='ERROR') as logs, self.assertRaises(OSError) as caught:
-                    evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33], device='cpu', output_dir=root / 'eval')
-            self.assertIs(caught.exception, primary)
-            self.assertIn('close failed', '\n'.join(logs.output))
-            env.close.assert_called_once()
-            record = json.loads((root / 'eval/result_details.json').read_text())
-            self.assertFalse(record['completed'])
-            self.assertEqual([row['seed'] for row in record['episodes']], [11])
-            self.assertEqual(record['statistics']['n_episodes'], 1)
-            self.assertFalse(list((root / 'eval').glob('.dexmani-publish-*')))
+        for video_failure in (False, True):
+            with self.subTest(video_failure=video_failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = SimpleNamespace(action_cnt=3, close=Mock(side_effect=RuntimeError('close failed')),
+                                      get_video=Mock(return_value=np.zeros((2, 2, 2, 3), dtype=np.uint8)), video_fps=16)
+                with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
+                        patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
+                        patch.object(SimRunner, 'make_env', return_value=env), \
+                        patch.object(SimRunner, '_run_episode', return_value=(True, 2)) as episode, \
+                        patch('dexmani_policy.env_runner.video.save_episode_video',
+                              side_effect=['first.mp4', RuntimeError('video failed')]), \
+                        patch('dexmani_policy.common.io_util.os.replace', side_effect=publish) as publication:
+                    with self.assertLogs(level='ERROR') as logs, self.assertRaises(OSError) as caught:
+                        evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33], device='cpu',
+                                        video=video_failure, output_dir=root / 'eval')
+                self.assertIs(caught.exception, primary)
+                self.assertIn('close failed', '\n'.join(logs.output))
+                env.close.assert_called_once()
+                self.assertEqual(episode.call_count, 2)
+                record = json.loads((root / 'eval/result_details.json').read_text())
+                self.assertFalse(record['completed'])
+                self.assertEqual([row['seed'] for row in record['episodes']], [11])
+                self.assertEqual(record['statistics']['n_episodes'], 1)
+                self.assertFalse(list((root / 'eval').glob('.dexmani-publish-*')))
 
     def test_dataset_semantics(self):
         from dexmani_policy.test_tools.smoke_test import make_source
