@@ -16,6 +16,8 @@
 
 当前流程面向仿真示教训练与仿真评测。核心模块及其数据流见[项目架构](docs/项目架构.md)。
 
+本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
+
 ## 策略方向
 
 | 方法 | 核心思路 |

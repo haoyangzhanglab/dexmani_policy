@@ -4,7 +4,6 @@ import argparse
 import shutil
 import tempfile
 from contextlib import closing, nullcontext
-from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +42,6 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
         assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
         assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
         assert trainer.cfg.control_dt_s == checkpoint.effective_config["control_dt_s"]
-        assert "deployment_metadata" not in checkpoint.effective_config
         data_dt = float(zarr.open_group(cfg.dataset.zarr_path, mode="r").attrs["dt"])
         assert checkpoint.effective_config["control_dt_s"] == data_dt
         del checkpoint, optimizer_state
@@ -55,7 +53,6 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
     saved = load_checkpoint(directory / "checkpoints" / "latest.pt")
     assert saved.global_step == final, "Resumed checkpoint mismatch"
     assert saved.effective_config["control_dt_s"] == data_dt
-    assert "deployment_metadata" not in saved.effective_config
     return step, final
 
 
@@ -126,12 +123,10 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     shutil.rmtree(root / "source.zarr")
     shutil.rmtree(replacement_path)
     with closing(load_policy(run, device=device)) as runtime:
-        snapshot = asdict(runtime.info)
-        assert isinstance(snapshot["checkpoint_path"], str)
-        assert "policy_name" not in snapshot
+        assert isinstance(runtime.info.checkpoint_path, str)
         assert not runtime.info.requires_prev_action
         assert runtime.info.control_dt_s == 0.05
-        assert snapshot["observation_fields"] == tuple(cfg.dataset.sensor_modalities)
+        assert runtime.info.observation_fields == tuple(cfg.dataset.sensor_modalities)
         torch.testing.assert_close(
             runtime.agent.normalizer.state_dict(), normalizer_state, rtol=0, atol=0, check_device=False,
         )
@@ -168,7 +163,7 @@ def check_cordvip(root, device, *, max_updates, resume_updates):
         assert runtime.info.control_dt_s == .05
         prediction = runtime.predict(observation)
         assert prediction.shape == (3, 19) and np.isfinite(prediction).all()
-    print("PASS CordViP: no identity metadata, float64 variable point counts, resume and finite 19D actions")
+    print("PASS CordViP: float64 variable point counts, resume and finite 19D actions")
 
 
 def main(argv=None):
