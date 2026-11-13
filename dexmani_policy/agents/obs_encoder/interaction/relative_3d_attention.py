@@ -47,10 +47,14 @@ class Relative3DCrossAttention(nn.Module):
 
             scene_rel = (scene_xyz - wrist) / self.geometry_scale
             anchor_rel = (anchors - wrist) / self.geometry_scale
-            scene_geometry = self.relative_value(scene_rel).reshape(
+            relative_values = self.relative_value(torch.cat((scene_rel, anchor_rel), dim=1))
+            scene_geometry, anchor_geometry = relative_values.split(
+                (num_scene_tokens, num_queries), dim=1
+            )
+            scene_geometry = scene_geometry.reshape(
                 batch_size, num_scene_tokens, self.num_heads, self.head_dim
             ).transpose(1, 2)
-            anchor_geometry = self.relative_value(anchor_rel).reshape(
+            anchor_geometry = anchor_geometry.reshape(
                 batch_size, num_queries, self.num_heads, self.head_dim
             ).transpose(1, 2)
 
