@@ -24,31 +24,19 @@ def euler_time_grid(num_steps: int, reference: torch.Tensor) -> torch.Tensor:
 
 
 class TimeSampler:
-    def __init__(
-        self,
-        num_steps: int,
-        beta_s: float = 0.999,
-        beta_alpha: float = 1.0,
-        beta_beta: float = 1.5,
-    ) -> None:
-        concentrations = torch.tensor((beta_alpha, beta_beta), dtype=torch.float32, device="cpu")
-        if not (torch.isfinite(concentrations) & (concentrations > 0)).all():
-            raise ValueError("Beta concentrations must be positive and finite in FP32")
+    def __init__(self, num_steps: int) -> None:
         self.num_steps = positive_int(num_steps, "num_steps")
-        self.beta_s = beta_s
-        self.beta_alpha = beta_alpha
-        self.beta_beta = beta_beta
 
     def sample(self, batch_size: int, mode: str, device: str | torch.device) -> torch.Tensor:
         if mode == "uniform":
             return torch.rand(batch_size, device=device)
         if mode == "beta":
             distribution = Beta(
-                torch.tensor(self.beta_alpha, device=device, dtype=torch.float32),
-                torch.tensor(self.beta_beta, device=device, dtype=torch.float32),
+                torch.tensor(1.0, device=device, dtype=torch.float32),
+                torch.tensor(1.5, device=device, dtype=torch.float32),
                 validate_args=False,
             )
-            return self.beta_s * distribution.sample(torch.Size((batch_size,)))
+            return 0.999 * distribution.sample(torch.Size((batch_size,)))
         if mode == "discrete":
             return (
                 torch.randint(0, self.num_steps, (batch_size,), device=device).float()

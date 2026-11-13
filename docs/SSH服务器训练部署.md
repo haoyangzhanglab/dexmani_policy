@@ -164,6 +164,8 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 
 `metrics.jsonl` 只追加指标，不修复或裁剪历史。`config.yaml` 保留初始配置快照，续训以 checkpoint 的 `effective_config` 为准。
 
+续训源码须与 checkpoint 的模型结构一致；模型参数按键名和形状严格恢复，不迁移旧模型快照。
+
 需要前台续训时，在 `--` 前加入 `--fg`。源码仍由启动脚本同步，数据沿用已准备的远端目录。
 
 ## 7. 取回实验结果

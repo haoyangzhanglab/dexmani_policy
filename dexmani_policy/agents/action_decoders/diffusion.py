@@ -89,7 +89,7 @@ class Diffusion(nn.Module):
             loss = F.mse_loss(pred.float(), target.float())
 
         if log_metrics:
-            loss_dict.update(loss=loss.detach(), loss_action=loss.detach())
+            loss_dict["loss"] = loss.detach()
         return loss, loss_dict
 
     @torch.no_grad()

@@ -122,8 +122,6 @@ def build_trainer(cfg, *, checkpoint=None):
                 saved_tactile = saved["agent"]["tactile_encoder"]
                 if tactile._target_ != saved_tactile["_target_"]:
                     raise ValueError("Tactile encoder differs from initialization policy")
-                if "region_ids" in saved_tactile and tactile.get("region_ids") is None:
-                    tactile.region_ids = saved_tactile["region_ids"]
             cfg.initialization.policy = None
     if checkpoint is None:
         prepare_training(cfg)

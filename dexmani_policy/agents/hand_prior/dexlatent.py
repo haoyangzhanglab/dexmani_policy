@@ -32,8 +32,6 @@ class DexLatentHandPrior(nn.Module):
         super().__init__()
         self.hand_encoder_backbone = build_mlp([12, 64, 128, 64], activation=nn.ReLU, activate_last=True)
         self.hand_mean_head = nn.Linear(64, 32)
-        # Keep the released state dict intact; the deterministic path never uses logvar.
-        self.hand_logvar_head = nn.Linear(64, 32)
         self.hand_decoder = build_mlp([32, 64, 128, 64, 12], activation=nn.ReLU)
         self.hand_decoder.append(nn.Tanh())
         self.requires_grad_(False)
@@ -45,7 +43,8 @@ class DexLatentHandPrior(nn.Module):
         prefix = "xarm7_xhand_right."
         self.load_state_dict({
             key.removeprefix(prefix): value
-            for key, value in payload["autoencoders"].items() if key.startswith(prefix)
+            for key, value in payload["autoencoders"].items()
+            if key.startswith(prefix) and not key.startswith(prefix + "hand_logvar_head.")
         }, strict=True)
         lower = torch.tensor([0, -0.698, 0, -0.174, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.float32)
         upper = torch.tensor([

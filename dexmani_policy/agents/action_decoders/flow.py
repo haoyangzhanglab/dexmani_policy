@@ -23,12 +23,7 @@ class RectifiedFlow(nn.Module):
         self,
         model: nn.Module,
         num_inference_steps: int = 4,
-        t_sample_mode: str = "beta",
-        beta_s: float = 0.999,
-        beta_alpha: float = 1.0,
-        beta_beta: float = 1.5,
         time_shift_alpha: float = 1.0,
-        num_flow_train_timesteps: int = 4,
     ) -> None:
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
@@ -38,62 +33,26 @@ class RectifiedFlow(nn.Module):
 
         self.model = model
         self.num_inference_steps = num_inference_steps
-        self.t_sample_mode = t_sample_mode
         self.time_shift_alpha = time_shift_alpha
-        self.time_sampler = TimeSampler(
-            num_steps=num_flow_train_timesteps,
-            beta_s=beta_s,
-            beta_alpha=beta_alpha,
-            beta_beta=beta_beta,
-        )
-
-    def sample_training_pair(
-        self, target: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch_size = target.shape[0]
-        noise = torch.randn_like(target)
-        t = self.time_sampler.sample(
-            batch_size,
-            self.t_sample_mode,
-            device=target.device,
-        )
-        t = shift_time_to_noise(t, self.time_shift_alpha)
-        t_view = t.view(batch_size, *([1] * (target.ndim - 1)))
-
-        xt = interpolate_flow(noise, target, t_view)
-        target_v = target - noise
-        return xt, t, target_v
 
     def compute_loss(
         self,
         cond: torch.Tensor,
         actions: torch.Tensor,
         *,
-        dim_groups: dict[str, tuple[int, int, float]] | None = None,
-        training_pair: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        xt, t, target_v = self.sample_training_pair(actions) if training_pair is None else training_pair
+        batch_size = actions.shape[0]
+        noise = torch.randn_like(actions)
+        t = shift_time_to_noise(torch.rand(batch_size, device=actions.device), self.time_shift_alpha)
+        t_view = t.view(batch_size, *([1] * (actions.ndim - 1)))
+        xt = interpolate_flow(noise, actions, t_view)
+        target_v = actions - noise
         pred_v = self.model(x=xt, timestep=t, context=cond)
-        pred_v_fp32 = pred_v.float()
-        target_v_fp32 = target_v.float()
+        loss = F.mse_loss(pred_v.float(), target_v.float())
         metrics = {}
-        if dim_groups is None:
-            loss = F.mse_loss(pred_v_fp32, target_v_fp32)
-        else:
-            group_losses = []
-            for name, (start, end, weight) in dim_groups.items():
-                group_loss = F.mse_loss(pred_v_fp32[..., start:end], target_v_fp32[..., start:end])
-                group_losses.append(weight * group_loss)
-                if log_metrics:
-                    metrics[f"loss_{name}"] = group_loss.detach()
-            loss = torch.stack(group_losses).sum()
-
         if log_metrics:
-            metrics.update({
-                "loss": loss.detach(),
-                "loss_action": loss.detach(),
-            })
+            metrics = {"loss": loss.detach()}
         return loss, metrics
 
     @torch.no_grad()
@@ -281,7 +240,6 @@ class ConsistencyFlow(nn.Module):
 
         metrics = {
             "loss": loss.detach(),
-            "loss_action": loss.detach(),
             "loss_flow": loss_flow.detach(),
             "loss_consistency": loss_consistency.detach(),
         }

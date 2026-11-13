@@ -72,7 +72,6 @@ class DQRISE(Policy):
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
-            t_sample_mode="uniform",
             time_shift_alpha=time_shift_alpha,
         )
         super().__init__(
@@ -89,7 +88,7 @@ class DQRISE(Policy):
         )
 
     def compute_loss(
-        self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,
+        self, batch: dict[str, Any], *, log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict]:
         condition = self._encode_obs(batch["obs"])
 
@@ -100,7 +99,7 @@ class DQRISE(Policy):
 
         flow_target = torch.cat([arm_part, index], dim=-1)
         return self.action_decoder.compute_loss(
-            condition, flow_target, log_metrics=log_metrics, **kwargs,
+            condition, flow_target, log_metrics=log_metrics,
         )
 
     @torch.no_grad()

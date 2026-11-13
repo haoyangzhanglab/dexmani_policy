@@ -72,7 +72,6 @@ class SAT(Policy):
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
-            t_sample_mode="uniform",
             time_shift_alpha=time_shift_alpha,
         )
         super().__init__(

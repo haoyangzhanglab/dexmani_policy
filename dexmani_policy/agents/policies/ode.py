@@ -58,14 +58,14 @@ class ODEPolicy(Policy):
         state = normalized["joint_state"].unflatten(0, (-1, self.n_obs_steps))[:, -1]
         return condition, state
 
-    def compute_loss(self, batch, *, log_metrics=True, **kwargs):
+    def compute_loss(self, batch, *, log_metrics=True):
         condition, state = self._condition_state(batch["obs"])
         field = self.normalizer["action"]
         a0 = field.normalize(batch["prev_action"])
         target = field.normalize(batch["action"][:, self.action_start_index:])
         return self.action_decoder.compute_loss(
             condition, a0, state, target, perturb_std=self.perturb_std * field.scale,
-            log_metrics=log_metrics, **kwargs,
+            log_metrics=log_metrics,
         )
 
     @torch.no_grad()

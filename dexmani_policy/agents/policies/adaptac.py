@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import torch
 from torch import nn
@@ -55,7 +54,6 @@ class AdapTacEncoder(nn.Module):
     @property
     def effective_config(self) -> dict:
         return {
-            "tactile_encoder": self.tactile_encoder.effective_config,
             "pc_encoder_config": self.pc_encoder.effective_config,
             "fps_random_config": self.pc_encoder.fps_random_config,
         }
@@ -187,7 +185,7 @@ class AdapTac(Policy):
         return torch.cat((fused, state), dim=-1)
 
     def compute_loss(
-        self, batch: dict, *, log_metrics: bool = True, **kwargs: Any,
+        self, batch: dict, *, log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict]:
         features, current_force, force_condition = self._encode_force_inputs(batch["obs"])
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
@@ -201,13 +199,13 @@ class AdapTac(Policy):
             condition,
             self.normalizer["action"].normalize(batch["action"]),
             log_metrics=log_metrics,
-            **kwargs,
         )
         weighted_force_loss = self.force_loss_weight * force_loss
         loss = action_loss + weighted_force_loss
         if log_metrics:
             metrics.update(
                 loss=loss.detach(),
+                loss_action=action_loss.detach(),
                 loss_force=force_loss.detach(),
                 loss_force_weighted=weighted_force_loss.detach(),
             )

@@ -56,9 +56,7 @@ class ConditionalResidualBlock1D(nn.Module):
         )
 
         cond_channels = out_channels * 2 if cond_predict_scale else out_channels
-        self.cond_encoder = nn.Sequential()
-        # Checkpoint parameter paths are cond_encoder.1.{weight,bias}.
-        self.cond_encoder.add_module("1", nn.Linear(cond_dim, cond_channels))
+        self.cond_encoder = nn.Linear(cond_dim, cond_channels)
 
     def forward(self, x: torch.Tensor, activated_cond: torch.Tensor) -> torch.Tensor:
         out = self.blocks[0](x)

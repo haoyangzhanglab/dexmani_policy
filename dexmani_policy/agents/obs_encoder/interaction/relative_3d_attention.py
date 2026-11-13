@@ -21,15 +21,6 @@ class Relative3DCrossAttention(nn.Module):
         self.relative_value = nn.Linear(3, dim, bias=False)
         nn.init.zeros_(self.relative_value.weight)
 
-    def _relative_bias(self, anchors, scene_xyz):
-        delta = scene_xyz[:, None] - anchors[:, :, None]
-        return self.position_bias(delta / self.geometry_scale).permute(0, 3, 1, 2)
-
-    def relative_bias(self, anchors_base, scene_xyz_base):
-        """Return the additive SDPA bias for Base-frame metric coordinates."""
-        with torch.autocast(device_type=anchors_base.device.type, enabled=False):
-            return self._relative_bias(anchors_base.float(), scene_xyz_base.float())
-
     def forward(self, body_tokens, scene_tokens, anchors_base, scene_xyz_base):
         b, l, _ = body_tokens.shape
         n = scene_tokens.shape[1]
@@ -43,7 +34,8 @@ class Relative3DCrossAttention(nn.Module):
         with torch.autocast(device_type=anchors_base.device.type, enabled=False):
             anchors, scene_xyz = anchors_base.float(), scene_xyz_base.float()
             wrist = anchors[:, :1]
-            bias = self._relative_bias(anchors, scene_xyz)
+            delta = scene_xyz[:, None] - anchors[:, :, None]
+            bias = self.position_bias(delta / self.geometry_scale).permute(0, 3, 1, 2)
             scene_rel = (scene_xyz - wrist) / self.geometry_scale
             anchor_rel = (anchors - wrist) / self.geometry_scale
             relative_values = self.relative_value(torch.cat((scene_rel, anchor_rel), dim=1))
