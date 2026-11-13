@@ -50,14 +50,14 @@ python -m pip check
 
 示教数据默认位于 `robot_data/<task_name>.zarr`，字段与时间对应关系见[数据集格式](docs/仿真数据集格式.md)。运行其他任务时修改 `task_name`；自定义位置用 `zarr_path=/path/to/data.zarr`。
 
-DP3、ODE、ManiFlow、CordViP、AdapTac 和 InterAct-Dex 可直接从示教训练。其他方法按需准备：
+DP、DP3、ODE、ManiFlow、CordViP、AdapTac 和 InterAct-Dex 可直接从示教训练。各方法按需准备：
 
 | 方法 | 新训练需要的初始化 |
 | --- | --- |
-| DP | `bash scripts/utils/download_pretrained.sh dp`：DINOv2 |
+| DP | 默认随机初始化 ResNet18＋GroupNorm，联合训练，无需外部权重；可选 DINOv2 使用 `bash scripts/utils/download_pretrained.sh dinov2`，配置见 `dp.yaml` 末尾完整注释 |
 | SAT / DexLatent / R3D | 将脚本参数换成 `sat` / `dexlatent` / `r3d`；分别准备 DINOv3、DINOv3 + 手部先验、Uni3D |
 | DQ-RISE | `download_pretrained.sh dqrise` 准备 DINOv3；另外提供 `initialization.codebook`，见[手部动作表示](docs/手部动作表示.md) |
-| AFRO | 可选 `initialization.encoder`；允许随机初始化后冻结，也可设置 `agent.freeze_visual=false` |
+| AFRO | 正式示例显式提供预训练 `initialization.encoder=.../encoder.pt`；默认 null 用于随机冻结特征实验，也可设置 `agent.freeze_visual=false` |
 | CordViP | 使用包含手点云、物体点云、joint_state、action 的 `.cordvip.zarr`，可直接训练；预训练编码器可用 `initialization.encoder` 加载 |
 
 AFRO/CordViP 的预训练与接触数据生成命令见[观测预训练](docs/观测预训练.md)。外部权重与可选主干见 [data/README](data/README.md)。完整 checkpoint 已包含推理所需权重和归一化参数，续训、推理不再读取初始化文件。

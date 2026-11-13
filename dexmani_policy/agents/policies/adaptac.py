@@ -171,7 +171,7 @@ class AdapTac(Policy):
         self, obs_dict: dict,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         obs = self._preprocess_obs(obs_dict)
-        # Identity current force, future target and prediction share units (XHand Real: SDK / 255).
+        # Identity keeps current force, future target and prediction in dataset coordinates and units.
         current_force = obs[self.force_key].reshape(-1, self.n_obs_steps, self.force_dim)
         # Shared frame encoders return [B*N,D]; concatenate each sample's oldest-to-newest history.
         features = tuple(

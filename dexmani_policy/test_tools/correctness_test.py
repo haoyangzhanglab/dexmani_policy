@@ -1,15 +1,17 @@
 """Cheap CPU regressions for resume, optimizer and publication boundaries."""
+import copy
+import io
 import json
 import tempfile
 import unittest
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.agents.hand_prior.codebook import load_codebook
 from dexmani_policy.common.normalizer import LinearNormalizer
@@ -24,6 +26,219 @@ from dexmani_policy.training.trainer import PolicyTrainer
 
 
 class CorrectnessTest(unittest.TestCase):
+    def test_dp_rgb_recipes(self):
+        import hydra
+        import yaml
+        from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
+        from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
+        from dexmani_policy.common.checkpoint import restore_policy
+        from dexmani_policy.training.common.config import CONFIG_ROOT
+        cfg = load_policy_config('dp')
+        self.assertIsNone(cfg.initialization.rgb)
+        self.assertEqual(list(cfg.dataset.rgb_preprocess_size), [84, 84])
+        self.assertEqual(list(cfg.dataset.rgb_random_crop_size), [76, 76])
+        self.assertEqual((cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps), (16, 2, 8))
+        self.assertEqual((cfg.agent.prediction_type, cfg.agent.num_inference_steps), ('sample', 10))
+        self.assertEqual(list(cfg.agent.down_dims), [256, 512, 1024])
+        self.assertEqual(cfg.agent.rgb_backbone_name, 'resnet')
+        self.assertEqual(dict(cfg.agent.rgb_backbone_config), dict(
+            model_name='resnet18', tune_mode='full', norm_mode='group_norm', image_size=[76, 76]))
+        encoder, processor = build_rgb_encoder(cfg.agent.rgb_backbone_name, dict(cfg.agent.rgb_backbone_config))
+        encoder.initialize_weights(None)
+        self.assertTrue(all(p.requires_grad for p in encoder.parameters()))
+        self.assertTrue(any(isinstance(m, torch.nn.GroupNorm) for m in encoder.modules()))
+        self.assertFalse(any(isinstance(m, torch.nn.BatchNorm2d) for m in encoder.modules()))
+        self.assertEqual(processor.process_images(torch.zeros(1, 3, 76, 76)).shape[-2:], (76, 76))
+        del encoder
+
+        text = (CONFIG_ROOT / 'dp.yaml').read_text().split('# 可选 DINOv2：替换上面对应配置块。\n')[1]
+        example = yaml.safe_load('\n'.join(line.removeprefix('# ') for line in text.splitlines()))
+        self.assertEqual(example, dict(initialization=dict(rgb='data/pretrained/dinov2-small'),
+            dataset=dict(rgb_preprocess_size=[240, 240], rgb_random_crop_size=[224, 224]),
+            agent=dict(rgb_backbone_name='dino', rgb_backbone_config=dict(tune_mode='lora', image_size=[224, 224]))))
+        cfg.agent.rgb_backbone_config = example['agent']['rgb_backbone_config']
+        cfg.agent.rgb_backbone_name = example['agent']['rgb_backbone_name']
+        # A tiny saved DINO recipe exercises restoration without training or external weights.
+        with open_dict(cfg.agent.rgb_backbone_config):
+            cfg.agent.rgb_backbone_config.architecture = dict(model_type='dinov2', hidden_size=24,
+                num_hidden_layers=1, num_attention_heads=4, image_size=224, patch_size=16)
+        cfg.agent.down_dims = [16, 32]
+        cfg.agent.diffusion_step_embed_dim = 16
+        model = hydra.utils.instantiate(cfg.agent, _convert_='all')
+        dims = dict(action=19, joint_state=19, rgb=3)
+        model.configure_normalizer(dims, dict(action=(19,), joint_state=(19,)))
+        saved_agent = OmegaConf.to_container(cfg.agent, resolve=True)
+        saved_agent.update(model.effective_config)
+        saved = dict(agent=saved_agent, normalization_dims=dims,
+                     normalization=OmegaConf.to_container(cfg.normalization))
+        with patch.object(ViTEncoder, 'initialize_weights', side_effect=AssertionError('external weights')):
+            restored = restore_policy(saved, copy.deepcopy(model.state_dict()), 'cpu')
+        self.assertIsInstance(restored.obs_encoder.rgb_encoder, ViTEncoder)
+        self.assertEqual(restored.obs_encoder.image_processor.image_size, (224, 224))
+        torch.testing.assert_close(restored.obs_encoder.rgb_encoder.backbone.embeddings.cls_token,
+                                   model.obs_encoder.rgb_encoder.backbone.get_base_model().embeddings.cls_token)
+
+    def test_evaluation_seed_split(self):
+        from dexmani_policy.evaluation.seeds import split_evaluation_seeds
+        pool = list(reversed(range(20)))
+        small, selection = split_evaluation_seeds(pool, 42, 3, 4)
+        large, same_selection = split_evaluation_seeds(pool, 42, 16, 4)
+        standalone, empty = split_evaluation_seeds(pool, 42, 16)
+        self.assertEqual(small, large[:3])
+        self.assertEqual(selection, same_selection)
+        self.assertFalse(set(large) & set(selection))
+        self.assertEqual(standalone, large)
+        self.assertEqual(empty, [])
+        self.assertEqual(split_evaluation_seeds(sorted(pool), 42, 16, 4), (large, selection))
+        self.assertEqual(pool, list(reversed(range(20))))
+        with self.assertRaisesRegex(ValueError, 'Seed pool has'):
+            split_evaluation_seeds(pool, 42, 17, 4)
+
+    def test_afro_initialization_summary(self):
+        from dexmani_policy.train import build_trainer
+        for kind, frozen in (('random', True), ('encoder', True), ('policy', False), ('resume', True), ('obs_lr', True)):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                cfg = load_policy_config('afro', [f'workspace.output_dir={directory}', 'workspace.wandb_cfg=null',
+                                                'training.device=cpu', 'training.use_compile=false'])
+                with open_dict(cfg):
+                    cfg.control_dt_s = .05
+                    cfg.normalization_dims = {'action': 19, 'joint_state': 19, 'point_cloud': 3}
+                cfg.agent.freeze_visual = kind not in ('policy', 'obs_lr')
+                cfg.initialization.encoder = 'pretrained/encoder.pt' if kind == 'encoder' else None
+                cfg.initialization.policy = 'source/policy.pt' if kind == 'policy' else None
+                if kind == 'obs_lr':
+                    cfg.optimizer.obs_lr = 0
+                model = SimpleNamespace(obs_encoder=SimpleNamespace(pc_encoder=torch.nn.Linear(1, 1)),
+                                        normalization_dims=dict(cfg.normalization_dims), effective_config={})
+                model.obs_encoder.pc_encoder.requires_grad_(not cfg.agent.freeze_visual)
+                saved = SimpleNamespace(effective_config=OmegaConf.to_container(cfg, resolve=True), global_step=9)
+                dataset = SimpleNamespace(episode_store=SimpleNamespace(path='synthetic.zarr'))
+                def trainer(config, model, dataset, **kwargs):
+                    if config.optimizer.obs_lr == 0:
+                        model.obs_encoder.pc_encoder.requires_grad_(False)
+                    return SimpleNamespace(model=model)
+                output = io.StringIO()
+                with patch('dexmani_policy.train.build_dataset', return_value=(dataset, dict(
+                        control_dt_s=.05, field_dims=dict(cfg.normalization_dims)))), \
+                        patch('dexmani_policy.train._prepare_policy', return_value=model) as prepare, \
+                        patch('dexmani_policy.train.load_checkpoint', return_value=saved), \
+                        patch('dexmani_policy.train.PolicyTrainer', side_effect=trainer), redirect_stdout(output):
+                    build_trainer(cfg, checkpoint=saved if kind == 'resume' else None)
+                expected = {'random': 'random initialization', 'obs_lr': 'random initialization',
+                            'encoder': 'encoder: pretrained/encoder.pt', 'policy': 'policy checkpoint: source/policy.pt',
+                            'resume': 'resume checkpoint (step=9)'}[kind]
+                self.assertEqual(output.getvalue().strip(), f'[AFRO] weights={expected}, visual_frozen={frozen}')
+                self.assertIs(prepare.call_args.kwargs['checkpoint'], saved if kind in ('policy', 'resume') else None)
+
+    def test_pretrain_finite_boundary_before_teacher(self):
+        from dexmani_policy.training.pretrain.obs import common
+        # Exercise the real boundary with one scalar and mocked data/publication, not an AFRO training run.
+        class Scalar(torch.nn.Module):
+            def __init__(self, offset, gradient):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.tensor(1.))
+                self.weight.register_hook(lambda grad: torch.full_like(grad, gradient))
+                self.register_buffer('teacher', torch.tensor(0.))
+                self.normalizer = SimpleNamespace(fields={})
+                self.offset = offset
+                self.update_teacher = Mock(side_effect=lambda epoch: self.teacher.add_(1))
+
+            def forward(self, batch):
+                loss = self.weight * 3 + self.offset
+                return loss, {'loss': loss.detach()}
+
+        for offset, gradient in ((0., 3.), (float('nan'), 3.), (float('inf'), 3.),
+                                 (0., float('nan')), (0., float('inf'))):
+            valid = offset == 0 and gradient == 3
+            with self.subTest(offset=offset, gradient=gradient), tempfile.TemporaryDirectory() as directory:
+                cfg = load_policy_config('pretrain/obs/afro', [f'workspace.output_dir={directory}',
+                    'training.device=cpu', 'training.num_epochs=1', 'training.lr_warmup_steps=0'])
+                model = Scalar(offset, gradient)
+                optimizer = torch.optim.AdamW([model.weight], lr=.1)
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1)
+                dataset = MagicMock()
+                dataset.episode_store.path = 'synthetic.zarr'
+                dataset.get_validation_dataset.return_value = None
+                dataset.__len__.return_value = 1
+                with patch.object(common, 'load_run', return_value=(cfg, None, None)), \
+                        patch.object(common.hydra.utils, 'instantiate', return_value=dataset), \
+                        patch.object(common, 'build_train_loader', return_value=[{}]), \
+                        patch.object(common, 'fit_normalizer'), patch.object(common, 'close_data_loader'), \
+                        patch.object(common.torch.optim, 'AdamW', return_value=optimizer), \
+                        patch.object(common, 'build_scheduler', return_value=scheduler), \
+                        patch.object(common, 'ExperimentLogger'), patch.object(common, 'save_run') as save, \
+                        patch.object(common, 'export_encoder') as export, redirect_stdout(io.StringIO()):
+                    with nullcontext() if valid else self.assertRaisesRegex(RuntimeError, 'Non-finite loss or gradient norm at step 0'):
+                        common.train('afro', lambda normalization: model)
+                self.assertEqual(scheduler.last_epoch, int(valid))
+                self.assertEqual(model.teacher.item(), int(valid))
+                if valid:
+                    self.assertLess(model.weight.item(), 1.)
+                    self.assertEqual(save.call_args.args[-1], 1)
+                    model.update_teacher.assert_called_once_with(0)
+                    export.assert_called_once()
+                else:
+                    self.assertEqual(model.weight.item(), 1.)
+                    self.assertFalse(optimizer.state)
+                    model.update_teacher.assert_not_called()
+                    save.assert_not_called()
+                    export.assert_not_called()
+
+    def test_evaluation_incremental_publication(self):
+        from dexmani_policy.evaluation.rollout import evaluate_policy
+        agent = SimpleNamespace(n_obs_steps=2, n_action_steps=1, future_steps=3,
+                                force_predictor=SimpleNamespace(num_inference_steps=7))
+        cfg = dict(env_runner=dict(task_name='test'), dataset={}, control_dt_s=.05,
+                   normalization_dims={'joint_state': 19}, eval=dict(use_ema=False, inference_steps=2))
+        loaded = SimpleNamespace(effective_config=cfg, model_state={}, global_step=10)
+        rows = [dict(seed=seed, success=success, steps=steps, total_steps=total)
+                for seed, success, steps, total in ((11, True, 2, 3), (22, False, None, 9), (33, True, 4, 6))]
+        expected = [None,
+            dict(n_episodes=1, n_success=1, success_rate=1., avg_steps=2., avg_steps_all=3.),
+            dict(n_episodes=2, n_success=1, success_rate=.5, avg_steps=2., avg_steps_all=6.),
+            dict(n_episodes=3, n_success=2, success_rate=2 / 3, avg_steps=3., avg_steps_all=6.)]
+        for count, cleanup_failure in ((3, False), (2, False), (0, False), (3, True)):
+            with self.subTest(count=count, cleanup_failure=cleanup_failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'eval/result_details.json'
+                failure = RuntimeError('close failed' if cleanup_failure else 'rollout failed')
+                closed = Mock(side_effect=failure if cleanup_failure else None)
+                def results(*args, **kwargs):
+                    try:
+                        for index in range(count + 1):
+                            record = json.loads(path.read_text())
+                            self.assertFalse(record['completed'])
+                            self.assertEqual(record['episodes'], rows[:index])
+                            if index:
+                                for key, value in expected[index].items():
+                                    self.assertEqual(record['statistics'][key], value)
+                            else:
+                                self.assertIsNone(record['statistics'])
+                            if index < count:
+                                yield rows[index]
+                        if count < 3:
+                            raise failure
+                    finally:
+                        closed()
+                with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
+                        patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
+                        patch.object(SimRunner, 'run', side_effect=results):
+                    if count == 3 and not cleanup_failure:
+                        result, returned_path = evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33],
+                                                               device='cpu', output_dir=path.parent)
+                        self.assertEqual(returned_path, path)
+                        self.assertEqual(result, json.loads(path.read_text()))
+                    else:
+                        with self.assertRaises(RuntimeError) as caught:
+                            evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33], device='cpu', output_dir=path.parent)
+                        self.assertIs(caught.exception, failure)
+                record = json.loads(path.read_text())
+                self.assertEqual(record['completed'], count == 3 and not cleanup_failure)
+                self.assertEqual(record['episodes'], rows[:count])
+                self.assertEqual((record['global_step'], record['weights'], record['force_inference_steps']), (10, 'raw', 7))
+                self.assertEqual(record['seeds'], [11, 22, 33])
+                closed.assert_called_once()
+
     def test_tactile_metadata_does_not_change_samples(self):
         from dexmani_policy.datasets.variants.tactile import InterActDexDataset
         from dexmani_policy.test_tools.smoke_test import make_source
@@ -51,6 +266,38 @@ class CorrectnessTest(unittest.TestCase):
                         torch.testing.assert_close(dataset[i], expected, rtol=0, atol=0)
                         rows = dataset.sampler.sample_source_rows(i)[:2]
                         np.testing.assert_array_equal(dataset[i]['obs']['finger_tactile_force'], force[rows])
+
+    def test_evaluation_write_error_survives_cleanup_failure(self):
+        import os
+        from dexmani_policy.evaluation.rollout import evaluate_policy
+        agent = SimpleNamespace(n_obs_steps=1, n_action_steps=1, future_steps=1, requires_prev_action=False)
+        cfg = dict(env_runner=dict(task_name='test'), dataset={}, control_dt_s=.05,
+                   normalization_dims={'joint_state': 19}, eval=dict(use_ema=False, inference_steps=2))
+        loaded = SimpleNamespace(effective_config=cfg, model_state={}, global_step=10)
+        env = SimpleNamespace(action_cnt=3, close=Mock(side_effect=RuntimeError('close failed')))
+        primary = OSError('disk full')
+        replace = os.replace
+        def publish(source, target):
+            if publication.call_count == 3:
+                raise primary
+            replace(source, target)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch('dexmani_policy.evaluation.rollout.load_checkpoint', return_value=loaded), \
+                    patch('dexmani_policy.evaluation.rollout.restore_policy', return_value=agent), \
+                    patch.object(SimRunner, 'make_env', return_value=env), \
+                    patch.object(SimRunner, '_run_episode', return_value=(True, 2)), \
+                    patch('dexmani_policy.common.io_util.os.replace', side_effect=publish) as publication:
+                with self.assertLogs(level='ERROR') as logs, self.assertRaises(OSError) as caught:
+                    evaluate_policy(root / 'candidate.pt', seeds=[11, 22, 33], device='cpu', output_dir=root / 'eval')
+            self.assertIs(caught.exception, primary)
+            self.assertIn('close failed', '\n'.join(logs.output))
+            env.close.assert_called_once()
+            record = json.loads((root / 'eval/result_details.json').read_text())
+            self.assertFalse(record['completed'])
+            self.assertEqual([row['seed'] for row in record['episodes']], [11])
+            self.assertEqual(record['statistics']['n_episodes'], 1)
+            self.assertFalse(list((root / 'eval').glob('.dexmani-publish-*')))
 
     def test_dataset_semantics(self):
         from dexmani_policy.test_tools.smoke_test import make_source
@@ -181,6 +428,7 @@ class CorrectnessTest(unittest.TestCase):
                 result, path = evaluate_policy(checkpoint, seeds=[11, 22], device='cpu',
                                                output_dir=Path(directory) / 'eval')
             self.assertEqual(result, json.loads(path.read_text()))
+            self.assertTrue(result['completed'])
             self.assertTrue({'runner_options', 'environment', 'runtime'}.isdisjoint(result))
             self.assertEqual(result['seeds'], [11, 22])
             self.assertEqual(result['statistics']['success_rate'], .5)
@@ -192,30 +440,49 @@ class CorrectnessTest(unittest.TestCase):
                 env.close.assert_called_once()
 
     def test_optimizer_boundary(self):
-        trainer = PolicyTrainer.__new__(PolicyTrainer)
-        parameter = torch.nn.Parameter(torch.tensor([1.0]))
-        trainer.trainable_parameters = [parameter]
-        trainer.global_step = 0
-        trainer.max_grad_norm = 0
-        trainer.optimizer = torch.optim.Adam([parameter], lr=0.1)
-        trainer.scheduler = Mock()
-        trainer.ema_updater = Mock()
-        parameter.grad = torch.tensor([3.0])
-        with patch.object(trainer.optimizer, 'step') as step:
-            trainer.optimizer_step()
-            step.assert_called_once()
-            self.assertEqual(trainer.last_grad_norm.item(), 3)
-        for value in (float('nan'), float('inf')):
-            parameter.grad = torch.tensor([value])
-            before = parameter.detach().clone()
-            trainer.scheduler.reset_mock()
-            trainer.ema_updater.reset_mock()
-            with self.assertRaises(RuntimeError):
-                trainer.optimizer_step()
-            torch.testing.assert_close(parameter, before)
-            self.assertFalse(trainer.optimizer.state)
-            trainer.scheduler.step.assert_not_called()
-            trainer.ema_updater.step.assert_not_called()
+        from dexmani_policy.training.common.optimization import EMA
+        for limit in (0, 1.):
+            trainer = PolicyTrainer.__new__(PolicyTrainer)
+            model = torch.nn.Linear(1, 1, bias=False)
+            parameter = model.weight
+            parameter.data.fill_(1.)
+            averaged = copy.deepcopy(model)
+            trainer.trainable_parameters = [parameter]
+            trainer.global_step = 0
+            trainer.max_grad_norm = limit
+            trainer.last_grad_norm = None
+            trainer.optimizer = torch.optim.Adam([parameter], lr=.1)
+            trainer.scheduler = torch.optim.lr_scheduler.StepLR(trainer.optimizer, 1, gamma=.9)
+            trainer.ema_updater = EMA(model, averaged)
+            parameter.grad = torch.full_like(parameter, 3.)
+            trainer.optimizer_step(torch.tensor(True))
+            self.assertEqual(trainer.last_grad_norm.item(), 3.)
+            self.assertLess(parameter.item(), 1.)
+            self.assertEqual(trainer.scheduler.last_epoch, 1)
+            self.assertIsNone(parameter.grad)
+            # Adam's first moment records the gradient actually passed to the optimizer.
+            expected_grad = 3. if limit == 0 else 1.
+            self.assertAlmostEqual(trainer.optimizer.state[parameter]['exp_avg'].item(), expected_grad * .1, places=6)
+            torch.testing.assert_close(averaged.weight, parameter)
+            for loss_value, gradient in ((float('nan'), 3.), (float('inf'), 3.),
+                                         (1., float('nan')), (1., float('inf'))):
+                with self.subTest(limit=limit, loss=loss_value, gradient=gradient):
+                    parameter.grad = torch.full_like(parameter, gradient)
+                    before = (parameter.detach().clone(), copy.deepcopy(trainer.optimizer.state_dict()),
+                              copy.deepcopy(trainer.scheduler.state_dict()), averaged.weight.detach().clone())
+                    norm = trainer.last_grad_norm
+                    with patch.object(trainer.optimizer, 'zero_grad') as clear, \
+                            patch.object(trainer.ema_updater, 'step', wraps=trainer.ema_updater.step) as ema:
+                        with self.assertRaisesRegex(RuntimeError, 'Non-finite loss or gradient norm at step 0'):
+                            trainer.optimizer_step(torch.isfinite(torch.tensor(loss_value)))
+                        clear.assert_not_called()
+                        ema.assert_not_called()
+                    torch.testing.assert_close(parameter, before[0], rtol=0, atol=0)
+                    torch.testing.assert_close(trainer.optimizer.state_dict(), before[1], rtol=0, atol=0)
+                    self.assertEqual(trainer.scheduler.state_dict(), before[2])
+                    torch.testing.assert_close(averaged.weight, before[3], rtol=0, atol=0)
+                    self.assertIs(trainer.last_grad_norm, norm)
+                    self.assertEqual(trainer.global_step, 0)
         for value in (-1, float('nan'), float('inf')):
             cfg = load_policy_config('dp3')
             cfg.training.max_grad_norm = value
@@ -242,6 +509,56 @@ class CorrectnessTest(unittest.TestCase):
             runtime.warmup({}, rtc_delay=0.5, rtc_guidance_cap=1)
         self.assertTrue(torch.equal(state, runtime.generator.get_state()))
 
+    def test_policy_accumulation_boundary(self):
+        # A nonfinite early microbatch must remain visible even when the final loss is finite.
+        for first_loss in (0., float('nan'), float('inf')):
+            with self.subTest(first_loss=first_loss):
+                trainer = PolicyTrainer.__new__(PolicyTrainer)
+                trainer.device = torch.device('cpu')
+                trainer.model = torch.nn.Linear(1, 1, bias=False)
+                parameter = trainer.model.weight
+                before = parameter.detach().clone()
+                trainer.ema_model = None
+                trainer.ema_updater = Mock()
+                trainer.train_loader = [{}, {}]
+                trainer.trainable_parameters = [parameter]
+                trainer.optimizer = torch.optim.Adam([parameter], lr=.1)
+                trainer.scheduler = torch.optim.lr_scheduler.StepLR(trainer.optimizer, 1)
+                trainer.max_grad_norm = trainer.global_step = 0
+                trainer.total_train_steps = trainer.log_interval_steps = 2
+                trainer.batches_per_epoch = trainer.gradient_accumulation_steps = 2
+                trainer.updates_per_epoch = 1
+                trainer.milestone_steps = set()
+                trainer.last_grad_norm = None
+                trainer.save_checkpoint = Mock()
+                trainer.log_step = Mock()
+                offsets = iter((first_loss, 0.))
+                def microbatch(batch, *, loss_divisor, log_metrics):
+                    loss = parameter.sum() * 3 + next(offsets)
+                    (loss / loss_divisor).backward()
+                    return loss.detach(), {'loss': loss.detach()}
+                trainer.train_microbatch = Mock(side_effect=microbatch)
+                valid = first_loss == 0
+                with patch('dexmani_policy.training.trainer.tqdm'), \
+                        patch('dexmani_policy.training.trainer.close_data_loader'), \
+                        patch('dexmani_policy.training.trainer.training_signal_handlers', return_value=nullcontext()):
+                    with nullcontext() if valid else self.assertRaisesRegex(RuntimeError, 'Non-finite loss or gradient norm at step 0'):
+                        trainer.train(max_updates=1)
+                self.assertEqual(trainer.train_microbatch.call_count, 2)
+                self.assertEqual(trainer.global_step, int(valid))
+                self.assertEqual(trainer.scheduler.last_epoch, int(valid))
+                if valid:
+                    self.assertFalse(torch.equal(parameter, before))
+                    trainer.ema_updater.step.assert_called_once_with(0)
+                    trainer.save_checkpoint.assert_called_once()
+                else:
+                    torch.testing.assert_close(parameter, before, rtol=0, atol=0)
+                    self.assertFalse(trainer.optimizer.state)
+                    self.assertIsNone(trainer.last_grad_norm)
+                    trainer.ema_updater.step.assert_not_called()
+                    trainer.save_checkpoint.assert_not_called()
+                    trainer.log_step.assert_not_called()
+
     def test_selection_survives_test_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -267,6 +584,15 @@ class CorrectnessTest(unittest.TestCase):
                     record = json.loads((output / 'selection_result.json').read_text())
                     self.assertEqual(record['global_step'], 1)
                     self.assertEqual('test_result' in record, not fail)
+                evaluate.reset_mock()
+                evaluate.side_effect = RuntimeError('candidate failed')
+                with patch('dexmani_policy.evaluation.selection.candidate_score') as score:
+                    with self.assertRaisesRegex(RuntimeError, 'candidate failed'):
+                        run_pipeline([checkpoint], selection_episodes=1, test_episodes=1,
+                                     output_dir=root / 'candidate_failure')
+                    score.assert_not_called()
+                evaluate.assert_called_once()
+                self.assertFalse((root / 'candidate_failure/selection_result.json').exists())
 
     def test_encoder_export(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -379,9 +705,6 @@ class CorrectnessTest(unittest.TestCase):
                                 supports_rtc=False, requires_prev_action=False)
         info = policy_info('test.pt', cfg, agent, weights='raw', inference_steps=1)
         self.assertEqual(info.control_dt_s, .05)
-        self.assertIsNone(info.pointcloud_config)
-        self.assertIsNone(info.fingertip_link_names)
-        self.assertIsNone(info.depth_config)
         del cfg['control_dt_s']
         with self.assertRaisesRegex(KeyError, 'control_dt_s'):
             policy_info('test.pt', cfg, agent, weights='raw', inference_steps=1)

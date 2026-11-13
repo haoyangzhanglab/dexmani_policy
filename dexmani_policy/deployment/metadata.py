@@ -19,9 +19,6 @@ class PolicyInfo:
     supports_rtc: bool
     requires_prev_action: bool
     control_dt_s: float
-    depth_config: dict | None = None
-    pointcloud_config: dict | None = None
-    fingertip_link_names: tuple[str, ...] | None = None
 
 
 def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:

@@ -152,7 +152,19 @@ def build_trainer(cfg, *, checkpoint=None):
             cfg.normalization_dims = model.normalization_dims
             cfg.agent.update(model.effective_config)
         OmegaConf.resolve(cfg)
-    return PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
+    trainer = PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
+    if cfg.policy_name == "afro":
+        if checkpoint is not None:
+            weights = f"resume checkpoint (step={checkpoint.global_step})"
+        elif source is not None:
+            weights = f"policy checkpoint: {source}"
+        elif cfg.initialization.encoder is not None:
+            weights = f"encoder: {cfg.initialization.encoder}"
+        else:
+            weights = "random initialization"
+        frozen = not any(p.requires_grad for p in model.obs_encoder.pc_encoder.parameters())
+        print(f"[AFRO] weights={weights}, visual_frozen={frozen}")
+    return trainer
 
 
 def run_trainer(trainer, *, max_updates=None):

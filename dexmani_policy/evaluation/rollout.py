@@ -1,6 +1,6 @@
+import logging
 import os
 import tempfile
-from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -63,16 +63,28 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     from dexmani_policy.env_runner.sim_runner import SimRunner
     runner = SimRunner(**options)
-    with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
-                            action_steps=action_steps,
-                            video_save_dir=directory / "videos" / runner.task_name if video else None)) as results:
-        episode_results = list(results)
     record = dict(checkpoint=os.path.relpath(checkpoint, path.parent), global_step=global_step, weights=weights,
                   inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
                   seed=seed, device=str(device), video=video,
-                  episodes=episode_results, statistics=summarize_episodes(episode_results))
+                  episodes=[], statistics=None, completed=False)
     if hasattr(agent, "force_predictor"):
         record["force_inference_steps"] = agent.force_predictor.num_inference_steps
+    write_json(path, record)
+    results = runner.run(agent, seeds=seeds, inference_steps=inference_steps,
+                         action_steps=action_steps,
+                         video_save_dir=directory / "videos" / runner.task_name if video else None)
+    try:
+        for episode in results:
+            record["episodes"].append(episode)
+            record["statistics"] = summarize_episodes(record["episodes"])
+            write_json(path, record)
+    except BaseException:
+        try:
+            results.close()
+        except BaseException:
+            logging.exception("Failed to close rollout after evaluation error")
+        raise
+    record["completed"] = True
     write_json(path, record)
     print(f"{record['statistics']}; {path}")
     return record, path

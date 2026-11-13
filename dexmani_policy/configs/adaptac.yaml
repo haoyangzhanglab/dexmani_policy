@@ -4,6 +4,9 @@ defaults:
   - tactile: force
 
 # AdapTac 扩展：分指未来力预测、池化前双向交互与力引导融合。
+# 本项目适配：Point Transformer 场景编码、五指触觉 token、历史特征拼接及 joint state 条件。
+# 默认预测 q+1…q+15 的五指绝对力；identity 保留数据单位和传感器坐标。
+# 当前仿真值为传感器轴力 / [50,50,100] N（法向 max(0,-z)，生产端裁剪），不是原始牛顿值。
 
 policy_name: adaptac
 
@@ -63,7 +66,7 @@ agent:
   num_training_steps: 100
   num_inference_steps: 20
   force_num_inference_steps: 20
-  force_loss_weight: 1.0
+  force_loss_weight: 1.0  # 0 只取消显式力监督；预测、guide 及在线采样仍运行。
   force_predictor_config:
     depth: 8
     num_heads: 4

@@ -7,7 +7,7 @@ defaults:
 policy_name: dp
 
 initialization:
-  rgb: data/pretrained/dinov2-small
+  rgb: null
 
 horizon: 16
 n_obs_steps: 2
@@ -24,8 +24,8 @@ dataloader:
 dataset:
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   sensor_modalities: ["joint_state", "rgb"]
-  rgb_preprocess_size: [240, 240]
-  rgb_random_crop_size: [224, 224]
+  rgb_preprocess_size: [84, 84]
+  rgb_random_crop_size: [76, 76]
 
   # 配置颜色增强时，训练与评测均使用浮点插值。
   rgb_color_aug:
@@ -45,10 +45,12 @@ agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.dp.DP
 
-  rgb_backbone_name: dino
+  rgb_backbone_name: resnet
   rgb_backbone_config:
-    tune_mode: lora
-    image_size: [224, 224]
+    model_name: resnet18
+    tune_mode: full
+    norm_mode: group_norm
+    image_size: [76, 76]
 
   state_dim: 19
   diffusion_step_embed_dim: 128
@@ -73,3 +75,16 @@ training:
 
 eval:
   inference_steps: ${agent.num_inference_steps}
+
+# 切换时整体替换 rgb_backbone_config，避免将 ResNet 的 model_name/norm_mode 传给 ViT。
+# 可选 DINOv2：替换上面对应配置块。
+# initialization:
+#   rgb: data/pretrained/dinov2-small
+# dataset:
+#   rgb_preprocess_size: [240, 240]
+#   rgb_random_crop_size: [224, 224]
+# agent:
+#   rgb_backbone_name: dino
+#   rgb_backbone_config:
+#     tune_mode: lora
+#     image_size: [224, 224]

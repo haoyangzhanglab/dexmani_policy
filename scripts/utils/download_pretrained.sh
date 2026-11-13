@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 按方法将预训练权重准备到 data/pretrained/。
+# all 准备默认配方所需权重；可选 DINOv2、SigLIP 分别用 dinov2、siglip。
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s [all|dexlatent|sat|dqrise|dp|r3d|dinov3|siglip]\n' "${0##*/}"
+    printf 'Usage: %s [all|dexlatent|sat|dqrise|r3d|dinov2|dinov3|siglip]\n' "${0##*/}"
 }
 if (( $# > 1 )); then
     usage >&2
@@ -11,7 +11,7 @@ if (( $# > 1 )); then
 fi
 METHOD="${1-all}"
 case "$METHOD" in
-    all|dexlatent|sat|dqrise|dp|r3d|dinov3|siglip) ;;
+    all|dexlatent|sat|dqrise|r3d|dinov2|dinov3|siglip) ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -46,7 +46,7 @@ def download_hf(repo_id, directory, filenames):
 if method in ("all", "r3d"):
     download_hf("eddie-cui/r3d-weights", "uni3d", ("model.safetensors",))
 
-if method in ("all", "dp"):
+if method == "dinov2":
     download_hf("facebook/dinov2-small", "dinov2-small", ("config.json", "model.safetensors"))
 
 if method in ("all", "dexlatent", "sat", "dqrise", "dinov3"):

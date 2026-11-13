@@ -242,13 +242,15 @@ def train(method, model_class, argv=None):
                         batch = next(iterator)
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         loss, metrics = model(batch)
-                        finite_loss &= torch.isfinite(loss.detach())
+                        finite_loss.logical_and_(torch.isfinite(loss.detach()))
                         (loss / group_size).backward()
                         if record:
                             accumulate_metrics(totals, metrics)
-                    if not finite_loss:
-                        raise RuntimeError(f"Nonfinite {type(model).__name__} loss at step {step}")
-                    torch.nn.utils.clip_grad_norm_(parameters, float("inf"), error_if_nonfinite=True)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        parameters, float("inf"), error_if_nonfinite=False,
+                    ).detach()
+                    if not (finite_loss & torch.isfinite(grad_norm)):
+                        raise RuntimeError(f"Non-finite loss or gradient norm at step {step}")
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
                         model.update_teacher(current_epoch)

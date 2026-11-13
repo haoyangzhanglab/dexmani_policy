@@ -4,7 +4,7 @@ defaults:
 
 policy_name: afro
 initialization:
-  encoder: null
+  encoder: null  # 随机特征实验；正式 AFRO 配方显式提供预训练 encoder.pt。
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8

@@ -23,7 +23,7 @@ def validate_seed_pool(pool):
 
 
 def split_evaluation_seeds(pool, eval_seed, episodes, selection_episodes=0):
-    """Fix the test prefix before reserving any checkpoint selection seeds."""
+    """Use the shuffled pool head for test and its tail for checkpoint selection."""
     positive_int(episodes, "episodes")
     if type(selection_episodes) is not int or selection_episodes < 0:
         raise ValueError("selection_episodes must be a non-negative integer")
@@ -35,4 +35,4 @@ def split_evaluation_seeds(pool, eval_seed, episodes, selection_episodes=0):
             f"{selection_episodes} selection seeds"
         )
     random.Random(eval_seed).shuffle(pool)
-    return pool[:episodes], pool[episodes : episodes + selection_episodes]
+    return pool[:episodes], pool[len(pool) - selection_episodes:]

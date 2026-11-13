@@ -129,11 +129,15 @@ class PolicyTrainer:
         finally:
             self.logger.close()
 
-    def optimizer_step(self):
-        self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.trainable_parameters, self.max_grad_norm or float("inf"), error_if_nonfinite=True
+    def optimizer_step(self, finite_loss: torch.Tensor) -> None:
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.trainable_parameters, self.max_grad_norm or float("inf"), error_if_nonfinite=False,
         ).detach()
-
+        if not (finite_loss & torch.isfinite(grad_norm)):
+            raise RuntimeError(
+                f"Non-finite loss or gradient norm at step {self.global_step}"
+            )
+        self.last_grad_norm = grad_norm
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
@@ -262,10 +266,8 @@ class PolicyTrainer:
                             if record_group:
                                 accumulate_metrics(group_metric_sums, log_dict)
 
-                        if not finite_loss:
-                            raise RuntimeError(f"Non-finite loss at step {self.global_step}")
                         lr = self.optimizer.param_groups[0]["lr"]
-                        self.optimizer_step()
+                        self.optimizer_step(finite_loss)
                         self.global_step += 1
                         pbar.update(1)
                         if record_group:
