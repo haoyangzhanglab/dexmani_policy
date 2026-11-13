@@ -134,7 +134,7 @@ with closing(load_policy("/path/to/run")) as runtime:
     targets = chunk[:runtime.info.n_action_steps]
 ```
 
-输出为物理单位下的控制目标，调度和发送由执行端负责。ODE 还需承接上一条实际已下发目标，完整使用方式见 [ODE 策略](docs/ODE策略.md)。
+输出为物理单位下的控制目标，调度和发送由执行端负责。ODE 还需承接上一条实际已下发目标，执行约定见[手部动作表示中的 ODE 说明](docs/手部动作表示.md#ode从上一条指令积分生成轨迹)。
 
 ```bash
 python -m dexmani_policy.test_tools.smoke_test --device cpu --max-updates 2 --resume-updates 2
@@ -148,9 +148,8 @@ python -m dexmani_policy.test_tools.smoke_test --device cpu --max-updates 2 --re
 | --- | --- |
 | [项目架构](docs/项目架构.md) | 数据流、核心模块与策略组成 |
 | [仿真数据集格式](docs/仿真数据集格式.md) | 回合组织、主要模态与观测动作关系 |
-| [手部动作表示](docs/手部动作表示.md) | SAT、DQ-RISE 与 DexLatent 的表示和解码 |
+| [手部动作表示](docs/手部动作表示.md) | SAT、DQ-RISE、DexLatent 与 ODE 的动作表示及生成 |
 | [观测预训练](docs/观测预训练.md) | AFRO 与 CordViP 的学习目标及迁移 |
 | [触觉与交互建模](docs/触觉与交互建模.md) | 当前触觉融合与未来力预测的作用 |
 | [仿真评测机制](docs/仿真评测机制.md) | 闭环执行、候选选择与独立测试 |
-| [ODE 策略](docs/ODE策略.md) | ODE 时序与执行承接 |
 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 远程同步、训练、续训与结果取回 |
