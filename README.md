@@ -18,6 +18,8 @@
 
 本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
 
+RGB–Point 的投影、融合和策略恢复测试使用 `python -m pytest -q dexmani_policy/test_tools/test_rgb_point.py`，需安装 pytest；完整 GPU 检查还需要 CUDA 和 PyTorch3D。测试覆盖 Center / Group Mean、混合精度梯度，以及原始 RGB 经部署预处理和编码器 Resize 后的恢复一致性。
+
 ## 策略方向
 
 | 方法 | 核心思路 |

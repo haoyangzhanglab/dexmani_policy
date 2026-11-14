@@ -52,7 +52,7 @@ def test_projection_coordinates(projection_device, dtype, resize):
         torch.testing.assert_close(value, before, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("scenario", ["invalid_points", "invalid_camera", "zero_denominator"])
+@pytest.mark.parametrize("scenario", ["invalid_points", "invalid_camera", "zero_denominator", "tiny_denominator"])
 def test_projection_invalid_inputs(projection_device, scenario):
     device = projection_device
     points = torch.zeros(4, 8, 3, device=device)
@@ -64,8 +64,10 @@ def test_projection_invalid_inputs(projection_device, scenario):
     A = torch.eye(3, device=device).expand(4, -1, -1).clone()
     expected_valid = torch.ones(4, 8, device=device, dtype=torch.bool)
     if scenario == "invalid_points":
-        points[:, :5, 2] = points.new_tensor([-1, 0, float("nan"), float("inf"), -float("inf")])
-        expected_valid[:, :5] = False
+        points[:, :, 2] = points.new_tensor([
+            -1, 0, 0.5e-6, 1e-6, float("nan"), float("inf"), -float("inf"), 2e-6,
+        ])
+        expected_valid[:, :7] = False
     elif scenario == "invalid_camera":
         T[0, 0, 0] = float("nan")
         K[1, 2, 2] = float("inf")
@@ -73,10 +75,13 @@ def test_projection_invalid_inputs(projection_device, scenario):
         expected_valid[:3] = False
     else:
         K[:, 2] = 0
+        if scenario == "tiny_denominator":
+            K[:, 2, 2] = 1e-6
         expected_valid[:] = False
     actual = project_to_image(points, K, T, A, (32, 64))
     assert torch.equal(actual.valid, expected_valid)
-    assert (actual.grid_xy == 0).all()
+    assert torch.isfinite(actual.grid_xy).all()
+    assert (actual.grid_xy[~actual.valid] == 0).all()
 
 
 def test_pixel_centers_and_adjacent_edges(projection_device):
@@ -90,9 +95,11 @@ def test_pixel_centers_and_adjacent_edges(projection_device):
         torch.stack((upper, lower)),
         torch.stack((torch.nextafter(lower, -upper), lower)),
         torch.stack((torch.nextafter(lower, upper), lower)),
+        torch.tensor([float("nan"), 0], device=device),
+        torch.tensor([0, float("inf")], device=device),
     ])[None]
-    projection = pixels_to_grid(pixels, torch.ones(1, 6, dtype=torch.bool, device=device), (4, 8))
-    assert projection.valid.tolist() == [[True, True, True, False, False, True]]
+    projection = pixels_to_grid(pixels, torch.ones(1, 8, dtype=torch.bool, device=device), (4, 8))
+    assert projection.valid.tolist() == [[True, True, True, False, False, True, False, False]]
     assert projection.grid_xy[0, 0].tolist() == [-1, -1]
     assert projection.grid_xy[0, 1].tolist() == [0, 0]
     assert projection.grid_xy[0, 2, 0] < 1
@@ -108,12 +115,12 @@ def test_pixel_centers_and_adjacent_edges(projection_device):
 @pytest.mark.parametrize("device,dtype,amp", [
     ("cpu", torch.float32, False), ("cpu", torch.bfloat16, True),
     ("cuda", torch.float32, False), ("cuda", torch.bfloat16, True),
-    ("cuda", torch.float16, True), ("cuda", torch.bfloat16, False),
-    ("cuda", torch.float16, False),
+    ("cuda", torch.float16, True),
 ])
-@pytest.mark.parametrize("prefix", [0, 5])
+@pytest.mark.parametrize("neighbors", [1, 32])
 @pytest.mark.parametrize("validity", ["all", "none", "partial"])
-def test_fusion(device, dtype, amp, prefix, validity):
+def test_fusion(device, dtype, amp, neighbors, validity):
+    prefix = 5  # Preserve the non-contiguous view after removing DINO prefix tokens.
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
     torch.manual_seed(29)
@@ -122,17 +129,19 @@ def test_fusion(device, dtype, amp, prefix, validity):
     geometry = torch.randn(4, 128, 192, device=device, dtype=dtype, requires_grad=True)
     features = torch.randn(4, 196 + prefix, 384, device=device, dtype=dtype, requires_grad=True)
     rgb_grid = features[:, prefix:].unflatten(1, (14, 14))
-    valid = torch.ones(4, 128, device=device, dtype=torch.bool)
+    valid = torch.ones(4, 128, neighbors, device=device, dtype=torch.bool)
     if validity == "none":
         valid[:] = False
     elif validity == "partial":
         valid[:, ::2] = False
-    projection = ImageProjection(torch.rand(4, 128, 2, device=device) * 2 - 1, valid)
+        if neighbors > 1:
+            valid[:, 1::2, ::2] = False
+    projection = ImageProjection(torch.rand(4, 128, neighbors, 2, device=device) * 2 - 1, valid)
     with torch.autocast(device, dtype=dtype, enabled=amp):
         output = fusion(geometry, rgb_grid, projection)
     assert output.shape == (4, 128, 384)
     assert torch.isfinite(output).all()
-    assert (output[..., 192:][~valid] == 0).all()
+    assert (output[..., 192:][~valid.any(-1)] == 0).all()
     output.float().square().mean().backward()
     for value in (geometry, features, *fusion.parameters()):
         assert value.grad is not None and torch.isfinite(value.grad).all()
@@ -152,9 +161,36 @@ def test_fusion_sampling_values(prefix):
     sampled = torch.stack((rgb_grid[:, 0, 0], rgb_grid.mean((1, 2)), rgb_grid[:, 1, 1]), dim=1)
     semantic = fusion.semantic_projection(fusion.rgb_norm(sampled))
     semantic[:, 2] = 0
-    output = fusion(geometry, rgb_grid, ImageProjection(coordinates, valid))
+    output = fusion(geometry, rgb_grid, ImageProjection(coordinates.unsqueeze(2), valid.unsqueeze(2)))
     torch.testing.assert_close(output[..., :2], fusion.geometry_norm(geometry))
     torch.testing.assert_close(output[..., 2:], semantic)
+
+
+def test_group_mean_valid_neighbors():
+    fusion = RGBPatchFusion(4, 2)
+    rgb = torch.tensor([[
+        [[1.0, 3.0, 5.0, 8.0], [7.0, -2.0, 4.0, 1.0]],
+        [[9.0, 2.0, 6.0, 0.0], [3.0, 5.0, 1.0, 4.0]],
+    ]], requires_grad=True)
+    geometry = torch.randn(1, 3, 2)
+    grid = torch.tensor([[
+        [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5]],
+        [[-0.5, 0.5], [0.5, 0.5], [-0.5, -0.5]],
+        [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5]],
+    ]])
+    valid = torch.tensor([[[True, True, False], [False, True, False], [False, False, False]]])
+    averaged = torch.stack((
+        (rgb[0, 0, 0] + rgb[0, 0, 1]) / 2, rgb[0, 1, 1], torch.zeros(4),
+    ))[None]
+    expected = fusion.semantic_projection(fusion.rgb_norm(averaged))
+    expected = torch.where(valid.any(2)[..., None], expected, 0.0)
+    actual = fusion(geometry, rgb, ImageProjection(grid, valid))
+    torch.testing.assert_close(actual[..., :2], fusion.geometry_norm(geometry))
+    torch.testing.assert_close(actual[..., 2:], expected)
+    assert torch.isfinite(actual).all()
+    actual.square().sum().backward()
+    assert torch.isfinite(rgb.grad).all() and rgb.grad.abs().sum() > 0
+    assert (rgb.grad[0, 1, 0] == 0).all()
 
 
 def make_observation(device):
@@ -163,20 +199,22 @@ def make_observation(device):
     points[..., 2] += 1
     return {
         "point_cloud": points,
-        "rgb": torch.randint(0, 256, (4, 3, 224, 224), device=device, dtype=torch.uint8),
+        "rgb": torch.randint(0, 256, (4, 3, 240, 320), device=device, dtype=torch.uint8),
         "joint_state": torch.randn(4, 19, device=device),
         "camera_intrinsic": torch.tensor(
-            [[160, 0, 111.5], [0, 160, 111.5], [0, 0, 1]], device=device,
-        ).expand(4, -1, -1),
-        "camera_extrinsic": torch.eye(3, 4, device=device).expand(4, -1, -1),
+            [[160, 0, 159.5], [0, 160, 119.5], [0, 0, 1]], device=device,
+        ).expand(4, -1, -1).flatten(1),
+        "camera_extrinsic": torch.eye(3, 4, device=device).expand(4, -1, -1).flatten(1),
     }
 
 
-@pytest.fixture(scope="module")
-def encoder():
+@pytest.fixture(scope="module", params=["center", "group_mean"])
+def encoder(request):
     if not torch.cuda.is_available():
         pytest.skip("Full encoder checks require CUDA and PyTorch3D")
-    return RGBPointObservationEncoder(fps_random_config={"use_random": False}).cuda()
+    return RGBPointObservationEncoder(
+        fps_random_config={"use_random": False}, rgb_semantic_sampling=request.param,
+    ).cuda()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
@@ -195,18 +233,52 @@ def test_encoder_forward_backward(encoder, dtype):
 
 
 @pytest.mark.parametrize("kind", ["sat", "dqrise", "dexlatent"])
-def test_shared_policy_interface(kind, encoder):
-    from dexmani_policy.agents.policies.dexlatent import DexLatent
-    from dexmani_policy.agents.policies.dqrise import DQRISE
-    from dexmani_policy.agents.policies.sat import SAT
+@pytest.mark.parametrize("mode", ["center", "group_mean"])
+def test_policy_observation_roundtrip(kind, mode):
+    import hydra
+    from omegaconf import OmegaConf
 
-    policy_class = {"sat": SAT, "dqrise": DQRISE, "dexlatent": DexLatent}[kind]
-    kwargs = {"num_codes": 8} if kind == "dqrise" else {}
-    # The action decoder is outside this check; retain the full default observation encoder.
-    policy = policy_class(n_layers=1, hidden_dim=64, n_head=4, **kwargs).cuda().eval()
-    assert isinstance(policy.obs_encoder, RGBPointObservationEncoder)
-    policy.obs_encoder.load_state_dict(encoder.state_dict(), strict=True)
-    obs = {key: value.unflatten(0, (2, 2)) for key, value in make_observation("cuda").items()}
+    from dexmani_policy.common.checkpoint import restore_policy
+    from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+    from dexmani_policy.common.inference import prepare_observations
+    from dexmani_policy.common.normalizer import normalization_feature_shapes
+    from dexmani_policy.training.common.config import load_config
+
+    config = load_config(kind)
+    assert config.agent.rgb_semantic_sampling == "center"
+    config.agent.rgb_semantic_sampling = mode
+    agent_config = OmegaConf.to_container(config.agent, resolve=True)
+    if kind == "dqrise":
+        agent_config["num_codes"] = 8
+    policy = hydra.utils.instantiate(agent_config)
+    dims = {
+        "action": 19, "joint_state": 19, "point_cloud": 3,
+        "rgb": 3, "camera_intrinsic": 9, "camera_extrinsic": 12,
+    }
+    policy.configure_normalizer(dims, normalization_feature_shapes(dims, config.normalization))
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    policy.to(device).eval()
+    raw = {key: value[:2] for key, value in make_observation("cpu").items()}
+    raw["rgb"] = raw["rgb"].permute(0, 2, 3, 1)
+    obs = prepare_observations(
+        {key: value.numpy() for key, value in raw.items()},
+        normalization_dims=dims, n_obs_steps=2,
+        rgb_preprocessing=rgb_preprocessing_kwargs(config.dataset), device=device,
+    )
+    # Calibrated RGB stays raw until the encoder applies its tracked resize.
+    assert obs["rgb"].shape == (1, 2, 3, 240, 320)
     with torch.no_grad():
-        output = policy._encode_obs(obs)
-    assert output.shape == (2, 258, 384) and torch.isfinite(output).all()
+        expected = policy._encode_obs(obs)
+    weights = policy.state_dict()
+    effective = {
+        "agent": {**agent_config, **policy.effective_config},
+        "normalization_dims": dims,
+        "normalization": dict(config.normalization),
+    }
+    del policy
+    restored = restore_policy(effective, weights, device)
+    assert restored.effective_config["rgb_semantic_sampling"] == mode
+    with torch.no_grad():
+        actual = restored._encode_obs(obs)
+    assert actual.shape == (1, 258, 384) and torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected)

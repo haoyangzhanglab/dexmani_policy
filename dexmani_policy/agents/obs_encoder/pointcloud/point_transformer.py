@@ -101,7 +101,7 @@ class LocalPatchEncoder(nn.Module):
         # Preserve absolute metric position alongside relative geometry.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)
-        return {"tokens": tokens, "xyz": centers}
+        return {"tokens": tokens, "xyz": centers, "neighbor_idx": neighbors}
 
 
 class SpatialTransformerBlock(nn.Module):

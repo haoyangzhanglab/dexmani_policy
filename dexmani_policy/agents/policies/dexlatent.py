@@ -28,6 +28,7 @@ class DexLatent(Policy):
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
+        rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
         n_layers: int = 8,
         hidden_dim: int = 256,
         n_head: int = 8,
@@ -50,6 +51,7 @@ class DexLatent(Policy):
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
             rgb_backbone_name=rgb_backbone_name,
+            rgb_semantic_sampling=rgb_semantic_sampling,
         )
         backbone = DiTX(
             horizon=horizon,
@@ -94,12 +96,14 @@ class DexLatent(Policy):
         latents = (self._encode_actions(chunk)[1] for chunk in dataset.iter_normalization_data("action"))
         self.normalizer.fit_field("hand_latent", latents)
 
-    def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True, **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
         condition = self._encode_obs(batch["obs"])
         arm, latent = self._encode_actions(batch["action"])
         flow_target = torch.cat([arm, self.normalizer["hand_latent"].normalize(latent)], dim=-1)
         return self.action_decoder.compute_loss(
-            condition, flow_target, log_metrics=log_metrics,
+            condition, flow_target, log_metrics=log_metrics, **kwargs,
         )
 
     @torch.no_grad()

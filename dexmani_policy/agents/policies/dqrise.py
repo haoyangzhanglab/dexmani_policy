@@ -32,6 +32,7 @@ class DQRISE(Policy):
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
+        rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
         n_layers: int = 8,
         hidden_dim: int = 256,
         n_head: int = 8,
@@ -54,6 +55,7 @@ class DQRISE(Policy):
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
             rgb_backbone_name=rgb_backbone_name,
+            rgb_semantic_sampling=rgb_semantic_sampling,
         )
         backbone = DiTX(
             horizon=horizon,
@@ -88,7 +90,7 @@ class DQRISE(Policy):
         )
 
     def compute_loss(
-        self, batch: dict[str, Any], *, log_metrics: bool = True,
+        self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs,
     ) -> tuple[torch.Tensor, dict]:
         condition = self._encode_obs(batch["obs"])
 
@@ -99,7 +101,7 @@ class DQRISE(Policy):
 
         flow_target = torch.cat([arm_part, index], dim=-1)
         return self.action_decoder.compute_loss(
-            condition, flow_target, log_metrics=log_metrics,
+            condition, flow_target, log_metrics=log_metrics, **kwargs,
         )
 
     @torch.no_grad()

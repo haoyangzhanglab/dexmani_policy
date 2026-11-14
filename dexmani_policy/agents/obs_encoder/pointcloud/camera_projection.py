@@ -6,7 +6,7 @@ import torch
 
 
 class ImageProjection(NamedTuple):
-    """FP32 align_corners=False grids [BT,N,2] and Bool validity [BT,N]."""
+    """FP32 align_corners=False grids [...,2] and Bool validity [...]."""
 
     grid_xy: torch.Tensor
     valid: torch.Tensor
@@ -41,6 +41,17 @@ def project_to_image(
     image_hw: tuple[int, int],
 ) -> ImageProjection:
     """Project world XYZ [BT,N,3] through OpenCV cameras into the processed image."""
+    if points_world.ndim != 3 or points_world.shape[-1] != 3:
+        raise ValueError("points_world must have shape [BT,N,3]")
+    bt = points_world.shape[0]
+    for name, value, shape in (
+        ("intrinsics", intrinsics, (bt, 3, 3)),
+        ("T_camera_from_world", T_camera_from_world, (bt, 3, 4)),
+        ("image_transform", image_transform, (bt, 3, 3)),
+    ):
+        if value.shape != shape:
+            raise ValueError(f"{name} must have shape {shape}")
+
     with torch.autocast(device_type=points_world.device.type, enabled=False):
         points = points_world.float()
         transform = T_camera_from_world.float()
@@ -61,8 +72,8 @@ def project_to_image(
         valid = (
             finite_camera[..., None]
             & torch.isfinite(homogeneous).all(-1)
-            & (depth > 0)
-            & (denominator[..., 0] != 0)
+            & (depth > 1e-6)
+            & (denominator[..., 0].abs() > 1e-6)
         )
         # Record validity before division overwrites the homogeneous coordinates.
         pixels = homogeneous[..., :2].div_(torch.where(valid[..., None], denominator, 1))

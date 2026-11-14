@@ -7,8 +7,8 @@ from typing import Literal
 import torch
 from torch import nn
 
-from .pointcloud.camera_projection import project_to_image
-from .pointcloud.ops import preprocess_point_cloud
+from .pointcloud.camera_projection import ImageProjection, project_to_image
+from .pointcloud.ops import index_points, preprocess_point_cloud
 from .pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
 from .pointcloud.rgb_patch_fusion import RGBPatchFusion
 from .proprio import StateEncoder
@@ -26,8 +26,12 @@ class RGBPointObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
+        rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
     ) -> None:
         super().__init__()
+        if rgb_semantic_sampling not in ("center", "group_mean"):
+            raise ValueError("rgb_semantic_sampling must be 'center' or 'group_mean'")
+        self.rgb_semantic_sampling = rgb_semantic_sampling
         self.num_points = num_points
         self.n_obs_steps = n_obs_steps
         self.rgb_backbone_name = rgb_backbone_name
@@ -69,12 +73,26 @@ class RGBPointObservationEncoder(nn.Module):
             },
             "fps_random_config": self.patch_encoder.fps_random_config,
             "rgb_backbone_name": self.rgb_backbone_name,
+            "rgb_semantic_sampling": self.rgb_semantic_sampling,
             "rgb_backbone_config": {
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
             },
         }
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
+        if obs["point_cloud"].ndim != 3:
+            raise ValueError("point_cloud must have shape [BT,N,C]")
+        bt = obs["point_cloud"].shape[0]
+        if obs["rgb"].ndim != 4 or obs["rgb"].shape[:2] != (bt, 3):
+            raise ValueError("rgb must have shape [BT,3,H,W]")
+        if obs["joint_state"].ndim != 2 or obs["joint_state"].shape[0] != bt:
+            raise ValueError("joint_state must have shape [BT,C]")
+        for name, width in (("camera_intrinsic", 9), ("camera_extrinsic", 12)):
+            if obs[name].shape != (bt, width):
+                raise ValueError(f"{name} must have shape [BT,{width}]")
+        if bt % self.n_obs_steps:
+            raise ValueError("BT must be divisible by n_obs_steps")
+
         points = preprocess_point_cloud(
             obs["point_cloud"], self.num_points,
             self.patch_encoder.fps_random_config, training=self.training,
@@ -86,13 +104,26 @@ class RGBPointObservationEncoder(nn.Module):
         if any(size % self.rgb_encoder.patch_size for size in rgb.shape[-2:]):
             raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
         patch_grid = tuple(size // self.rgb_encoder.patch_size for size in rgb.shape[-2:])
-        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
+        patch_tokens = self.rgb_encoder(rgb)["patch_tokens"]
+        if patch_tokens.shape[1] != patch_grid[0] * patch_grid[1]:
+            raise ValueError("RGB patch token count must match the processed image patch grid")
+        image_grid = patch_tokens.unflatten(1, patch_grid)
+        sample_xyz = patches["xyz"].unsqueeze(2)
+        if self.rgb_semantic_sampling == "group_mean":
+            sample_xyz = index_points(points[..., :3], patches["neighbor_idx"])
         projection = project_to_image(
-            patches["xyz"], obs["camera_intrinsic"].reshape(-1, 3, 3),
-            obs["camera_extrinsic"].reshape(-1, 3, 4),
-            image_transform, (rgb.shape[-2], rgb.shape[-1]),
+            points_world=sample_xyz.flatten(1, 2),
+            intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
+            T_camera_from_world=obs["camera_extrinsic"].reshape(bt, 3, 4),
+            image_transform=image_transform,
+            image_hw=(rgb.shape[-2], rgb.shape[-1]),
         )
 
+        group_shape = sample_xyz.shape[1:3]
+        projection = ImageProjection(
+            projection.grid_xy.unflatten(1, group_shape),
+            projection.valid.unflatten(1, group_shape),
+        )
         tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
         spatial = self.spatial_encoder(tokens, patches["xyz"])
         joint = self.joint_encoder(obs["joint_state"]).unsqueeze(1)
