@@ -64,13 +64,8 @@ def project_to_image(
         homogeneous = (camera[..., None, :] * camera_intrinsics[..., None, :, :]).sum(-1)
         depth = camera[..., 2]
         denominator = homogeneous[..., 2:3]
-        finite_camera = (
-            torch.isfinite(transform).all(dim=(-1, -2))
-            & torch.isfinite(intrinsics).all(dim=(-1, -2))
-            & torch.isfinite(image_transform).all(dim=(-1, -2))
-        )
         valid = (
-            finite_camera[..., None]
+            torch.isfinite(image_transform).all(dim=(-1, -2))[..., None]
             & torch.isfinite(homogeneous).all(-1)
             & (depth > 1e-6)
             & (denominator[..., 0].abs() > 1e-6)

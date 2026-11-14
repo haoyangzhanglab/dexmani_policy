@@ -90,7 +90,7 @@ class DQRISE(Policy):
         )
 
     def compute_loss(
-        self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs,
+        self, batch: dict[str, Any], *, log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict]:
         condition = self._encode_obs(batch["obs"])
 
@@ -101,7 +101,7 @@ class DQRISE(Policy):
 
         flow_target = torch.cat([arm_part, index], dim=-1)
         return self.action_decoder.compute_loss(
-            condition, flow_target, log_metrics=log_metrics, **kwargs,
+            condition, flow_target, log_metrics=log_metrics,
         )
 
     @torch.no_grad()

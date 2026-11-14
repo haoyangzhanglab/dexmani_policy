@@ -80,13 +80,11 @@ class RGBPointObservationEncoder(nn.Module):
         }
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        if obs["point_cloud"].ndim != 3:
-            raise ValueError("point_cloud must have shape [BT,N,C]")
         bt = obs["point_cloud"].shape[0]
         if obs["rgb"].ndim != 4 or obs["rgb"].shape[:2] != (bt, 3):
             raise ValueError("rgb must have shape [BT,3,H,W]")
-        if obs["joint_state"].ndim != 2 or obs["joint_state"].shape[0] != bt:
-            raise ValueError("joint_state must have shape [BT,C]")
+        if obs["joint_state"].shape[0] != bt:
+            raise ValueError("joint_state and point_cloud must have the same BT")
         for name, width in (("camera_intrinsic", 9), ("camera_extrinsic", 12)):
             if obs[name].shape != (bt, width):
                 raise ValueError(f"{name} must have shape [BT,{width}]")

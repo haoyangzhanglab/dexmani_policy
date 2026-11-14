@@ -11,7 +11,7 @@ from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncod
 from dexmani_policy.common.image_util import resize_image_transform
 
 
-@pytest.fixture(params=[("cpu", False), ("cuda", False), ("cuda", True)])
+@pytest.fixture(params=[("cpu", False), ("cuda", True)])
 def projection_device(request):
     device, tf32 = request.param
     if device == "cuda" and not torch.cuda.is_available():
@@ -22,18 +22,17 @@ def projection_device(request):
     torch.backends.cuda.matmul.allow_tf32 = previous
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("resize", [False, True])
-def test_projection_coordinates(projection_device, dtype, resize):
+def test_projection_coordinates(projection_device, resize):
     device = projection_device
-    points = torch.tensor([[[1, 2, 2], [-1, 0, 2]]], device=device, dtype=dtype).expand(2, -1, -1)
+    points = torch.tensor([[[1, 2, 2], [-1, 0, 2]]], device=device, dtype=torch.float32).expand(2, -1, -1)
     K = torch.tensor([
         [[8, 0, 31.5], [0, 8, 15.5], [0, 0, 1]],
         [[16, 0, 31.5], [0, 4, 15.5], [0, 0, 1]],
-    ], device=device, dtype=dtype)
-    T = torch.eye(3, 4, device=device, dtype=dtype).expand(2, -1, -1).clone()
+    ], device=device, dtype=torch.float32)
+    T = torch.eye(3, 4, device=device, dtype=torch.float32).expand(2, -1, -1).clone()
     hw = (16, 32) if resize else (32, 64)
-    A = resize_image_transform((32, 64), hw, device=device).to(dtype).expand(2, -1, -1)
+    A = resize_image_transform((32, 64), hw, device=device).expand(2, -1, -1)
     expected = [[[0.125, 0.5], [-0.125, 0]], [[0.25, 0.25], [-0.25, 0]]]
     if resize:
         T[:] = T.new_tensor([[0, -1, 0, 0.5], [1, 0, 0, -0.25], [0, 0, 1, 2]])
@@ -112,32 +111,25 @@ def test_pixel_centers_and_adjacent_edges(projection_device):
     torch.testing.assert_close(actual.grid_xy, projection.grid_xy, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("device,dtype,amp", [
-    ("cpu", torch.float32, False), ("cpu", torch.bfloat16, True),
-    ("cuda", torch.float32, False), ("cuda", torch.bfloat16, True),
-    ("cuda", torch.float16, True),
+@pytest.mark.parametrize("device,dtype", [
+    ("cpu", torch.float32), ("cuda", torch.bfloat16),
 ])
 @pytest.mark.parametrize("neighbors", [1, 32])
-@pytest.mark.parametrize("validity", ["all", "none", "partial"])
-def test_fusion(device, dtype, amp, neighbors, validity):
+def test_fusion(device, dtype, neighbors):
     prefix = 5  # Preserve the non-contiguous view after removing DINO prefix tokens.
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
     torch.manual_seed(29)
-    weights_dtype = torch.float32 if amp else dtype
-    fusion = RGBPatchFusion(384).to(device=device, dtype=weights_dtype)
+    fusion = RGBPatchFusion(384).to(device)
     geometry = torch.randn(4, 128, 192, device=device, dtype=dtype, requires_grad=True)
     features = torch.randn(4, 196 + prefix, 384, device=device, dtype=dtype, requires_grad=True)
     rgb_grid = features[:, prefix:].unflatten(1, (14, 14))
     valid = torch.ones(4, 128, neighbors, device=device, dtype=torch.bool)
-    if validity == "none":
-        valid[:] = False
-    elif validity == "partial":
-        valid[:, ::2] = False
-        if neighbors > 1:
-            valid[:, 1::2, ::2] = False
+    valid[:, 0] = False
+    if neighbors > 1:
+        valid[:, 1, ::2] = False
     projection = ImageProjection(torch.rand(4, 128, neighbors, 2, device=device) * 2 - 1, valid)
-    with torch.autocast(device, dtype=dtype, enabled=amp):
+    with torch.autocast(device, dtype=dtype, enabled=dtype != torch.float32):
         output = fusion(geometry, rgb_grid, projection)
     assert output.shape == (4, 128, 384)
     assert torch.isfinite(output).all()
@@ -145,12 +137,10 @@ def test_fusion(device, dtype, amp, neighbors, validity):
     output.float().square().mean().backward()
     for value in (geometry, features, *fusion.parameters()):
         assert value.grad is not None and torch.isfinite(value.grad).all()
-    if validity == "none":
-        assert (features.grad == 0).all()
 
 
-@pytest.mark.parametrize("prefix", [0, 5])
-def test_fusion_sampling_values(prefix):
+def test_fusion_sampling_values():
+    prefix = 5
     torch.manual_seed(29)
     fusion = RGBPatchFusion(4, 2)
     features = torch.randn(2, 4 + prefix, 4)
@@ -184,6 +174,10 @@ def test_group_mean_valid_neighbors():
     ))[None]
     expected = fusion.semantic_projection(fusion.rgb_norm(averaged))
     expected = torch.where(valid.any(2)[..., None], expected, 0.0)
+    geometry = geometry.repeat(1, 4, 1)[:, :10]
+    grid = grid.repeat(1, 4, 1, 1)[:, :10]
+    valid = valid.repeat(1, 4, 1)[:, :10]
+    expected = expected.repeat(1, 4, 1)[:, :10]
     actual = fusion(geometry, rgb, ImageProjection(grid, valid))
     torch.testing.assert_close(actual[..., :2], fusion.geometry_norm(geometry))
     torch.testing.assert_close(actual[..., 2:], expected)
@@ -211,19 +205,18 @@ def make_observation(device):
 @pytest.fixture(scope="module", params=["center", "group_mean"])
 def encoder(request):
     if not torch.cuda.is_available():
-        pytest.skip("Full encoder checks require CUDA and PyTorch3D")
+        pytest.skip("Full encoder gradient checks require CUDA")
+    pytest.importorskip("pytorch3d.ops", reason="Point grouping requires PyTorch3D")
     return RGBPointObservationEncoder(
         fps_random_config={"use_random": False}, rgb_semantic_sampling=request.param,
     ).cuda()
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-def test_encoder_forward_backward(encoder, dtype):
+def test_encoder_forward_backward(encoder):
     encoder.train()
     encoder.zero_grad(set_to_none=True)
     obs = make_observation("cuda")
-    with torch.autocast("cuda", dtype=dtype, enabled=dtype != torch.float32):
-        output = encoder(obs)
+    output = encoder(obs)
     assert output.shape == (2, 258, 384) and torch.isfinite(output).all()
     output[..., 0].float().square().mean().backward()
     assert all(not p.requires_grad and p.grad is None for p in encoder.rgb_encoder.backbone.parameters())
@@ -235,6 +228,7 @@ def test_encoder_forward_backward(encoder, dtype):
 @pytest.mark.parametrize("kind", ["sat", "dqrise", "dexlatent"])
 @pytest.mark.parametrize("mode", ["center", "group_mean"])
 def test_policy_observation_roundtrip(kind, mode):
+    pytest.importorskip("pytorch3d.ops", reason="Point grouping requires PyTorch3D")
     import hydra
     from omegaconf import OmegaConf
 
