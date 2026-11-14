@@ -9,7 +9,7 @@ from torch import nn
 
 from .pointcloud.camera_projection import project_to_image
 from .pointcloud.ops import preprocess_point_cloud
-from .pointcloud.point_transformer import GlobalPointTransformer, PointPatchEncoder
+from .pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
 from .pointcloud.rgb_patch_fusion import RGBPatchFusion
 from .proprio import StateEncoder
 from .rgb.build import build_rgb_encoder
@@ -38,20 +38,22 @@ class RGBPointObservationEncoder(nn.Module):
             **(fps_random_config or {}),
         }
         patch_config = dict(pc_encoder_config or {})
-        global_config = {
+        spatial_config = {
             key: patch_config.pop(key)
             for key in ("depth", "num_heads", "mlp_ratio", "rope_scale", "rope_base")
             if key in patch_config
         }
-        self.patch_encoder = PointPatchEncoder(
+        self.patch_encoder = LocalPatchEncoder(
             input_channels=pc_dim, fps_random_config=fps_config, **patch_config,
         )
-        self.rgb_encoder, self.image_processor = build_rgb_encoder(rgb_backbone_name, rgb_backbone_config)
-        self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
-        self.global_encoder = GlobalPointTransformer(
-            channels=2 * self.patch_encoder.out_dim, **global_config,
+        self.rgb_encoder, self.image_processor = build_rgb_encoder(
+            rgb_backbone_name, rgb_backbone_config,
         )
-        self.out_dim = self.global_encoder.out_dim
+        self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
+        self.spatial_encoder = SpatialContextEncoder(
+            channels=2 * self.patch_encoder.out_dim, **spatial_config,
+        )
+        self.out_dim = self.spatial_encoder.out_dim
         self.joint_encoder = StateEncoder(state_dim, self.out_dim)
 
         self.token_type_embedding = nn.Parameter(torch.empty(1, 2, self.out_dim))
@@ -61,8 +63,9 @@ class RGBPointObservationEncoder(nn.Module):
     @property
     def effective_config(self) -> dict:
         return {
+            # Store the local width; RGB fusion doubles it for spatial attention.
             "pc_encoder_config": {
-                **self.global_encoder.effective_config, **self.patch_encoder.effective_config,
+                **self.spatial_encoder.effective_config, **self.patch_encoder.effective_config,
             },
             "fps_random_config": self.patch_encoder.fps_random_config,
             "rgb_backbone_name": self.rgb_backbone_name,
@@ -91,7 +94,7 @@ class RGBPointObservationEncoder(nn.Module):
         )
 
         tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
-        spatial = self.global_encoder(tokens, patches["xyz"])
+        spatial = self.spatial_encoder(tokens, patches["xyz"])
         joint = self.joint_encoder(obs["joint_state"]).unsqueeze(1)
         spatial = spatial + self.token_type_embedding[:, :1].to(spatial.dtype)
         joint = joint + self.token_type_embedding[:, 1:].to(joint.dtype)
