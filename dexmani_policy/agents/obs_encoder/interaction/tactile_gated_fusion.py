@@ -5,11 +5,16 @@ from torch import nn
 
 
 class TactileGatedFusion(nn.Module):
-    """Consume identity force (XHand Real: SDK / 255); all Value paths preserve physical zero."""
+    """Fuse wrist-first geometry [B,6,192] with identity force [B,5,3].
 
-    def __init__(self):
+    Forces retain the source's frame and scale; zero force leaves geometry unchanged.
+    """
+
+    def __init__(self) -> None:
         super().__init__()
-        self.force_encoder = nn.Sequential(nn.Linear(3, 64, bias=False), nn.SiLU(), nn.Linear(64, 64, bias=False))
+        self.force_encoder = nn.Sequential(
+            nn.Linear(3, 64, bias=False), nn.SiLU(), nn.Linear(64, 64, bias=False),
+        )
         self.geometry_norm = nn.LayerNorm(192)
         self.pool_geometry = nn.Linear(192, 32)
         self.pool_tactile = nn.Linear(64, 32, bias=False)
@@ -22,9 +27,13 @@ class TactileGatedFusion(nn.Module):
     def forward(self, geometry: torch.Tensor, force: torch.Tensor) -> torch.Tensor:
         tactile = self.force_encoder(force)
         normalized = self.geometry_norm(geometry)
-        scores = self.pool_score(torch.tanh(self.pool_geometry(normalized[:, 1:]) + self.pool_tactile(tactile)))
+        scores = self.pool_score(torch.tanh(
+            self.pool_geometry(normalized[:, 1:]) + self.pool_tactile(tactile),
+        ))
         global_tactile = (scores.softmax(dim=1) * tactile).sum(1, keepdim=True)
         local = torch.cat((torch.zeros_like(global_tactile), tactile), 1)
         values = torch.cat((global_tactile, tactile), 1)
-        gates = self.gate(torch.cat((normalized, local, global_tactile.expand(-1, 6, -1)), -1)).sigmoid()
-        return geometry + (gates * self.residual(values)).float()
+        gates = self.gate(torch.cat(
+            (normalized, local, global_tactile.expand(-1, 6, -1)), dim=-1,
+        )).sigmoid()
+        return geometry + gates * self.residual(values)

@@ -42,7 +42,7 @@ def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
 
 
 class HandGeometryEncoder(nn.Module):
-    """Base-frame wrist and anchors, wrist-local finger geometry; no joint inputs."""
+    """Encode metric Base-frame wrist/fingertips into six wrist-first tokens."""
 
     def __init__(self, wrist_scale: float = 0.25, finger_scale: float = 0.10) -> None:
         super().__init__()
@@ -78,4 +78,4 @@ class HandGeometryEncoder(nn.Module):
             )
             anchors = torch.cat((position.unsqueeze(-2), fingertips), dim=-2)
         tokens = torch.cat((self.wrist_mlp(wrist).unsqueeze(-2), self.finger_mlp(fingers)), dim=-2)
-        return {"tokens": self.norm(tokens.float() + self.body_identity[0]), "anchors_base": anchors}
+        return {"tokens": self.norm(tokens + self.body_identity[0]), "anchors_base": anchors}

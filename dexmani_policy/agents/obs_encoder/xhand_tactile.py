@@ -1,4 +1,4 @@
-"""Per-frame identity tactile encoders; XHand Real inputs use SDK / 255."""
+"""Per-frame tactile encoders consuming forces in their source frame and scale."""
 
 import torch
 from torch import nn
@@ -7,7 +7,7 @@ __all__ = ["XHandForceEncoder", "XHandTaxelEncoder"]
 
 
 class XHandForceEncoder(nn.Module):
-    """Identity force [BT,5,3] (XHand Real: SDK / 255) -> [BT,5,64] with one shared 3-layer MLP."""
+    """Identity force [BT,5,3] -> [BT,5,64] with one shared 3-layer MLP."""
 
     num_tokens = 5
     out_dim = 64
@@ -28,7 +28,7 @@ class XHandForceEncoder(nn.Module):
 
 
 class XHandTaxelEncoder(nn.Module):
-    """Identity taxel force [BT,5,120,3] (XHand Real: SDK / 255) -> [BT,5,64] with KineDex 1D CNN."""
+    """Identity taxel force [BT,5,120,3] -> [BT,5,64] with KineDex 1D CNN."""
 
     num_tokens = 5
     out_dim = 64
