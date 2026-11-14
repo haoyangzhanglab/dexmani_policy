@@ -22,19 +22,14 @@ def pixels_to_grid(
         raise ValueError("image dimensions must be positive (height, width)")
 
     with torch.autocast(device_type=pixels.device.type, enabled=False):
-        pixels = pixels.float()
+        if pixels.dtype != torch.float32:
+            pixels = pixels.float()
         size = pixels.new_tensor((width, height))
-        valid = (
-            ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1)
-            & valid
-        )
+        valid = ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1) & valid
         grid = (pixels + 0.5).div_(size).mul_(2).sub_(1)
         # A valid pixel just inside the right edge can round to exactly +1.
         grid.clamp_(-1, 1 - torch.finfo(torch.float32).eps / 2)
-        return ImageProjection(
-            torch.where(valid[..., None], grid, 0.0),
-            valid,
-        )
+        return ImageProjection(torch.where(valid[..., None], grid, 0.0), valid)
 
 
 @torch.no_grad()
@@ -49,18 +44,15 @@ def project_to_image(
     with torch.autocast(device_type=points_world.device.type, enabled=False):
         points = points_world.float()
         transform = T_camera_from_world.float()
+        camera_intrinsics = intrinsics.float()
+        image_affine = image_transform.float()
         # Explicit FP32 products avoid TF32 rounding at image boundaries.
         camera = (points[:, :, None, :] * transform[..., None, :3, :3]).sum(-1)
         camera.add_(transform[..., None, :3, 3])
 
-        homogeneous = (camera[..., None, :] * intrinsics.float()[..., None, :, :]).sum(-1)
+        homogeneous = (camera[..., None, :] * camera_intrinsics[..., None, :, :]).sum(-1)
         depth = camera[..., 2]
         denominator = homogeneous[..., 2:3]
-        pixels = homogeneous[..., :2] / torch.where(denominator != 0, denominator, 1)
-
-        pixels = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
-        pixels = (pixels[..., None, :] * image_transform.float()[..., None, :2, :]).sum(-1)
-
         finite_camera = (
             torch.isfinite(transform).all(dim=(-1, -2))
             & torch.isfinite(intrinsics).all(dim=(-1, -2))
@@ -72,4 +64,8 @@ def project_to_image(
             & (depth > 0)
             & (denominator[..., 0] != 0)
         )
+        # Record validity before division overwrites the homogeneous coordinates.
+        pixels = homogeneous[..., :2].div_(torch.where(valid[..., None], denominator, 1))
+        pixels = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
+        pixels = (pixels[..., None, :] * image_affine[..., None, :2, :]).sum(-1)
         return pixels_to_grid(pixels, valid, image_hw)

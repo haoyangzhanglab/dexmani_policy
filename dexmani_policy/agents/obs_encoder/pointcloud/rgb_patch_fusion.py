@@ -25,7 +25,7 @@ class RGBPatchFusion(nn.Module):
         with torch.autocast(device_type=rgb_grid.device.type, enabled=False):
             sampled = F.grid_sample(
                 rgb_grid.permute(0, 3, 1, 2).float(),
-                projection.grid_xy.float().unsqueeze(2),
+                projection.grid_xy.unsqueeze(2),
                 mode="bilinear", padding_mode="border", align_corners=False,
             ).squeeze(-1).transpose(1, 2)
         semantic = self.semantic_projection(
