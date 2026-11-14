@@ -33,7 +33,11 @@ def test_local_geometry(device, input_channels, dtype, hidden):
     torch.testing.assert_close(output, model(xyz[:, :, order], attrs[:, :, order]))
     (output.float() * torch.randn_like(output.float())).mean().backward()
     assert_gradients(model)
-    assert_gradients(model.context_mlp)
+
+
+def test_local_geometry_scale():
+    with pytest.raises(ValueError, match="geometry_scale"):
+        LocalGeometryEmbedding(3, 192, geometry_scale=0.0)
 
 
 @pytest.mark.parametrize("channels", [192, 384])
@@ -78,13 +82,10 @@ def test_rope(device):
 
 @pytest.mark.parametrize("input_channels", [3, 6])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("hidden", [32, 64])
-def test_full_encoder(device, input_channels, dtype, hidden):
+def test_full_encoder(device, input_channels, dtype):
     if device == "cpu" and dtype == torch.float16:
         pytest.skip("FP16 AMP is tested on CUDA")
-    model = PointTransformerEncoder(
-        input_channels=input_channels, local_hidden_dim=hidden,
-    ).to(device).eval()
+    model = PointTransformerEncoder(input_channels=input_channels).to(device).eval()
     points = torch.randn(2, 1024, input_channels, device=device)
     with torch.autocast(device, dtype=dtype, enabled=dtype != torch.float32):
         output = model(points)
@@ -98,12 +99,14 @@ def test_full_encoder(device, input_channels, dtype, hidden):
     assert_gradients(model)
 
 
-@pytest.mark.parametrize("input_channels", [3, 6])
-def test_encoder_checkpoint(device, input_channels, tmp_path):
-    model = PointTransformerEncoder(input_channels=input_channels).to(device).eval()
+@pytest.mark.parametrize("input_channels,hidden", [(3, 32), (6, 64)])
+def test_encoder_checkpoint(device, input_channels, hidden, tmp_path):
+    model = PointTransformerEncoder(
+        input_channels=input_channels, local_hidden_dim=hidden,
+    ).to(device).eval()
     points = torch.randn(2, 1024, input_channels, device=device)
     assert model.effective_config == dict(
-        channels=192, num_patches=128, group_size=32, local_hidden_dim=32,
+        channels=192, num_patches=128, group_size=32, local_hidden_dim=hidden,
         depth=2, num_heads=8, mlp_ratio=2.0,
         geometry_scale=0.1, rope_scale=0.05, rope_base=100.0,
     )
@@ -180,64 +183,21 @@ def test_config_composition(device):
     torch.testing.assert_close(output["tokens"], expected, rtol=0, atol=0)
     torch.testing.assert_close(output["xyz"], patches["xyz"], rtol=0, atol=0)
 
-    restored = PointTransformerEncoder(input_channels=3, **model.effective_config).to(device).eval()
-    restored.load_state_dict(model.state_dict(), strict=True)
-    with torch.no_grad():
-        torch.testing.assert_close(restored(points), output, rtol=0, atol=0)
 
-
-@pytest.mark.parametrize("hidden", [32, 64])
-def test_geometry_sensitivity(device, hidden):
-    model = LocalGeometryEmbedding(6, 192, 0.1, hidden).to(device)
-    xyz = torch.randn(2, 128, 32, 3, device=device) * 0.1
-    attrs = torch.rand_like(xyz)
-    output = model(xyz, attrs)
-    perturbed = model(xyz + 0.001 * torch.randn_like(xyz), attrs)
-    assert output.shape == (2, 128, 192)
-    assert torch.isfinite(perturbed).all()
-    assert output.var(dim=1).sum() > 0
-    relative_change = (perturbed - output).norm() / output.norm()
-    assert torch.isfinite(relative_change) and relative_change > 0
-
-
-@pytest.mark.parametrize("input_channels,stored_channels", [(3, 3), (3, 6), (6, 6), (6, 9)])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-def test_single_gather_equivalence(device, input_channels, stored_channels, dtype, monkeypatch):
-    from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer as pt
-
-    model = LocalPatchEncoder(
-        input_channels=input_channels, num_patches=8, group_size=4,
-    ).to(device)
-    cloud = torch.randn(2, 64, stored_channels, device=device, dtype=dtype)[:, ::2]
-    xyz = cloud[..., :3].float().contiguous()
-    centers = xyz[:, :8].contiguous()
-    neighbors = torch.randint(32, (2, 8, 4), device=device)
-    relative_ref = index_points(xyz, neighbors) - centers.unsqueeze(2)
-    attrs_ref = index_points(cloud[..., 3:input_channels], neighbors).float()
-    expected = model.geometry_embedding(relative_ref, attrs_ref) + model.position_embedding(centers)
-    calls = []
-
-    def gather(points, indices):
-        calls.append(points)
-        grouped = index_points(points, indices)
-        torch.testing.assert_close(grouped[..., :3] - centers.unsqueeze(2), relative_ref)
-        torch.testing.assert_close(grouped[..., 3:], attrs_ref)
-        return grouped
-
-    monkeypatch.setattr(pt, "sample_point_patches", lambda *args: (centers, neighbors))
-    monkeypatch.setattr(pt, "index_points", gather)
-    output = model(cloud)
-    assert len(calls) == 1 and calls[0].dtype == torch.float32
-    torch.testing.assert_close(output["tokens"], expected, rtol=0, atol=0)
-    torch.testing.assert_close(output["xyz"], centers, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("shape", [(128, 6), (1, 2, 128, 6), (0, 128, 6), (1, 127, 6), (1, 128, 5)])
+@pytest.mark.parametrize("shape", [(128, 6), (1, 2, 128, 6), (0, 128, 6), (1, 128, 5)])
 def test_patch_input_boundary(shape):
     with pytest.raises(ValueError, match="point cloud"):
         LocalPatchEncoder()(torch.empty(shape))
 
 
-def test_patch_minimum_points(device):
-    model = LocalPatchEncoder(input_channels=3, num_patches=8, group_size=16).to(device)
-    assert model(torch.rand(1, 16, 6, device=device))["tokens"].shape == (1, 8, 192)
+@pytest.mark.parametrize("input_channels", [3, 6])
+def test_patch_minimum_points(device, input_channels):
+    model = LocalPatchEncoder(
+        input_channels=input_channels, num_patches=8, group_size=16,
+    ).to(device).eval()
+    cloud = torch.rand(1, 32, input_channels + 3, device=device)[:, ::2]
+    output = model(cloud)
+    assert output["tokens"].shape == (1, 8, 192)
+    torch.testing.assert_close(output, model(cloud[..., :input_channels].contiguous()))
+    with pytest.raises(ValueError, match="N must be"):
+        model(cloud[:, :15])

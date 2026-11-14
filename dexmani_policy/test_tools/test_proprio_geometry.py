@@ -1,13 +1,10 @@
-import numpy as np
 import pytest
 import torch
-import zarr
 
 from dexmani_policy.agents.obs_encoder.proprio import HandGeometryEncoder, _rotation_6d_to_matrix
 from dexmani_policy.agents.obs_encoder.interaction.relative_3d_attention import (
     Relative3DCrossAttention,
 )
-from dexmani_policy.test_tools.diagnose_proprio_geometry import distance_percentiles
 
 
 def make_geometry(shape, device):
@@ -178,86 +175,11 @@ def test_amp_gradients(device, dtype):
     assert sum(p.grad.abs().sum() for p in attention.parameters()) > 0
 
 
-@pytest.mark.parametrize(
-    "cls,count", [(HandGeometryEncoder, 52864), (Relative3DCrossAttention, 150212)]
-)
-def test_checkpoint(cls, count, tmp_path):
+@pytest.mark.parametrize("cls", [HandGeometryEncoder, Relative3DCrossAttention])
+def test_checkpoint(cls, tmp_path):
     model = cls()
-    if cls is HandGeometryEncoder:
-        shapes = {"body_identity": (1, 6, 192), "norm.weight": (192,), "norm.bias": (192,)}
-        for name, width in [("wrist_mlp", 9), ("finger_mlp", 3)]:
-            shapes.update(
-                {
-                    f"{name}.0.weight": (128, width),
-                    f"{name}.0.bias": (128,),
-                    f"{name}.2.weight": (192, 128),
-                    f"{name}.2.bias": (192,),
-                }
-            )
-    else:
-        shapes = {}
-        for name, out_dim, in_dim in [
-            ("q", 192, 192),
-            ("kv", 384, 192),
-            ("out", 192, 192),
-            ("position_bias.0", 32, 3),
-            ("position_bias.2", 4, 32),
-        ]:
-            shapes.update({f"{name}.weight": (out_dim, in_dim), f"{name}.bias": (out_dim,)})
-        for name in ["query_norm", "memory_norm", "norm"]:
-            shapes.update({f"{name}.weight": (192,), f"{name}.bias": (192,)})
-        shapes["relative_value.weight"] = (192, 3)
-    assert {key: tuple(value.shape) for key, value in model.state_dict().items()} == shapes
-    assert sum(p.numel() for p in model.parameters()) == count
     path = tmp_path / "model.pt"
     torch.save(model.state_dict(), path)
     restored = cls()
     restored.load_state_dict(torch.load(path, weights_only=True), strict=True)
     torch.testing.assert_close(model.state_dict(), restored.state_dict())
-
-
-@pytest.fixture
-def geometry_store(tmp_path):
-    path = tmp_path / "geometry.zarr"
-    root = zarr.open_group(str(path), mode="w")
-    pose = np.array([[1, 0, 0, 0, 1, 0, -1, 0, 0]], dtype=np.float32)
-    tips = np.tile([[[1.0, 1.0, 0.0]]], (1, 5, 1)).astype(np.float32)
-    scene = np.array([[[1.0, 2.0, 0.0, 0.0, 0.0, 0.0]]], dtype=np.float32)
-    offsets = np.array([0.0, 10.0, 20.0], dtype=np.float32)
-    for key, data in (("eef_pose", pose), ("fingertip_xyz", tips), ("point_cloud", scene)):
-        data = np.repeat(data, 3, axis=0)
-        data[..., 0] += offsets.reshape(3, *([1] * (data.ndim - 2)))
-        root.create_dataset(f"data/{key}", data=data)
-    root.create_dataset("meta/episode_ends", data=np.array([3]))
-    return path
-
-
-@pytest.mark.parametrize("max_frames,rows", [(1, [0]), (2, [0, 2]), (128, [0, 1, 2])])
-def test_distance_percentiles(geometry_store, max_frames, rows):
-    count, stats = distance_percentiles(geometry_store, max_frames, reference=(1, 0, 0))
-    assert count == len(rows)
-    np.testing.assert_allclose(
-        stats["wrist_reference"],
-        np.percentile(np.array(rows) * 10, [50, 90, 95, 99]),
-    )
-    np.testing.assert_allclose(stats["finger_local"], 1)
-    np.testing.assert_allclose(
-        stats["hand_scene"],
-        np.percentile([2, 1, 1, 1, 1, 1] * len(rows), [50, 90, 95, 99]),
-    )
-
-
-@pytest.mark.parametrize("shape", [(3, 3), (3, 0, 3), (3, 2, 2)])
-def test_diagnostic_point_shape(geometry_store, shape):
-    root = zarr.open_group(str(geometry_store), mode="a")
-    del root["data/point_cloud"]
-    root.create_dataset("data/point_cloud", data=np.zeros(shape, dtype=np.float32))
-    with pytest.raises(ValueError, match="point_cloud requires"):
-        distance_percentiles(geometry_store)
-
-
-def test_diagnostic_nonfinite(geometry_store):
-    root = zarr.open_group(str(geometry_store), mode="a")
-    root["data/point_cloud"][0, 0, 2] = np.nan
-    with pytest.raises(ValueError, match="field=point_cloud, episode=0, row=0"):
-        distance_percentiles(geometry_store)

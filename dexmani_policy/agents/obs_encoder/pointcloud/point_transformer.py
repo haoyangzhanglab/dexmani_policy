@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from dexmani_policy.agents.modules import build_mlp
+from dexmani_policy.common.config import positive_float
 
 from .ops import index_points, sample_point_patches
 from .rope import RotaryPositionEmbedding3D
@@ -22,7 +21,7 @@ class LocalGeometryEmbedding(nn.Module):
         local_hidden_dim: int = 32,
     ) -> None:
         super().__init__()
-        self.geometry_scale = geometry_scale
+        self.geometry_scale = positive_float(geometry_scale, "geometry_scale")
         self.point_mlp = build_mlp(
             [input_channels, local_hidden_dim, local_hidden_dim], activate_last=True,
         )
@@ -63,8 +62,6 @@ class LocalPatchEncoder(nn.Module):
         sizes = (channels, num_patches, group_size, local_hidden_dim)
         if any(type(value) is not int or value <= 0 for value in sizes):
             raise ValueError("sizes must be positive integers")
-        if not math.isfinite(geometry_scale) or geometry_scale <= 0:
-            raise ValueError("geometry_scale must be finite and positive")
 
         self.input_channels = input_channels
         self.out_dim = channels
@@ -80,12 +77,11 @@ class LocalPatchEncoder(nn.Module):
     def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
         if pointcloud.ndim != 3:
             raise ValueError(f"Expected point cloud [B,N,C], got {tuple(pointcloud.shape)}")
-        batch_size, num_points, channels = pointcloud.shape
-        min_points = max(self.num_patches, self.group_size)
-        if batch_size == 0 or num_points < min_points or channels < self.input_channels:
+        batch_size, _, channels = pointcloud.shape
+        if batch_size == 0 or channels < self.input_channels:
             raise ValueError(
                 f"Invalid point cloud shape {tuple(pointcloud.shape)}: require B > 0, "
-                f"N >= {min_points}, C >= {self.input_channels}"
+                f"C >= {self.input_channels}"
             )
         points = pointcloud[..., : self.input_channels].float().contiguous()
         xyz = points[..., :3].contiguous()

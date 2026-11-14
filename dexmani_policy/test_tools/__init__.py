@@ -1,1 +1,1 @@
-"""Standalone policy lifecycle checks, invoked with python -m."""
+"""Core regression tests and standalone policy lifecycle checks."""
