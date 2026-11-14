@@ -4,13 +4,16 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from dexmani_policy.common.config import positive_float
+
 
 class Relative3DCrossAttention(nn.Module):
-    embed_dim, num_heads, geometry_scale = 192, 4, 0.10
+    embed_dim, num_heads = 192, 4
     head_dim = embed_dim // num_heads
 
-    def __init__(self):
+    def __init__(self, geometry_scale: float = 0.10) -> None:
         super().__init__()
+        self.geometry_scale = positive_float(geometry_scale, "geometry_scale")
         dim = self.embed_dim
         self.query_norm, self.memory_norm = nn.LayerNorm(dim), nn.LayerNorm(dim)
         self.q, self.kv = nn.Linear(dim, dim), nn.Linear(dim, 2 * dim)
@@ -21,7 +24,13 @@ class Relative3DCrossAttention(nn.Module):
         self.relative_value = nn.Linear(3, dim, bias=False)
         nn.init.zeros_(self.relative_value.weight)
 
-    def forward(self, body_tokens, scene_tokens, anchors_base, scene_xyz_base):
+    def forward(
+        self,
+        body_tokens: torch.Tensor,
+        scene_tokens: torch.Tensor,
+        anchors_base: torch.Tensor,
+        scene_xyz_base: torch.Tensor,
+    ) -> torch.Tensor:
         b, l, _ = body_tokens.shape
         n = scene_tokens.shape[1]
         q = self.q(self.query_norm(body_tokens)).reshape(

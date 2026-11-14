@@ -1,3 +1,4 @@
+import math
 import os
 from pathlib import Path
 
@@ -18,6 +19,12 @@ POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointc
 
 def set_project_root() -> None:
     os.chdir(PROJECT_ROOT)
+
+
+def positive_float(value: float, name: str) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive, got {value!r}")
+    return float(value)
 
 
 def positive_int(value: int, name: str) -> int:
