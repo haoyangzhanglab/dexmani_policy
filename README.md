@@ -18,12 +18,6 @@
 
 本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
 
-核心回归测试需要 pytest，点云测试另需 PyTorch3D，覆盖编码器、几何计算及小规模集成接口。测试使用 CPU 及可用的 CUDA，并检查 FP16/BF16 混合精度：
-
-```bash
-python -m pytest -q -rs dexmani_policy/test_tools
-```
-
 ## 策略方向
 
 | 方法 | 核心思路 |
