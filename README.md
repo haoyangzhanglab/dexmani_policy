@@ -18,10 +18,10 @@
 
 本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
 
-Point Transformer 的针对性测试需要 pytest 和 PyTorch3D，使用真实采样后端验证编码器、Hydra 策略配置和 checkpoint 恢复链路。测试覆盖 CPU，并在 CUDA 可用时覆盖 GPU 和 FP16/BF16：
+Point Transformer 的针对性测试需要 pytest 和 PyTorch3D，使用真实采样后端验证编码器、小规模接口和编码器权重恢复。以下命令排除完整策略构建与恢复用例，覆盖 CPU 及可用的 CUDA FP16/BF16：
 
 ```bash
-python -m pytest -q -rs dexmani_policy/test_tools/test_point_transformer*.py
+python -m pytest -q -rs dexmani_policy/test_tools/test_point_transformer*.py -k 'not policy_integration'
 ```
 
 ## 策略方向

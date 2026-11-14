@@ -19,7 +19,7 @@ class LocalGeometryEmbedding(nn.Module):
 
     def __init__(
         self, input_channels: int, channels: int, geometry_scale: float,
-        local_hidden_dim: int = 64,
+        local_hidden_dim: int = 32,
     ) -> None:
         super().__init__()
         self.geometry_scale = geometry_scale
@@ -51,7 +51,7 @@ class LocalPatchEncoder(nn.Module):
         group_size: int = 32,
         geometry_scale: float = 0.10,
         fps_random_config: dict | None = None,
-        local_hidden_dim: int = 64,
+        local_hidden_dim: int = 32,
     ) -> None:
         super().__init__()
         self.effective_config = dict(
@@ -78,7 +78,17 @@ class LocalPatchEncoder(nn.Module):
         self.position_embedding = build_mlp([3, 128, channels], normalize=False)
 
     def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
-        xyz = pointcloud[..., :3].float().contiguous()
+        if pointcloud.ndim != 3:
+            raise ValueError(f"Expected point cloud [B,N,C], got {tuple(pointcloud.shape)}")
+        batch_size, num_points, channels = pointcloud.shape
+        min_points = max(self.num_patches, self.group_size)
+        if batch_size == 0 or num_points < min_points or channels < self.input_channels:
+            raise ValueError(
+                f"Invalid point cloud shape {tuple(pointcloud.shape)}: require B > 0, "
+                f"N >= {min_points}, C >= {self.input_channels}"
+            )
+        points = pointcloud[..., : self.input_channels].float().contiguous()
+        xyz = points[..., :3].contiguous()
         with torch.autocast(device_type=pointcloud.device.type, enabled=False):
             centers, neighbors = sample_point_patches(
                 xyz,
@@ -88,8 +98,9 @@ class LocalPatchEncoder(nn.Module):
                 self.training,
             )
 
-        relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)
-        attributes = index_points(pointcloud[..., 3 : self.input_channels], neighbors)
+        grouped_points = index_points(points, neighbors)
+        relative_xyz = grouped_points[..., :3] - centers.unsqueeze(2)
+        attributes = grouped_points[..., 3:]
         tokens = self.geometry_embedding(relative_xyz, attributes)
         # Preserve absolute metric position alongside relative geometry.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
@@ -176,7 +187,7 @@ class PointTransformerEncoder(nn.Module):
         rope_scale: float = 0.05,
         rope_base: float = 100.0,
         fps_random_config: dict | None = None,
-        local_hidden_dim: int = 64,
+        local_hidden_dim: int = 32,
     ) -> None:
         super().__init__()
         self.patch_encoder = LocalPatchEncoder(

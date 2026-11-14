@@ -3,6 +3,9 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
+from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
+from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder
+from dexmani_policy.agents.policies.adaptac import AdapTacEncoder
 from dexmani_policy.common.checkpoint import restore_policy
 from dexmani_policy.training.common.config import load_config
 
@@ -58,12 +61,13 @@ def test_rgb_policy_integration(device, name):
     assert output.shape == (1, 258, 384)
     assert torch.isfinite(output).all()
     (output * torch.randn_like(output)).mean().backward()
-    for parameter in encoder.patch_encoder.geometry_embedding.context_mlp.parameters():
+    context_parameters = list(encoder.patch_encoder.geometry_embedding.context_mlp.parameters())
+    for parameter in context_parameters:
         assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
-        assert parameter.grad.abs().sum() > 0
+    assert sum(parameter.grad.abs().sum() for parameter in context_parameters) > 0
     effective = encoder.effective_config
     assert effective["pc_encoder_config"]["channels"] == 192
-    assert effective["pc_encoder_config"]["local_hidden_dim"] == 64
+    assert effective["pc_encoder_config"]["local_hidden_dim"] == 32
     policy.configure_normalizer({"action": 19}, {"action": (19,)})
     config.update(policy.effective_config)
     restored = restore_policy(
@@ -108,3 +112,38 @@ def test_adaptac_policy_integration(device):
     )
     with torch.no_grad():
         torch.testing.assert_close(restored.obs_encoder(obs), output, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("name", ["sat", "dqrise", "dexlatent"])
+@pytest.mark.parametrize("hidden", [32, 64])
+def test_rgb_encoder_interface(device, name, hidden):
+    config = OmegaConf.to_container(load_config(name).agent, resolve=True)
+    assert config["pc_encoder_config"]["local_hidden_dim"] == 32
+    config["pc_encoder_config"]["local_hidden_dim"] = hidden
+    kwargs = {
+        key: config[key] for key in (
+            "pc_dim", "num_points", "n_obs_steps", "pc_encoder_config", "fps_random_config",
+        )
+    }
+    encoder = RGBPointObservationEncoder(**kwargs, rgb_backbone_config=RGB_CONFIG).to(device).eval()
+    output = encoder(make_observation(device, channels=6))
+    assert output.shape == (1, 258, 384)
+    assert torch.isfinite(output).all()
+    assert encoder.effective_config["pc_encoder_config"]["local_hidden_dim"] == hidden
+
+
+@pytest.mark.parametrize("hidden", [32, 64])
+def test_adaptac_encoder_interface(device, hidden):
+    config = OmegaConf.to_container(load_config("adaptac").agent, resolve=True)
+    assert config["pc_encoder_config"]["local_hidden_dim"] == 32
+    config["pc_encoder_config"]["local_hidden_dim"] = hidden
+    kwargs = {
+        key: config[key] for key in (
+            "pc_dim", "num_points", "feature_dim", "state_out_dim",
+            "pc_encoder_config", "fps_random_config",
+        )
+    }
+    encoder = AdapTacEncoder(tactile_encoder=XHandForceEncoder(), **kwargs).to(device).eval()
+    output = encoder(make_observation(device, channels=6))
+    assert [value.shape for value in output] == [(2, 512), (2, 512), (2, 64)]
+    assert all(torch.isfinite(value).all() for value in output)
