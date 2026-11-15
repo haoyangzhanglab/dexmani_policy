@@ -39,6 +39,7 @@ class Relative3DCrossAttention(nn.Module):
 
         anchors_base [B,L,3] and scene_xyz_base [B,N,3] must share a
         Base frame and be expressed in meters, without normalization.
+        Use FP32 parameters with autocast for mixed precision.
         """
         for name, tokens in (("body_tokens", body_tokens), ("scene_tokens", scene_tokens)):
             if (
@@ -63,19 +64,23 @@ class Relative3DCrossAttention(nn.Module):
             if xyz.shape != shape:
                 raise ValueError(f"{name} requires {shape}, got {tuple(xyz.shape)}")
 
-        q = self.q(self.query_norm(body_tokens)).reshape(
+        query = self.q(self.query_norm(body_tokens)).reshape(
             b, l, self.num_heads, self.head_dim
         ).transpose(1, 2)
-        k, v = self.kv(self.memory_norm(scene_tokens)).reshape(
+        key, value = self.kv(self.memory_norm(scene_tokens)).reshape(
             b, n, 2, self.num_heads, self.head_dim
         ).permute(2, 0, 3, 1, 4).unbind(0)
 
         with torch.autocast(device_type=anchors_base.device.type, enabled=False):
-            delta = scene_xyz_base.float()[:, None] - anchors_base.float()[:, :, None]
-            bias = self.position_bias(delta / self.geometry_scale).permute(0, 3, 1, 2)
+            relative_xyz = scene_xyz_base.float()[:, None] - anchors_base.float()[:, :, None]
+            attention_bias = self.position_bias(relative_xyz / self.geometry_scale)
 
+        # Fused SDPA kernels require unit stride along the scene dimension.
+        attention_bias = attention_bias.permute(0, 3, 1, 2).to(
+            dtype=query.dtype, memory_format=torch.contiguous_format,
+        )
         context = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=bias.to(q.dtype), dropout_p=0.0,
+            query, key, value, attn_mask=attention_bias, dropout_p=0.0,
         )
         context = context.transpose(1, 2).reshape(b, l, self.embed_dim)
         return self.norm(body_tokens + self.out(context))
