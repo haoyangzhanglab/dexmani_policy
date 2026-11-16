@@ -5,10 +5,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, TACTILE_FEATURE_SHAPES,
+    FIELD_FEATURE_SHAPES,
+    POINT_CLOUD_FIELDS,
+    TACTILE_FEATURE_SHAPES,
 )
 from dexmani_policy.common.normalizer import (
-    FieldNormalizer, LinearNormalizer, validate_normalizer_state,
+    FieldNormalizer,
+    LinearNormalizer,
+    validate_normalizer_state,
 )
 
 
@@ -102,17 +106,19 @@ def build_train_loader(cfg, dataset):
     return loader
 
 
-def record_data_processing(cfg, buffer, *, resuming=False):
-    """将实际数据的处理记录带入训练配置，不从路径推断来源。"""
+def record_data_processing(cfg, dataset, *, resuming=False):
+    """保存完整处理记录；恢复时仅比较实际 Dataset 消费的模态。"""
     from omegaconf import OmegaConf, open_dict
 
-    # 仿真数据没有真机处理记录；真机导出必须带有该属性。
-    metadata = (buffer.attrs["data_processing"]
-                if buffer.attrs.get("format") == "dexmani.real.canonical"
-                else buffer.attrs.get("data_processing", {}))
+    attrs = dataset.episode_store.attrs
+    # 真机导出必须带有处理记录；仿真允许无记录。
+    metadata = (
+        attrs["data_processing"] if attrs.get("format") == "dexmani.real.canonical"
+        else attrs.get("data_processing", {})
+    )
     if resuming:
         previous = OmegaConf.to_container(cfg.data_processing, resolve=True)
-        for name in cfg.dataset.sensor_modalities:
+        for name in dataset.sensor_modalities:
             if metadata.get(name) != previous.get(name):
                 raise ValueError(f"Resume data_processing mismatch: {name}")
     with open_dict(cfg):

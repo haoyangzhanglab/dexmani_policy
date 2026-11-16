@@ -13,13 +13,25 @@ from torch.utils.data import DataLoader
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
-from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
+from dexmani_policy.common.pytorch_util import (
+    dict_apply,
+    get_rng_state,
+    set_rng_state,
+    set_seed,
+)
 from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_config
 from dexmani_policy.training.common.data import (
-    build_train_loader, close_data_loader, fit_normalizer, record_data_processing,
+    build_train_loader,
+    close_data_loader,
+    fit_normalizer,
+    record_data_processing,
 )
-from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
+from dexmani_policy.training.common.logging import (
+    ExperimentLogger,
+    accumulate_metrics,
+    to_log_scalars,
+)
 from dexmani_policy.training.common.optimization import build_scheduler
 
 
@@ -171,7 +183,7 @@ def train(method, model_class, argv=None):
 
     set_seed(cfg.training.seed + (checkpoint["global_step"] if resuming else 0))
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    record_data_processing(cfg, dataset.episode_store, resuming=resuming)
+    record_data_processing(cfg, dataset, resuming=resuming)
     cfg.zarr_path = dataset.episode_store.path
     cfg.dataset.zarr_path = cfg.zarr_path
     print(f"[Dataset] {dataset.training_summary()}")
@@ -195,7 +207,7 @@ def train(method, model_class, argv=None):
     device = torch.device(cfg.training.device)
     model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
-    optimizer = torch.optim.AdamW([dict(params=parameters, param_names=list(names))], **cfg.optimizer)
+    optimizer = torch.optim.AdamW([{"params": parameters, "param_names": list(names)}], **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
     step = restore_run(model, optimizer, checkpoint) if resuming else 0
     scheduler = build_scheduler(

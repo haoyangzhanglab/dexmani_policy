@@ -12,13 +12,23 @@ from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import set_project_root
-from dexmani_policy.common.normalizer import normalization_feature_shapes, validate_normalizer_state
+from dexmani_policy.common.normalizer import (
+    normalization_feature_shapes,
+    validate_normalizer_state,
+)
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.common.config import (
-    assemble_policy_config, prepare_training, register_resolvers,
-    validate_normalization, validate_config,
+    assemble_policy_config,
+    prepare_training,
+    register_resolvers,
+    validate_config,
+    validate_normalization,
 )
-from dexmani_policy.training.common.data import build_dataset, fit_normalizer, record_data_processing
+from dexmani_policy.training.common.data import (
+    build_dataset,
+    fit_normalizer,
+    record_data_processing,
+)
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
@@ -130,7 +140,7 @@ def build_trainer(cfg, *, checkpoint=None):
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
-    record_data_processing(cfg, dataset.episode_store, resuming=checkpoint is not None)
+    record_data_processing(cfg, dataset, resuming=checkpoint is not None)
     if checkpoint is not None:
         data_dt = data_description["control_dt_s"]
         policy_dt = cfg.control_dt_s
