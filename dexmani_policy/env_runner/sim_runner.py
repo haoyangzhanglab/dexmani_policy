@@ -12,6 +12,12 @@ from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_obse
 
 
 class SimRunner:
+    @staticmethod
+    def load_seed_pool(task_name):
+        from dexmani_policy.evaluation.seeds import load_seed_pool
+
+        return load_seed_pool(task_name)
+
     def __init__(
         self,
         task_name: str,

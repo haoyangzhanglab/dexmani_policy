@@ -6,8 +6,8 @@ import numpy as np
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import write_json
-from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy
-from dexmani_policy.evaluation.seeds import load_seed_pool, split_evaluation_seeds
+from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy, get_runner_class
+from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
 
 def candidate_score(candidate):
@@ -25,6 +25,7 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     root = checkpoints[0].parent.parent
     loaded = load_checkpoint(checkpoints[0])
     cfg = loaded.effective_config
+    reference_runner = get_runner_class(cfg["env_runner"])
     reference_task_name = cfg["env_runner"]["task_name"]
     reference_env_kwargs = cfg["env_runner"]["env_kwargs"]
     reference_control_dt_s = cfg["control_dt_s"]
@@ -32,6 +33,8 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     for checkpoint in checkpoints[1:]:
         loaded = load_checkpoint(checkpoint)
         cfg = loaded.effective_config
+        if get_runner_class(cfg["env_runner"]) is not reference_runner:
+            raise ValueError("Candidates must use the same environment runner")
         if cfg["env_runner"]["task_name"] != reference_task_name:
             raise ValueError("Candidates must use the same task_name")
         if cfg["env_runner"]["env_kwargs"] != reference_env_kwargs:
@@ -43,7 +46,7 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
                 f"reference={reference_control_dt_s}, candidate={control_dt_s} ({checkpoint})"
             )
         del loaded
-    test, selection = split_evaluation_seeds(load_seed_pool(reference_task_name), seed, test_episodes,
+    test, selection = split_evaluation_seeds(reference_runner.load_seed_pool(reference_task_name), seed, test_episodes,
                                              positive_int(selection_episodes, "selection_episodes"))
     directory = create_run_directory(root / "eval", output_dir)
     path = directory / "selection_result.json"

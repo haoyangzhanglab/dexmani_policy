@@ -26,6 +26,7 @@ class DP3Encoder(nn.Module):
         n_obs_steps: int,
         state_out_dim: int = 64,
         fps_random_config: dict | None = None,
+        state_key: str = "joint_state",
     ) -> None:
         super().__init__()
         encoder_cls: type[PointNet] | type[MultiStagePointNet]
@@ -37,6 +38,7 @@ class DP3Encoder(nn.Module):
             raise ValueError(f"encoder_type must be 'dp3' or 'idp3', got {encoder_type!r}")
         self.pc_encoder = encoder_cls(input_channels=pc_dim, output_channels=pc_out_dim)
         self.state_encoder = StateEncoder(state_dim, state_out_dim)
+        self.state_key = state_key
         self.num_points = num_points
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
@@ -52,7 +54,7 @@ class DP3Encoder(nn.Module):
         features = torch.cat(
             [
                 self.pc_encoder(pc),
-                self.state_encoder(obs["joint_state"]),
+                self.state_encoder(obs[self.state_key]),
             ],
             dim=-1,
         )
@@ -61,6 +63,7 @@ class DP3Encoder(nn.Module):
 
 class DP3(Policy):
     supports_rtc = True
+    supported_action_keys = ("action", "action_ee", "action_rotvec")
 
     def __init__(
         self,
@@ -84,6 +87,7 @@ class DP3(Policy):
         prediction_type: str = "sample",
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
+        state_key: str = "joint_state",
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
         obs_encoder = DP3Encoder(
@@ -95,6 +99,7 @@ class DP3(Policy):
             n_obs_steps,
             state_out_dim,
             fps_random_config=fps_random_config,
+            state_key=state_key,
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,

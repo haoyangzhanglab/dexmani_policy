@@ -34,7 +34,7 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         n_action_steps=agent.n_action_steps,
         future_steps=agent.future_steps,
         control_action_dim=agent.control_action_dim,
-        action_mode={"action": "joint", "action_ee": "eef"}[cfg["action_key"]],
+        action_mode={"action": "joint", "action_ee": "eef", "action_rotvec": "eef_rotvec"}[cfg["action_key"]],
         rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]) if "rgb" in fields else {},
         supports_rtc=agent.supports_rtc,
         requires_prev_action=agent.requires_prev_action,

@@ -72,6 +72,27 @@ def make_observation(device, point_channels=6, num_points=96):
     }
 
 
+@pytest.mark.parametrize("name,shape,width", [
+    ("camera_intrinsic", (2, 3, 3), 9),
+    ("camera_extrinsic", (2, 4, 3), 12),
+])
+def test_invalid_camera_shape_fails_before_encoding(rgb_config, name, shape, width):
+    model = MultimodalInteractionEncoder(rgb_backbone_config=rgb_config)
+    obs = make_observation("cpu")
+    obs[name] = obs[name].reshape(shape)
+    with (
+        patch.object(multimodal, "preprocess_point_cloud") as preprocess,
+        patch.object(model.patch_encoder, "forward") as point_encoder,
+        patch.object(model.rgb_encoder, "forward") as rgb_encoder,
+        pytest.raises(ValueError) as error,
+    ):
+        model(obs)
+    assert str(error.value) == f"{name} must have shape [BT,{width}]"
+    preprocess.assert_not_called()
+    point_encoder.assert_not_called()
+    rgb_encoder.assert_not_called()
+
+
 def test_default_scene_token_count(rgb_config):
     pytest.importorskip("pytorch3d.ops", reason="Point grouping requires PyTorch3D")
     model = MultimodalInteractionEncoder(
@@ -122,10 +143,6 @@ def test_base_aligned_geometry_contract(encoder, execution):
     device, dtype = execution
     obs = make_observation(device, point_channels=9)
     original = {key: value.clone() for key, value in obs.items()}
-    points = multimodal.preprocess_point_cloud(
-        obs["point_cloud"], encoder.num_points,
-        encoder.patch_encoder.fps_random_config, training=False,
-    )
     captured = {}
 
     def track_patches(_module, inputs, output):
@@ -135,7 +152,9 @@ def test_base_aligned_geometry_contract(encoder, execution):
         captured.update(hand_inputs=inputs, hand=output)
 
     with (
-        patch.object(multimodal, "preprocess_point_cloud", return_value=points) as preprocess,
+        patch.object(
+            multimodal, "preprocess_point_cloud", wraps=multimodal.preprocess_point_cloud,
+        ) as preprocess,
         patch.object(multimodal, "project_to_image", wraps=multimodal.project_to_image) as project,
         patch.object(
             encoder.relative_attention, "forward", wraps=encoder.relative_attention.forward,
@@ -151,7 +170,7 @@ def test_base_aligned_geometry_contract(encoder, execution):
         obs["point_cloud"], encoder.num_points,
         encoder.patch_encoder.fps_random_config, training=False,
     )
-    assert captured["patch_input"] is points
+    points = captured["patch_input"]
     patches = captured["patches"]
     assert output["scene_xyz_base"] is patches["xyz"]
 
@@ -173,6 +192,7 @@ def test_base_aligned_geometry_contract(encoder, execution):
     assert captured["hand_inputs"][0] is obs["eef_pose"]
     assert captured["hand_inputs"][1] is obs["fingertip_xyz"]
     hand = captured["hand"]
+    assert hand["anchors_base"].dtype == patches["xyz"].dtype == torch.float32
     assert output["hand_anchors_base"] is hand["anchors_base"]
     attention.assert_called_once()
     attention_inputs = attention.call_args.kwargs

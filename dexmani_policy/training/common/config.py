@@ -33,14 +33,15 @@ def assemble_policy_config(cfg):
     """Derive action layouts and sampling windows from the recipe."""
     with open_dict(cfg):
         action_key = cfg.action_key
-        if action_key not in ("action", "action_ee"):
-            raise ValueError("action_key must be action or action_ee")
+        if action_key not in ("action", "action_ee", "action_rotvec"):
+            raise ValueError("action_key must be action, action_ee or action_rotvec")
         method = cfg.policy_name
         auxiliary = method == "r3d" and cfg.use_aux_ee
         if auxiliary and action_key != "action":
             raise ValueError("R3D auxiliary targets require joint action")
 
-        cfg.agent.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
+        if action_key != "action_rotvec":
+            cfg.agent.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
         for key in ("horizon", "n_obs_steps", "n_action_steps"):
             cfg.agent[key] = cfg[key]
         cfg.dataset.update(action_key=action_key, zarr_path=cfg.zarr_path,
@@ -52,7 +53,8 @@ def assemble_policy_config(cfg):
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         cfg.env_runner.task_name = cfg.task_name
-        cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
+        if action_key != "action_rotvec":
+            cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
     return cfg
 
 

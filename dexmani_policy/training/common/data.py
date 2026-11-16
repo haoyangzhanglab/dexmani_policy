@@ -52,8 +52,9 @@ def build_dataset(cfg):
         raise ValueError(
             f"Dataset task mismatch: dataset={buffer.attrs['task_name']}, config={cfg.task_name}"
         )
-    if buffer.attrs["action_space"] != "joint":
-        raise ValueError("Simulation dataset must use joint actions")
+    action_space = "eef_rotvec" if dataset.action_key == "action_rotvec" else "joint"
+    if buffer.attrs["action_space"] != action_space:
+        raise ValueError(f"Dataset action_space must be {action_space} for {dataset.action_key}")
     dt = float(buffer.attrs["dt"])
     if not isfinite(dt) or dt <= 0:
         raise ValueError(f"Invalid dataset dt: {dt}")
@@ -66,6 +67,14 @@ def build_dataset(cfg):
         for key in POINT_CLOUD_FIELDS.intersection(dims):
             dims[key] = dataset.pc_dim
     dims["action"] = dataset.action_dim
+    if cfg.agent.action_dim is None:
+        cfg.agent.action_dim = dims["action"]
+    if "state_key" in cfg.agent:
+        state_dim = dims[cfg.agent.state_key]
+        if cfg.agent.state_dim is None:
+            cfg.agent.state_dim = state_dim
+        elif cfg.agent.state_dim != state_dim:
+            raise ValueError("Dataset state width must match agent.state_dim")
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     print(f"[Dataset] {dataset.training_summary()}")

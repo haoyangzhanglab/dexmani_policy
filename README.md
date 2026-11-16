@@ -18,13 +18,10 @@
 
 本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
 
-组件回归测试覆盖相对注意力、触觉融合、RGB–Point 编码及多模态交互编码器的坐标转换和反向传播：
+回归测试覆盖相对注意力、触觉融合、RGB–Point 编码、多模态交互编码器的 Base-aligned 几何与反向传播，以及部署 Checkpoint 元数据契约：
 
 ```bash
-python -m pytest -q \
-  dexmani_policy/test_tools/test_relative_3d_attention.py \
-  dexmani_policy/test_tools/test_rgb_point.py \
-  dexmani_policy/test_tools/test_multimodal_interaction.py
+python -m pytest -q
 ```
 
 需要 pytest；缺少 CUDA、PyTorch3D 或 CUDA 不支持 BF16 时，跳过对应用例。多模态集成测试使用轻量、随机初始化的 DINOv3，无需下载权重。独立触觉融合测试不依赖 PyTorch3D，覆盖 CPU/CUDA、FP16/BF16 autocast 和参数更新后的零力恒等。

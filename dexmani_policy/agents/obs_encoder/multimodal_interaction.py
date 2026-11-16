@@ -85,14 +85,16 @@ class MultimodalInteractionEncoder(nn.Module):
         }
 
     def forward(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Consume Base-aligned geometry and unmodified source-frame forces.
-
-        XYZ stays in meters; camera extrinsics map Base-aligned coordinates to Camera.
-        Inputs already have a flat BT axis.
-        """
+        """Inputs have a flat BT axis; metric geometry and source-frame forces are unchanged."""
         bt = obs["point_cloud"].shape[0]
         if obs["rgb"].ndim != 4 or obs["rgb"].shape[:2] != (bt, 3):
             raise ValueError("rgb must have shape [BT,3,H,W]")
+        for name, width in (
+            ("camera_intrinsic", 9),
+            ("camera_extrinsic", 12),
+        ):
+            if obs[name].shape != (bt, width):
+                raise ValueError(f"{name} must have shape [BT,{width}]")
 
         points = preprocess_point_cloud(
             obs["point_cloud"], self.num_points,

@@ -24,12 +24,14 @@ class DPEncoder(nn.Module):
         n_obs_steps: int,
         state_out_dim: int = 64,
         rgb_backbone_config: dict | None = None,
+        state_key: str = "joint_state",
     ) -> None:
         super().__init__()
         self.rgb_encoder, self.image_processor = build_rgb_encoder(
             rgb_backbone_name, config=rgb_backbone_config
         )
         self.state_encoder = StateEncoder(state_dim, state_out_dim)
+        self.state_key = state_key
         self.n_obs_steps = n_obs_steps
         self.out_dim = n_obs_steps * (self.rgb_encoder.out_dim + self.state_encoder.out_dim)
 
@@ -45,7 +47,7 @@ class DPEncoder(nn.Module):
         features = torch.cat(
             [
                 self.rgb_encoder(rgb)["global_token"],
-                self.state_encoder(obs["joint_state"]),
+                self.state_encoder(obs[self.state_key]),
             ],
             dim=-1,
         )
@@ -54,6 +56,7 @@ class DPEncoder(nn.Module):
 
 class DP(Policy):
     supports_rtc = True
+    supported_action_keys = ("action", "action_ee", "action_rotvec")
 
     def __init__(
         self,
@@ -74,6 +77,7 @@ class DP(Policy):
         prediction_type: str = "sample",
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
+        state_key: str = "joint_state",
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
         obs_encoder = DPEncoder(
@@ -82,6 +86,7 @@ class DP(Policy):
             n_obs_steps,
             state_out_dim,
             rgb_backbone_config=rgb_backbone_config,
+            state_key=state_key,
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
