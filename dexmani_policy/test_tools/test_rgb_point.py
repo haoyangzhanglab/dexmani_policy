@@ -259,7 +259,7 @@ def test_policy_observation_roundtrip(kind, mode):
         normalization_dims=dims, n_obs_steps=2,
         rgb_preprocessing=rgb_preprocessing_kwargs(config.dataset), device=device,
     )
-    # Calibrated RGB stays raw until the encoder applies its tracked resize.
+    # Keep pinhole RGB at input resolution until the encoder's tracked resize.
     assert obs["rgb"].shape == (1, 2, 3, 240, 320)
     with torch.no_grad():
         expected = policy._encode_obs(obs)

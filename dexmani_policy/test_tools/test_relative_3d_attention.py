@@ -13,11 +13,16 @@ from dexmani_policy.agents.obs_encoder.proprio import HandGeometryEncoder
 
 
 @pytest.fixture(params=["cpu", "cuda"])
-def attention(request):
+def device(request):
     device = request.param
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
     torch.manual_seed(0)
+    return torch.device(device)
+
+
+@pytest.fixture
+def attention(device):
     return Relative3DCrossAttention().to(device)
 
 
@@ -128,6 +133,54 @@ def test_geometry_stays_fp32_under_autocast(attention, amp_dtype):
     finally:
         handle.remove()
     assert dtypes == [(torch.float32, torch.float32)]
+
+
+@pytest.mark.parametrize("amp_dtype,input_dtype", [
+    (None, torch.float32),
+    (torch.float16, torch.float32),
+    (torch.float16, torch.float16),
+    (torch.bfloat16, torch.float32),
+    (torch.bfloat16, torch.bfloat16),
+])
+def test_tactile_fusion_forward_backward_and_zero_force(device, amp_dtype, input_dtype):
+    if device.type == "cuda" and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 required")
+    fusion = TactileGatedFusion().to(device)
+    geometry = torch.randn(2, 6, 192, device=device, dtype=input_dtype, requires_grad=True)
+    force = torch.randn(2, 5, 3, device=device, requires_grad=True)
+    zero_force = torch.zeros_like(force)
+    optimizer = torch.optim.SGD(fusion.parameters(), lr=0.1)
+
+    for _ in range(2):
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+            output = fusion(geometry, force)
+            with torch.no_grad():
+                zero_output = fusion(geometry, zero_force)
+        assert output.shape == geometry.shape
+        assert output.dtype == geometry.dtype
+        assert torch.isfinite(output).all()
+        assert not torch.equal(output, geometry)
+        torch.testing.assert_close(zero_output, geometry, rtol=0, atol=0)
+        output.float().square().mean().backward()
+        for name, parameter in fusion.named_parameters():
+            assert parameter.grad is not None, name
+            assert torch.isfinite(parameter.grad).all(), name
+        for value in (geometry, force):
+            assert value.grad is not None
+            assert torch.isfinite(value.grad).all()
+            value.grad = None
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+    # Include learned normalization offsets and gates in the zero-force check.
+    with torch.no_grad():
+        for parameter in fusion.parameters():
+            parameter.uniform_(-0.1, 0.1)
+        for training in (True, False):
+            fusion.train(training)
+            with torch.autocast(device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+                zero_output = fusion(geometry, zero_force)
+            torch.testing.assert_close(zero_output, geometry, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("amp_dtype", [None, torch.float16, torch.bfloat16])

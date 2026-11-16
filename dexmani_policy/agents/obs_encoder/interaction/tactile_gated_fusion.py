@@ -1,11 +1,11 @@
-"""Zero-referenced local and global tactile fusion."""
+"""Zero-referenced tactile cross-attention with channel and global gating."""
 
 import torch
 from torch import nn
 
 
 class TactileGatedFusion(nn.Module):
-    """Fuse wrist-first geometry [B,6,192] with identity force [B,5,3].
+    """Fuse wrist-first geometry [B,6,192] with five-finger force [B,5,3].
 
     Forces retain the source's frame and scale; zero force leaves geometry unchanged.
     """
@@ -15,25 +15,28 @@ class TactileGatedFusion(nn.Module):
         self.force_encoder = nn.Sequential(
             nn.Linear(3, 64, bias=False), nn.SiLU(), nn.Linear(64, 64, bias=False),
         )
+        self.tactile_channel_gate = nn.Linear(64, 64, bias=False)
+        self.finger_embedding = nn.Parameter(torch.empty(1, 5, 64))
         self.geometry_norm = nn.LayerNorm(192)
-        self.pool_geometry = nn.Linear(192, 32)
-        self.pool_tactile = nn.Linear(64, 32, bias=False)
-        self.pool_score = nn.Linear(32, 1, bias=False)
-        self.gate = nn.Sequential(nn.Linear(320, 64), nn.SiLU(), nn.Linear(64, 1))
-        self.residual = nn.Linear(64, 192, bias=False)
-        nn.init.constant_(self.gate[-1].bias, -1.5)
-        nn.init.xavier_uniform_(self.residual.weight, gain=0.1)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=192, num_heads=4, kdim=64, vdim=64,
+            batch_first=True, dropout=0.0, bias=False,
+        )
+        self.global_gate = nn.Sequential(
+            nn.LayerNorm(64), nn.Linear(64, 64), nn.SiLU(),
+            nn.Linear(64, 1), nn.Sigmoid(),
+        )
+        nn.init.xavier_uniform_(self.tactile_channel_gate.weight)
+        nn.init.trunc_normal_(self.finger_embedding, std=0.02)
+        nn.init.constant_(self.global_gate[-2].bias, -1.5)
 
     def forward(self, geometry: torch.Tensor, force: torch.Tensor) -> torch.Tensor:
         tactile = self.force_encoder(force)
-        normalized = self.geometry_norm(geometry)
-        scores = self.pool_score(torch.tanh(
-            self.pool_geometry(normalized[:, 1:]) + self.pool_tactile(tactile),
-        ))
-        global_tactile = (scores.softmax(dim=1) * tactile).sum(1, keepdim=True)
-        local = torch.cat((torch.zeros_like(global_tactile), tactile), 1)
-        values = torch.cat((global_tactile, tactile), 1)
-        gates = self.gate(torch.cat(
-            (normalized, local, global_tactile.expand(-1, 6, -1)), dim=-1,
-        )).sigmoid()
-        return geometry + gates * self.residual(values)
+        tactile = tactile * torch.sigmoid(self.tactile_channel_gate(tactile))
+        global_tactile = tactile.mean(dim=1)
+        # Add identity only to keys to preserve zero-force values after training.
+        key = tactile + self.finger_embedding.to(dtype=tactile.dtype)
+        query = self.geometry_norm(geometry)
+        tactile_context, _ = self.cross_attn(query, key, tactile, need_weights=False)
+        gate = self.global_gate(global_tactile)
+        return geometry + gate.unsqueeze(1) * tactile_context

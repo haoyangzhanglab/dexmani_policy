@@ -79,7 +79,9 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.build_augmentors(augmentation_cfg)
         if {"point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"} <= set(sensor_modalities):
             if rgb_preprocess_size is not None:
-                raise ValueError("Calibrated RGB must stay raw in Dataset; resize in the encoder ImageProcessor")
+                raise ValueError(
+                    "Pinhole RGB must retain its input resolution in Dataset; resize in ImageProcessor"
+                )
             if any(
                 isinstance(aug, PointCoordinateNoise) and aug.prob > 0 and aug.noise_std > 0
                 for aug in self.augmentors.get("point_cloud", ())

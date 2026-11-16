@@ -18,13 +18,13 @@
 
 本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
 
-组件回归测试覆盖相对注意力、几何与触觉组合，以及 RGB–Point 编码：
+组件回归测试覆盖相对注意力、触觉融合的反向传播与更新后零力恒等、几何与触觉组合，以及 RGB–Point 编码：
 
 ```bash
 python -m pytest -q dexmani_policy/test_tools/test_relative_3d_attention.py dexmani_policy/test_tools/test_rgb_point.py
 ```
 
-需要 pytest；缺少 CUDA 或 PyTorch3D 时跳过依赖它们的用例，其余 CPU 测试仍可运行。
+需要 pytest；缺少 CUDA 或 PyTorch3D 时跳过依赖它们的用例。独立触觉融合测试不依赖 PyTorch3D，覆盖 CPU/CUDA 和 FP16/BF16 autocast。
 
 ## 策略方向
 
