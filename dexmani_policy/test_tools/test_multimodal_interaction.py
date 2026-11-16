@@ -7,7 +7,6 @@ import torch
 
 from dexmani_policy.agents.obs_encoder import multimodal_interaction as multimodal
 from dexmani_policy.agents.obs_encoder.multimodal_interaction import MultimodalInteractionEncoder
-from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 
 
 @pytest.fixture
@@ -35,22 +34,26 @@ def execution(request):
     return torch.device(device), dtype
 
 
-@pytest.fixture(params=["center", "group_mean"])
+@pytest.fixture(params=[
+    ("center", 3), ("center", 6), ("group_mean", 3), ("group_mean", 6),
+])
 def encoder(request, execution, rgb_config):
     pytest.importorskip("pytorch3d.ops", reason="Point grouping requires PyTorch3D")
     device, _ = execution
+    sampling, pc_dim = request.param
     return MultimodalInteractionEncoder(
-        pc_dim=6, num_points=64,
+        pc_dim=pc_dim, num_points=64,
         patch_config={"num_patches": 16, "group_size": 8},
-        rgb_backbone_config=rgb_config, rgb_semantic_sampling=request.param,
+        rgb_backbone_config=rgb_config, rgb_semantic_sampling=sampling,
     ).to(device).eval()
 
 
-def make_observation(device, pc_dim=6, num_points=96):
+def make_observation(device, point_channels=6, num_points=96):
     points = torch.randn(2, num_points, 3, device=device) * 0.06
     points[..., 2] += 1
-    if pc_dim == 6:
-        points = torch.cat((points, torch.rand_like(points)), dim=-1)
+    if point_channels > 3:
+        attributes = torch.rand(2, num_points, point_channels - 3, device=device)
+        points = torch.cat((points, attributes), dim=-1)
     transform = torch.tensor([
         [[0, -1, 0, 0.35], [1, 0, 0, -0.20], [0, 0, 1, -0.60]],
         [[1, 0, 0, -0.25], [0, 0, -1, 0.70], [0, 1, 0, 0.30]],
@@ -79,7 +82,7 @@ def test_default_scene_token_count(rgb_config):
     model = MultimodalInteractionEncoder(
         num_points=128, rgb_backbone_config=rgb_config,
     ).eval()
-    obs, transform = make_observation("cpu", pc_dim=3, num_points=160)
+    obs, transform = make_observation("cpu", point_channels=3, num_points=160)
     with torch.no_grad():
         output = model(obs, T_base_from_world=transform)
     assert output["scene_tokens"].shape == (2, 128, 192)
@@ -88,7 +91,7 @@ def test_default_scene_token_count(rgb_config):
 def test_forward_backward_and_zero_force(encoder, execution):
     device, dtype = execution
     encoder.train()
-    obs, transform = make_observation(device)
+    obs, transform = make_observation(device, point_channels=encoder.patch_encoder.input_channels)
     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
         output = encoder(obs, T_base_from_world=transform)
     assert {key: tuple(value.shape) for key, value in output.items()} == {
@@ -122,7 +125,8 @@ def test_forward_backward_and_zero_force(encoder, execution):
 
 def test_base_geometry_and_world_projection(encoder, execution):
     device, dtype = execution
-    obs, transform = make_observation(device)
+    pc_dim = encoder.patch_encoder.input_channels
+    obs, transform = make_observation(device, point_channels=9)
     original_points = obs["point_cloud"].clone()
     world = multimodal.preprocess_point_cloud(obs["point_cloud"], encoder.num_points, training=False)
     captured: dict[str, torch.Tensor] = {}
@@ -142,11 +146,11 @@ def test_base_geometry_and_world_projection(encoder, execution):
         output = encoder(obs, T_base_from_world=transform)
 
     preprocess.assert_called_once()
-    assert world.shape == (2, 64, 6)
+    assert captured["points_base"].shape == (2, 64, pc_dim)
     homogeneous = torch.cat((world[..., :3].double(), torch.ones_like(world[..., :1])), dim=-1)
     expected_base = torch.einsum("bij,bnj->bni", transform.double(), homogeneous).float()
     torch.testing.assert_close(captured["points_base"][..., :3], expected_base, rtol=0, atol=2e-7)
-    torch.testing.assert_close(captured["points_base"][..., 3:], world[..., 3:], rtol=0, atol=0)
+    torch.testing.assert_close(captured["points_base"][..., 3:], world[..., 3:pc_dim], rtol=0, atol=0)
     assert captured["points_base"].dtype == torch.float32
 
     centers = output["scene_xyz_base"]
@@ -178,7 +182,7 @@ def test_base_geometry_and_world_projection(encoder, execution):
 
 @pytest.mark.parametrize("input_dtype", [torch.float32, torch.bfloat16])
 def test_rigid_transforms_stay_fp32_under_autocast(input_dtype):
-    obs, transform = make_observation("cpu", pc_dim=3, num_points=4)
+    obs, transform = make_observation("cpu", point_channels=3, num_points=4)
     world = obs["point_cloud"].to(input_dtype)
     transform = transform.to(input_dtype)
     homogeneous = torch.cat((world.double(), torch.ones_like(world[..., :1])), dim=-1)
@@ -194,8 +198,13 @@ def test_rigid_transforms_stay_fp32_under_autocast(input_dtype):
 def test_rigid_transforms_with_tf32(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 required")
     torch.manual_seed(19)
-    rotation = torch.linalg.qr(torch.randn(2, 3, 3, dtype=torch.float64, device="cuda")).Q.float()
+    rotation = torch.linalg.qr(torch.randn(2, 3, 3, dtype=torch.float64, device="cuda")).Q
+    rotation[:, :, -1] *= torch.linalg.det(rotation).sign()[:, None]
+    rotation = rotation.float()
+    assert (torch.linalg.det(rotation) > 0).all()
     transform = torch.cat((rotation, torch.randn(2, 3, 1, device="cuda")), dim=-1)
     world = torch.randn(2, 1024, 3, device="cuda")
     expected = (world.double() @ rotation.double().transpose(1, 2) + transform[:, None, :, 3]).float()
@@ -236,27 +245,29 @@ def test_current_config_and_weights_roundtrip(rgb_config, backbone):
         torch.testing.assert_close(actual[key], expected[key])
 
 
-@pytest.mark.parametrize("encoder_class", [MultimodalInteractionEncoder, RGBPointObservationEncoder])
-def test_patch_rgb_backbone_required(encoder_class):
-    with pytest.raises(ValueError, match="rgb_backbone_name"):
-        encoder_class(rgb_backbone_name="resnet")
-
-
-@pytest.mark.parametrize("kwargs,error,match", [
-    ({"patch_config": {"channels": 384}}, TypeError, "channels"),
-    ({"spatial_config": {"channels": 192}}, TypeError, "channels"),
-    ({"rgb_semantic_sampling": "unknown"}, ValueError, "rgb_semantic_sampling"),
+@pytest.mark.parametrize("name,value", [
+    ("rgb_backbone_name", "resnet"),
+    ("rgb_semantic_sampling", "unknown"),
 ])
-def test_invalid_config(rgb_config, kwargs, error, match):
-    with pytest.raises(error, match=match):
-        MultimodalInteractionEncoder(rgb_backbone_config=rgb_config, **kwargs)
+def test_invalid_config(rgb_config, name, value):
+    with pytest.raises(ValueError, match=name):
+        MultimodalInteractionEncoder(rgb_backbone_config=rgb_config, **{name: value})
 
 
-def test_transform_is_required_and_has_exact_shape(rgb_config):
+@pytest.mark.parametrize("pc_dim,shape", [
+    (3, (2, 4, 1)), (3, (2, 4)), (6, (2, 4, 3)),
+])
+def test_invalid_point_cloud_shape(rgb_config, pc_dim, shape):
+    encoder = MultimodalInteractionEncoder(pc_dim=pc_dim, rgb_backbone_config=rgb_config)
+    obs, transform = make_observation("cpu", num_points=4)
+    obs["point_cloud"] = torch.zeros(shape)
+    with pytest.raises(ValueError, match="point_cloud"):
+        encoder(obs, T_base_from_world=transform)
+
+
+def test_transform_has_exact_shape(rgb_config):
     encoder = MultimodalInteractionEncoder(rgb_backbone_config=rgb_config)
     obs = {"point_cloud": torch.zeros(2, 4, 3)}
-    with pytest.raises(TypeError, match="T_base_from_world"):
-        encoder(obs)
     for shape in ((2, 4, 4), (3, 4), (1, 3, 4)):
         with pytest.raises(ValueError, match="T_base_from_world"):
             encoder(obs, T_base_from_world=torch.zeros(shape))

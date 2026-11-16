@@ -100,14 +100,12 @@ class RGBPointObservationEncoder(nn.Module):
         patches = self.patch_encoder(points)
 
         rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
+        image_hw = (rgb.shape[-2], rgb.shape[-1])
         # Sampling coordinates assume the patch grid covers the whole processed image.
-        if any(size % self.rgb_encoder.patch_size for size in rgb.shape[-2:]):
+        if any(size % self.rgb_encoder.patch_size for size in image_hw):
             raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
-        patch_grid = tuple(size // self.rgb_encoder.patch_size for size in rgb.shape[-2:])
-        patch_tokens = self.rgb_encoder(rgb)["patch_tokens"]
-        if patch_tokens.shape[1] != patch_grid[0] * patch_grid[1]:
-            raise ValueError("RGB patch token count must match the processed image patch grid")
-        image_grid = patch_tokens.unflatten(1, patch_grid)
+        patch_grid = tuple(size // self.rgb_encoder.patch_size for size in image_hw)
+        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
         sample_xyz = patches["xyz"].unsqueeze(2)
         if self.rgb_semantic_sampling == "group_mean":
             sample_xyz = index_points(points[..., :3], patches["neighbor_idx"])
@@ -116,7 +114,7 @@ class RGBPointObservationEncoder(nn.Module):
             intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
             T_camera_from_world=obs["camera_extrinsic"].reshape(bt, 3, 4),
             image_transform=image_transform,
-            image_hw=(rgb.shape[-2], rgb.shape[-1]),
+            image_hw=image_hw,
         )
 
         group_shape = sample_xyz.shape[1:3]

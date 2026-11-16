@@ -113,7 +113,10 @@ class MultimodalInteractionEncoder(nn.Module):
         T_base_from_world is a rigid transform [BT,3,4]; XYZ stays in meters.
         Camera extrinsics map World to Camera. Inputs already have a flat BT axis.
         """
-        bt = obs["point_cloud"].shape[0]
+        point_cloud = obs["point_cloud"]
+        if point_cloud.ndim != 3 or point_cloud.shape[-1] < self.patch_encoder.input_channels:
+            raise ValueError("point_cloud must have shape [BT,N,C] with C >= pc_dim")
+        bt = point_cloud.shape[0]
         if T_base_from_world.shape != (bt, 3, 4):
             raise ValueError("T_base_from_world must have shape [BT,3,4]")
         if obs["rgb"].ndim != 4 or obs["rgb"].shape[:2] != (bt, 3):
@@ -122,24 +125,24 @@ class MultimodalInteractionEncoder(nn.Module):
             if obs[name].shape != (bt, width):
                 raise ValueError(f"{name} must have shape [BT,{width}]")
 
-        with torch.autocast(device_type=obs["point_cloud"].device.type, enabled=False):
+        with torch.autocast(device_type=point_cloud.device.type, enabled=False):
             points_world = preprocess_point_cloud(
-                obs["point_cloud"], self.num_points,
+                point_cloud, self.num_points,
                 self.patch_encoder.fps_random_config, training=self.training,
             )
         xyz_base = _transform_points(points_world[..., :3], T_base_from_world)
-        points_base = torch.cat((xyz_base, points_world[..., 3:]), dim=-1)
+        points_base = xyz_base
+        if self.patch_encoder.input_channels == 6:
+            points_base = torch.cat((xyz_base, points_world[..., 3:6]), dim=-1)
         patches = self.patch_encoder(points_base)
 
         rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
+        image_hw = (rgb.shape[-2], rgb.shape[-1])
         # Sampling coordinates assume the patch grid covers the whole processed image.
-        if any(size % self.rgb_encoder.patch_size for size in rgb.shape[-2:]):
+        if any(size % self.rgb_encoder.patch_size for size in image_hw):
             raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
-        patch_grid = tuple(size // self.rgb_encoder.patch_size for size in rgb.shape[-2:])
-        patch_tokens = self.rgb_encoder(rgb)["patch_tokens"]
-        if patch_tokens.shape[1] != patch_grid[0] * patch_grid[1]:
-            raise ValueError("RGB patch token count must match the processed image patch grid")
-        image_grid = patch_tokens.unflatten(1, patch_grid)
+        patch_grid = tuple(size // self.rgb_encoder.patch_size for size in image_hw)
+        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
         if self.rgb_semantic_sampling == "center":
             sample_xyz_world = _inverse_transform_points(patches["xyz"], T_base_from_world).unsqueeze(2)
         else:
@@ -149,7 +152,7 @@ class MultimodalInteractionEncoder(nn.Module):
             intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
             T_camera_from_world=obs["camera_extrinsic"].reshape(bt, 3, 4),
             image_transform=image_transform,
-            image_hw=(rgb.shape[-2], rgb.shape[-1]),
+            image_hw=image_hw,
         )
         group_shape = sample_xyz_world.shape[1:3]
         projection = ImageProjection(

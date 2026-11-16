@@ -27,7 +27,7 @@ python -m pytest -q \
   dexmani_policy/test_tools/test_multimodal_interaction.py
 ```
 
-需要 pytest；缺少 CUDA 或 PyTorch3D 时跳过依赖它们的用例。多模态集成测试使用轻量、随机初始化的 DINOv3，无需下载权重。独立触觉融合测试不依赖 PyTorch3D，覆盖 CPU/CUDA、FP16/BF16 autocast 和参数更新后的零力恒等。
+需要 pytest；缺少 CUDA、PyTorch3D 或 CUDA 不支持 BF16 时，跳过对应用例。多模态集成测试使用轻量、随机初始化的 DINOv3，无需下载权重。独立触觉融合测试不依赖 PyTorch3D，覆盖 CPU/CUDA、FP16/BF16 autocast 和参数更新后的零力恒等。
 
 ## 策略方向
 

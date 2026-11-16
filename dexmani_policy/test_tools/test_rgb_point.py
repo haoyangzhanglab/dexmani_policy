@@ -12,19 +12,19 @@ from dexmani_policy.common.image_util import resize_image_transform
 
 
 @pytest.fixture(params=[("cpu", False), ("cuda", True)])
-def projection_device(request):
+def projection_device(request, monkeypatch):
     device, tf32 = request.param
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    previous = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = tf32
-    yield device
-    torch.backends.cuda.matmul.allow_tf32 = previous
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", tf32)
+    return device
 
 
 @pytest.mark.parametrize("resize", [False, True])
 def test_projection_coordinates(projection_device, resize):
     device = projection_device
+    if device == "cuda" and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 required")
     points = torch.tensor([[[1, 2, 2], [-1, 0, 2]]], device=device, dtype=torch.float32).expand(2, -1, -1)
     K = torch.tensor([
         [[8, 0, 31.5], [0, 8, 15.5], [0, 0, 1]],
@@ -119,6 +119,8 @@ def test_fusion(device, dtype, neighbors):
     prefix = 5  # Preserve the non-contiguous view after removing DINO prefix tokens.
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    if device == "cuda" and dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 required")
     torch.manual_seed(29)
     fusion = RGBPatchFusion(384).to(device)
     geometry = torch.randn(4, 128, 192, device=device, dtype=dtype, requires_grad=True)

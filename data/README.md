@@ -18,7 +18,7 @@
 
 DP 默认使用随机初始化的 ResNet18＋GroupNorm（`initialization.rgb=null`、`tune_mode=full`），联合训练。图像预处理为 84×84，裁剪与编码器 `image_size` 均为 76×76，避免 ImageProcessor 再放大到 224。
 
-可选 DINOv2 完整配置保留在 `dp.yaml` 末尾注释中。切换时整体替换 `rgb_backbone_config`，避免 ResNet 的 `model_name/norm_mode` 被传给 ViT，并同步替换 `initialization.rgb` 和图像处理尺寸。已有 DINO checkpoint 仍按保存的配方恢复，无需权重转换。
+可选 DINOv2 完整配置保留在 `dp.yaml` 末尾注释中。切换时整体替换 `rgb_backbone_config`，避免 ResNet 的 `model_name/norm_mode` 被传给 ViT，并同步替换 `initialization.rgb` 和图像处理尺寸。
 
 ResNet 也可设置 `initialization.rgb=DEFAULT` 使用 torchvision 预训练权重；支持 `freeze`/`full`，不支持 LoRA。`pretrained + freeze + group_norm` 可用于消融；BN→GN 保留卷积权重，但不保留 BN 统计量和 affine 参数，转换后的表征适用性由研究者判断。恢复和部署使用 checkpoint，无需再次下载。
 
