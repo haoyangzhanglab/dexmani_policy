@@ -29,6 +29,8 @@ class RGBPointObservationEncoder(nn.Module):
         rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
     ) -> None:
         super().__init__()
+        if rgb_backbone_name not in ("dino", "dinov3", "siglip"):
+            raise ValueError("rgb_backbone_name must be 'dino', 'dinov3' or 'siglip'")
         if rgb_semantic_sampling not in ("center", "group_mean"):
             raise ValueError("rgb_semantic_sampling must be 'center' or 'group_mean'")
         self.rgb_semantic_sampling = rgb_semantic_sampling
