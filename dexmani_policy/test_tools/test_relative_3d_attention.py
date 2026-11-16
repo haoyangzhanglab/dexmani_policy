@@ -85,6 +85,8 @@ def test_forward_backward(attention, amp_dtype, input_dtype):
     if device.type == "cuda" and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("CUDA BF16 required")
     inputs = make_inputs(device=device, dtype=input_dtype)
+    for value in inputs[:2]:
+        value.requires_grad_()
     optimizer = torch.optim.SGD(attention.parameters(), lr=0.1)
     for step in range(2):
         with torch.autocast(device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
@@ -97,6 +99,11 @@ def test_forward_backward(attention, amp_dtype, input_dtype):
             assert parameter.grad is not None, name
             assert torch.isfinite(parameter.grad).all(), name
         assert attention.position_bias[-1].weight.grad.abs().sum() > 0
+        for value in inputs[:2]:
+            assert value.grad is not None
+            assert torch.isfinite(value.grad).all()
+            assert value.grad.abs().sum() > 0
+            value.grad = None
         # Zero initialization delays first-layer learning until the last layer updates.
         if step == 0:
             assert torch.count_nonzero(attention.position_bias[0].weight.grad) == 0
@@ -104,6 +111,23 @@ def test_forward_backward(attention, amp_dtype, input_dtype):
             assert attention.position_bias[0].weight.grad.abs().sum() > 0
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+
+
+@pytest.mark.parametrize("amp_dtype", [None, torch.float16, torch.bfloat16])
+def test_geometry_stays_fp32_under_autocast(attention, amp_dtype):
+    device = attention.q.weight.device
+    if device.type == "cuda" and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 required")
+    dtypes = []
+    handle = attention.position_bias.register_forward_hook(
+        lambda _module, inputs, output: dtypes.append((inputs[0].dtype, output.dtype))
+    )
+    try:
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+            attention(*make_inputs(device=device))
+    finally:
+        handle.remove()
+    assert dtypes == [(torch.float32, torch.float32)]
 
 
 @pytest.mark.parametrize("amp_dtype", [None, torch.float16, torch.bfloat16])

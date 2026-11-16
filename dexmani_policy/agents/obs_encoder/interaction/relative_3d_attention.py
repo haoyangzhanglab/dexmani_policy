@@ -75,7 +75,7 @@ class Relative3DCrossAttention(nn.Module):
             relative_xyz = scene_xyz_base.float()[:, None] - anchors_base.float()[:, :, None]
             attention_bias = self.position_bias(relative_xyz / self.geometry_scale)
 
-        # Fused SDPA kernels require unit stride along the scene dimension.
+        # Keep additive attention bias contiguous for SDPA backend compatibility.
         attention_bias = attention_bias.permute(0, 3, 1, 2).to(
             dtype=query.dtype, memory_format=torch.contiguous_format,
         )
