@@ -19,6 +19,7 @@ class PolicyInfo:
     supports_rtc: bool
     requires_prev_action: bool
     control_dt_s: float
+    data_processing: dict
 
 
 def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
@@ -38,4 +39,5 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         supports_rtc=agent.supports_rtc,
         requires_prev_action=agent.requires_prev_action,
         control_dt_s=cfg["control_dt_s"],
+        data_processing=cfg["data_processing"],
     )

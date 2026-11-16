@@ -17,7 +17,7 @@ from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rn
 from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.common.config import load_config
 from dexmani_policy.training.common.data import (
-    build_train_loader, close_data_loader, fit_normalizer,
+    build_train_loader, close_data_loader, fit_normalizer, record_data_processing,
 )
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
@@ -85,6 +85,7 @@ def export_encoder(checkpoint, output_path):
         }
         for name in ("encoder", "normalizer")
     }
+    payload["data_processing"] = checkpoint["effective_config"]["data_processing"]
     payload["normalization"] = dict(normalization)
     payload["global_step"] = checkpoint["global_step"]
     if not payload["encoder_state"]:
@@ -170,6 +171,7 @@ def train(method, model_class, argv=None):
 
     set_seed(cfg.training.seed + (checkpoint["global_step"] if resuming else 0))
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
+    record_data_processing(cfg, dataset.episode_store, resuming=resuming)
     cfg.zarr_path = dataset.episode_store.path
     cfg.dataset.zarr_path = cfg.zarr_path
     print(f"[Dataset] {dataset.training_summary()}")

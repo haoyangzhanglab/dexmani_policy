@@ -91,3 +91,20 @@ def build_train_loader(cfg, dataset):
             "Training DataLoader is empty; check dataset length, batch_size and drop_last"
         )
     return loader
+
+
+def record_data_processing(cfg, buffer, *, resuming=False):
+    """将实际数据的处理记录带入训练配置，不从路径推断来源。"""
+    from omegaconf import OmegaConf, open_dict
+
+    # 仿真数据没有真机处理记录；真机导出必须带有该属性。
+    metadata = (buffer.attrs["data_processing"]
+                if buffer.attrs.get("format") == "dexmani.real.canonical"
+                else buffer.attrs.get("data_processing", {}))
+    if resuming:
+        previous = OmegaConf.to_container(cfg.data_processing, resolve=True)
+        for name in cfg.dataset.sensor_modalities:
+            if metadata.get(name) != previous.get(name):
+                raise ValueError(f"Resume data_processing mismatch: {name}")
+    with open_dict(cfg):
+        cfg.data_processing = metadata

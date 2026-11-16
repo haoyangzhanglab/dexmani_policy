@@ -1,4 +1,4 @@
-"""Separate scene and tactile-aware hand tokens in a shared metric Base frame."""
+"""Separate scene and tactile-aware hand tokens in a shared metric Base-aligned frame."""
 
 from __future__ import annotations
 
@@ -15,24 +15,6 @@ from .pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncod
 from .pointcloud.rgb_patch_fusion import RGBPatchFusion
 from .proprio import HandGeometryEncoder
 from .rgb.build import build_rgb_encoder
-
-
-def _transform_points(xyz: torch.Tensor, transform: torch.Tensor) -> torch.Tensor:
-    with torch.autocast(device_type=xyz.device.type, enabled=False):
-        xyz, transform = xyz.float(), transform.float()
-        rotation = transform[:, :3, :3]
-        translation = transform[:, :3, 3]
-        # Match camera projection's FP32 precision even when matmul permits TF32.
-        return (xyz[:, :, None, :] * rotation[:, None]).sum(-1) + translation[:, None]
-
-
-def _inverse_transform_points(xyz: torch.Tensor, transform: torch.Tensor) -> torch.Tensor:
-    with torch.autocast(device_type=xyz.device.type, enabled=False):
-        xyz, transform = xyz.float(), transform.float()
-        rotation = transform[:, :3, :3]
-        translation = transform[:, :3, 3]
-        offset = xyz - translation[:, None]
-        return (offset[..., None] * rotation[:, None]).sum(-2)
 
 
 class MultimodalInteractionEncoder(nn.Module):
@@ -102,39 +84,21 @@ class MultimodalInteractionEncoder(nn.Module):
             "relative_geometry_scale": self.relative_attention.geometry_scale,
         }
 
-    def forward(
-        self,
-        obs: dict[str, torch.Tensor],
-        *,
-        T_base_from_world: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        """Consume World points, Base hand geometry, and unmodified source-frame forces.
+    def forward(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Consume Base-aligned geometry and unmodified source-frame forces.
 
-        T_base_from_world is a rigid transform [BT,3,4]; XYZ stays in meters.
-        Camera extrinsics map World to Camera. Inputs already have a flat BT axis.
+        XYZ stays in meters; camera extrinsics map Base-aligned coordinates to Camera.
+        Inputs already have a flat BT axis.
         """
-        point_cloud = obs["point_cloud"]
-        if point_cloud.ndim != 3 or point_cloud.shape[-1] < self.patch_encoder.input_channels:
-            raise ValueError("point_cloud must have shape [BT,N,C] with C >= pc_dim")
-        bt = point_cloud.shape[0]
-        if T_base_from_world.shape != (bt, 3, 4):
-            raise ValueError("T_base_from_world must have shape [BT,3,4]")
+        bt = obs["point_cloud"].shape[0]
         if obs["rgb"].ndim != 4 or obs["rgb"].shape[:2] != (bt, 3):
             raise ValueError("rgb must have shape [BT,3,H,W]")
-        for name, width in (("camera_intrinsic", 9), ("camera_extrinsic", 12)):
-            if obs[name].shape != (bt, width):
-                raise ValueError(f"{name} must have shape [BT,{width}]")
 
-        with torch.autocast(device_type=point_cloud.device.type, enabled=False):
-            points_world = preprocess_point_cloud(
-                point_cloud, self.num_points,
-                self.patch_encoder.fps_random_config, training=self.training,
-            )
-        xyz_base = _transform_points(points_world[..., :3], T_base_from_world)
-        points_base = xyz_base
-        if self.patch_encoder.input_channels == 6:
-            points_base = torch.cat((xyz_base, points_world[..., 3:6]), dim=-1)
-        patches = self.patch_encoder(points_base)
+        points = preprocess_point_cloud(
+            obs["point_cloud"], self.num_points,
+            self.patch_encoder.fps_random_config, training=self.training,
+        )
+        patches = self.patch_encoder(points)
 
         rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
         image_hw = (rgb.shape[-2], rgb.shape[-1])
@@ -144,17 +108,18 @@ class MultimodalInteractionEncoder(nn.Module):
         patch_grid = tuple(size // self.rgb_encoder.patch_size for size in image_hw)
         image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
         if self.rgb_semantic_sampling == "center":
-            sample_xyz_world = _inverse_transform_points(patches["xyz"], T_base_from_world).unsqueeze(2)
+            sample_xyz = patches["xyz"].unsqueeze(2)
         else:
-            sample_xyz_world = index_points(points_world[..., :3], patches["neighbor_idx"])
+            sample_xyz = index_points(points[..., :3], patches["neighbor_idx"])
+        # The projection API's World names refer to our shared Base-aligned frame.
         projection = project_to_image(
-            points_world=sample_xyz_world.flatten(1, 2),
+            points_world=sample_xyz.flatten(1, 2),
             intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
             T_camera_from_world=obs["camera_extrinsic"].reshape(bt, 3, 4),
             image_transform=image_transform,
             image_hw=image_hw,
         )
-        group_shape = sample_xyz_world.shape[1:3]
+        group_shape = sample_xyz.shape[1:3]
         projection = ImageProjection(
             projection.grid_xy.unflatten(1, group_shape),
             projection.valid.unflatten(1, group_shape),

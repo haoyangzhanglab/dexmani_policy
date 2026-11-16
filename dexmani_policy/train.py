@@ -18,7 +18,7 @@ from dexmani_policy.training.common.config import (
     assemble_policy_config, prepare_training, register_resolvers,
     validate_normalization, validate_config,
 )
-from dexmani_policy.training.common.data import build_dataset, fit_normalizer
+from dexmani_policy.training.common.data import build_dataset, fit_normalizer, record_data_processing
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
@@ -130,6 +130,7 @@ def build_trainer(cfg, *, checkpoint=None):
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
+    record_data_processing(cfg, dataset.episode_store, resuming=checkpoint is not None)
     if checkpoint is not None:
         data_dt = data_description["control_dt_s"]
         policy_dt = cfg.control_dt_s

@@ -1,4 +1,4 @@
-"""Multimodal wiring, frame conversion and end-to-end gradient checks."""
+"""Multimodal wiring, Base-aligned geometry and end-to-end gradient checks."""
 
 from unittest.mock import patch
 
@@ -54,13 +54,9 @@ def make_observation(device, point_channels=6, num_points=96):
     if point_channels > 3:
         attributes = torch.rand(2, num_points, point_channels - 3, device=device)
         points = torch.cat((points, attributes), dim=-1)
-    transform = torch.tensor([
-        [[0, -1, 0, 0.35], [1, 0, 0, -0.20], [0, 0, 1, -0.60]],
-        [[1, 0, 0, -0.25], [0, 0, -1, 0.70], [0, 1, 0, 0.30]],
-    ], device=device)
     position = points.new_tensor([[0.34, -0.19, 0.42], [-0.24, -0.32, 0.31]])
     rotation = points.new_tensor([1, 0, 0, 0, 1, 0]).expand(2, -1)
-    obs = {
+    return {
         "point_cloud": points,
         "rgb": torch.randint(0, 256, (2, 3, 24, 40), dtype=torch.uint8, device=device),
         "camera_intrinsic": points.new_tensor(
@@ -74,7 +70,6 @@ def make_observation(device, point_channels=6, num_points=96):
         "fingertip_xyz": position[:, None] + torch.randn(2, 5, 3, device=device) * 0.04,
         "finger_tactile_force": torch.randn(2, 5, 3, device=device) * 3,
     }
-    return obs, transform
 
 
 def test_default_scene_token_count(rgb_config):
@@ -82,18 +77,18 @@ def test_default_scene_token_count(rgb_config):
     model = MultimodalInteractionEncoder(
         num_points=128, rgb_backbone_config=rgb_config,
     ).eval()
-    obs, transform = make_observation("cpu", point_channels=3, num_points=160)
+    obs = make_observation("cpu", point_channels=3, num_points=160)
     with torch.no_grad():
-        output = model(obs, T_base_from_world=transform)
+        output = model(obs)
     assert output["scene_tokens"].shape == (2, 128, 192)
 
 
 def test_forward_backward_and_zero_force(encoder, execution):
     device, dtype = execution
     encoder.train()
-    obs, transform = make_observation(device, point_channels=encoder.patch_encoder.input_channels)
+    obs = make_observation(device, point_channels=encoder.patch_encoder.input_channels)
     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
-        output = encoder(obs, T_base_from_world=transform)
+        output = encoder(obs)
     assert {key: tuple(value.shape) for key, value in output.items()} == {
         "scene_tokens": (2, 16, 192), "scene_xyz_base": (2, 16, 3),
         "hand_tokens": (2, 6, 192), "hand_anchors_base": (2, 6, 3),
@@ -119,57 +114,54 @@ def test_forward_backward_and_zero_force(encoder, execution):
         torch.no_grad(),
         torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32),
     ):
-        zero_output = encoder(obs, T_base_from_world=transform)
+        zero_output = encoder(obs)
     torch.testing.assert_close(zero_output["hand_tokens"], geometry[0], rtol=0, atol=0)
 
 
-def test_base_geometry_and_world_projection(encoder, execution):
+def test_base_aligned_geometry_contract(encoder, execution):
     device, dtype = execution
-    pc_dim = encoder.patch_encoder.input_channels
-    obs, transform = make_observation(device, point_channels=9)
-    original_points = obs["point_cloud"].clone()
-    world = multimodal.preprocess_point_cloud(obs["point_cloud"], encoder.num_points, training=False)
-    captured: dict[str, torch.Tensor] = {}
+    obs = make_observation(device, point_channels=9)
+    original = {key: value.clone() for key, value in obs.items()}
+    points = multimodal.preprocess_point_cloud(
+        obs["point_cloud"], encoder.num_points,
+        encoder.patch_encoder.fps_random_config, training=False,
+    )
+    captured = {}
 
     def track_patches(_module, inputs, output):
-        captured.update(points_base=inputs[0], neighbor_idx=output["neighbor_idx"])
+        captured.update(patch_input=inputs[0], patches=output)
+
+    def track_hand(_module, inputs, output):
+        captured.update(hand_inputs=inputs, hand=output)
 
     with (
-        patch.object(
-            multimodal, "preprocess_point_cloud", wraps=multimodal.preprocess_point_cloud,
-        ) as preprocess,
+        patch.object(multimodal, "preprocess_point_cloud", return_value=points) as preprocess,
         patch.object(multimodal, "project_to_image", wraps=multimodal.project_to_image) as project,
+        patch.object(
+            encoder.relative_attention, "forward", wraps=encoder.relative_attention.forward,
+        ) as attention,
         encoder.patch_encoder.register_forward_hook(track_patches),
+        encoder.hand_encoder.register_forward_hook(track_hand),
         torch.no_grad(),
         torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32),
     ):
-        output = encoder(obs, T_base_from_world=transform)
+        output = encoder(obs)
 
-    preprocess.assert_called_once()
-    assert captured["points_base"].shape == (2, 64, pc_dim)
-    homogeneous = torch.cat((world[..., :3].double(), torch.ones_like(world[..., :1])), dim=-1)
-    expected_base = torch.einsum("bij,bnj->bni", transform.double(), homogeneous).float()
-    torch.testing.assert_close(captured["points_base"][..., :3], expected_base, rtol=0, atol=2e-7)
-    torch.testing.assert_close(captured["points_base"][..., 3:], world[..., 3:pc_dim], rtol=0, atol=0)
-    assert captured["points_base"].dtype == torch.float32
-
-    centers = output["scene_xyz_base"]
-    center_idx = (expected_base[:, None] - centers[:, :, None]).square().sum(-1).argmin(-1)
-    batch = torch.arange(2, device=device)[:, None]
-    torch.testing.assert_close(centers, expected_base[batch, center_idx], rtol=0, atol=2e-7)
-    expected_anchors = torch.cat((obs["eef_pose"][:, None, :3], obs["fingertip_xyz"]), dim=1)
-    torch.testing.assert_close(output["hand_anchors_base"], expected_anchors, rtol=0, atol=0)
-    assert centers.dtype == output["hand_anchors_base"].dtype == torch.float32
+    preprocess.assert_called_once_with(
+        obs["point_cloud"], encoder.num_points,
+        encoder.patch_encoder.fps_random_config, training=False,
+    )
+    assert captured["patch_input"] is points
+    patches = captured["patches"]
+    assert output["scene_xyz_base"] is patches["xyz"]
 
     if encoder.rgb_semantic_sampling == "center":
-        expected_world = world[batch, center_idx, :3]
+        expected_xyz = patches["xyz"]
     else:
-        neighbors = captured["neighbor_idx"]
-        expected_world = world[batch[:, :, None], neighbors, :3].flatten(1, 2)
+        expected_xyz = multimodal.index_points(points[..., :3], patches["neighbor_idx"]).flatten(1, 2)
     project.assert_called_once()
     projection_inputs = project.call_args.kwargs
-    torch.testing.assert_close(projection_inputs["points_world"], expected_world, rtol=0, atol=2e-7)
-    assert projection_inputs["points_world"].dtype == torch.float32
+    torch.testing.assert_close(projection_inputs["points_world"], expected_xyz, rtol=0, atol=0)
     torch.testing.assert_close(
         projection_inputs["T_camera_from_world"], obs["camera_extrinsic"].reshape(2, 3, 4),
         rtol=0, atol=0,
@@ -177,47 +169,23 @@ def test_base_geometry_and_world_projection(encoder, execution):
     torch.testing.assert_close(
         projection_inputs["intrinsics"], obs["camera_intrinsic"].reshape(2, 3, 3), rtol=0, atol=0,
     )
-    torch.testing.assert_close(obs["point_cloud"], original_points, rtol=0, atol=0)
 
-
-@pytest.mark.parametrize("input_dtype", [torch.float32, torch.bfloat16])
-def test_rigid_transforms_stay_fp32_under_autocast(input_dtype):
-    obs, transform = make_observation("cpu", point_channels=3, num_points=4)
-    world = obs["point_cloud"].to(input_dtype)
-    transform = transform.to(input_dtype)
-    homogeneous = torch.cat((world.double(), torch.ones_like(world[..., :1])), dim=-1)
-    expected = torch.einsum("bij,bnj->bni", transform.double(), homogeneous).float()
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        base = multimodal._transform_points(world, transform)
-        recovered = multimodal._inverse_transform_points(base, transform)
-    assert base.dtype == recovered.dtype == torch.float32
-    torch.testing.assert_close(base, expected, rtol=0, atol=2e-7)
-    torch.testing.assert_close(recovered, world.float(), rtol=0, atol=2e-7)
-
-
-def test_rigid_transforms_with_tf32(monkeypatch):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    if not torch.cuda.is_bf16_supported():
-        pytest.skip("CUDA BF16 required")
-    torch.manual_seed(19)
-    rotation = torch.linalg.qr(torch.randn(2, 3, 3, dtype=torch.float64, device="cuda")).Q
-    rotation[:, :, -1] *= torch.linalg.det(rotation).sign()[:, None]
-    rotation = rotation.float()
-    assert (torch.linalg.det(rotation) > 0).all()
-    transform = torch.cat((rotation, torch.randn(2, 3, 1, device="cuda")), dim=-1)
-    world = torch.randn(2, 1024, 3, device="cuda")
-    expected = (world.double() @ rotation.double().transpose(1, 2) + transform[:, None, :, 3]).float()
-    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        base = multimodal._transform_points(world, transform)
-        recovered = multimodal._inverse_transform_points(base, transform)
-    torch.testing.assert_close(base, expected, rtol=0, atol=1e-6)
-    torch.testing.assert_close(recovered, world, rtol=0, atol=1e-6)
+    assert captured["hand_inputs"][0] is obs["eef_pose"]
+    assert captured["hand_inputs"][1] is obs["fingertip_xyz"]
+    hand = captured["hand"]
+    assert output["hand_anchors_base"] is hand["anchors_base"]
+    attention.assert_called_once()
+    attention_inputs = attention.call_args.kwargs
+    assert attention_inputs["body_tokens"] is hand["tokens"]
+    assert attention_inputs["scene_tokens"] is output["scene_tokens"]
+    assert attention_inputs["anchors_base"] is hand["anchors_base"]
+    assert attention_inputs["scene_xyz_base"] is patches["xyz"]
+    for key in obs:
+        torch.testing.assert_close(obs[key], original[key], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("backbone", ["dino", "dinov3", "siglip"])
-def test_current_config_and_weights_roundtrip(rgb_config, backbone):
+def test_config_and_weights_roundtrip(rgb_config, backbone):
     pytest.importorskip("pytorch3d.ops", reason="Point grouping requires PyTorch3D")
     if backbone != "dinov3":
         rgb_config["architecture"] = {
@@ -237,10 +205,10 @@ def test_current_config_and_weights_roundtrip(rgb_config, backbone):
     restored = MultimodalInteractionEncoder(**encoder.effective_config).eval()
     restored.load_state_dict(encoder.state_dict(), strict=True)
     assert restored.effective_config == encoder.effective_config
-    obs, transform = make_observation("cpu")
+    obs = make_observation("cpu")
     with torch.no_grad():
-        expected = encoder(obs, T_base_from_world=transform)
-        actual = restored(obs, T_base_from_world=transform)
+        expected = encoder(obs)
+        actual = restored(obs)
     for key in expected:
         torch.testing.assert_close(actual[key], expected[key])
 
@@ -252,22 +220,3 @@ def test_current_config_and_weights_roundtrip(rgb_config, backbone):
 def test_invalid_config(rgb_config, name, value):
     with pytest.raises(ValueError, match=name):
         MultimodalInteractionEncoder(rgb_backbone_config=rgb_config, **{name: value})
-
-
-@pytest.mark.parametrize("pc_dim,shape", [
-    (3, (2, 4, 1)), (3, (2, 4)), (6, (2, 4, 3)),
-])
-def test_invalid_point_cloud_shape(rgb_config, pc_dim, shape):
-    encoder = MultimodalInteractionEncoder(pc_dim=pc_dim, rgb_backbone_config=rgb_config)
-    obs, transform = make_observation("cpu", num_points=4)
-    obs["point_cloud"] = torch.zeros(shape)
-    with pytest.raises(ValueError, match="point_cloud"):
-        encoder(obs, T_base_from_world=transform)
-
-
-def test_transform_has_exact_shape(rgb_config):
-    encoder = MultimodalInteractionEncoder(rgb_backbone_config=rgb_config)
-    obs = {"point_cloud": torch.zeros(2, 4, 3)}
-    for shape in ((2, 4, 4), (3, 4), (1, 3, 4)):
-        with pytest.raises(ValueError, match="T_base_from_world"):
-            encoder(obs, T_base_from_world=torch.zeros(shape))
