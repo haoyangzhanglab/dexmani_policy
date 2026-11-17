@@ -2,9 +2,9 @@ from pathlib import Path
 
 import numpy as np
 
-from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy
+from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.inference import (
-    prepare_numeric_tensor, prepare_observations, predict_actions, resolve_inference_settings,
+    prepare_numeric_tensor, prepare_observations, predict_actions, resolve_inference_settings, restore_policy,
 )
 from dexmani_policy.deployment.metadata import policy_info
 

@@ -2,6 +2,25 @@ import torch
 from torch.optim.swa_utils import get_ema_multi_avg_fn
 
 
+def restore_optimizer(optimizer, state):
+    groups, saved = optimizer.param_groups, state["param_groups"]
+    if len(groups) != len(saved) or any(
+        current["param_names"] != previous["param_names"]
+        for current, previous in zip(groups, saved)
+    ):
+        raise ValueError("Optimizer parameter groups changed")
+    optimizer.load_state_dict(state)
+
+
+def clip_gradients(parameters, finite_loss, max_grad_norm=0.0, *, step):
+    norm = torch.nn.utils.clip_grad_norm_(
+        parameters, max_grad_norm or float("inf"), error_if_nonfinite=False,
+    ).detach()
+    if not (finite_loss & torch.isfinite(norm)):
+        raise FloatingPointError(f"Non-finite loss or gradient norm at step {step}")
+    return norm
+
+
 def build_optimizer(
     model,
     lr: float,

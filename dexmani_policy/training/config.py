@@ -1,14 +1,10 @@
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
 import hydra
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.config import PROJECT_ROOT, positive_int
-
-if TYPE_CHECKING:
-    from dexmani_policy.agents.policies.base import Policy
 
 CONFIG_ROOT = PROJECT_ROOT / "dexmani_policy" / "configs"
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -46,26 +42,37 @@ def assemble_policy_config(cfg):
             cfg.agent.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
         for key in ("horizon", "n_obs_steps", "n_action_steps"):
             cfg.agent[key] = cfg[key]
-        cfg.dataset.update(action_key=action_key, zarr_path=cfg.zarr_path,
-                           horizon=cfg.horizon, obs_horizon=cfg.n_obs_steps,
-                           pad_before=cfg.n_obs_steps - 1, pad_after=cfg.n_action_steps - 1)
+        cfg.dataset.update(
+            action_key=action_key, zarr_path=cfg.zarr_path,
+            horizon=cfg.horizon, obs_horizon=cfg.n_obs_steps,
+            pad_before=cfg.n_obs_steps - 1, pad_after=cfg.n_action_steps - 1,
+        )
         if method == "r3d":
-            cfg.dataset["_target_"] = ("dexmani_policy.datasets.variants.r3d.R3DDataset" if auxiliary
-                                      else "dexmani_policy.datasets.demonstration.DemonstrationDataset")
+            cfg.dataset._target_ = (
+                "dexmani_policy.datasets.variants.r3d.R3DDataset" if auxiliary
+                else "dexmani_policy.datasets.demonstration.DemonstrationDataset"
+            )
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         cfg.env_runner.task_name = cfg.task_name
         if action_key != "action_rotvec":
-            cfg.env_runner.env_kwargs = {**(cfg.env_runner.env_kwargs or {}), "control_mode": "ee" if action_key == "action_ee" else "joint"}
+            cfg.env_runner.env_kwargs = {
+                **(cfg.env_runner.env_kwargs or {}),
+                "control_mode": "ee" if action_key == "action_ee" else "joint",
+            }
     return cfg
 
 
-def prepare_training(cfg) -> None:
-    for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
-        path = Path(cfg.workspace.output_dir) / name
+def check_fresh_output(output_dir, *extra_files):
+    output_dir = Path(output_dir).expanduser()
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints", *extra_files):
+        path = output_dir / name
         if path.exists():
             raise FileExistsError(f"Training output already exists: {path}")
-    validate_config(cfg)
+
+
+def prepare_training(cfg) -> None:
+    check_fresh_output(cfg.workspace.output_dir)
     if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
         name = cfg.agent.rgb_backbone_name
         if name in ("dino", "siglip"):
@@ -108,6 +115,6 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")
 
-    cls = cast("type[Policy]", hydra.utils.get_class(cfg.agent._target_))
+    cls = hydra.utils.get_class(cfg.agent._target_)
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")

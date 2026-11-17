@@ -10,8 +10,8 @@ import torch
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.train import run_training
-from dexmani_policy.training.common.config import load_config
-from dexmani_policy.training.common.resume import prepare_resume
+from dexmani_policy.training.config import load_config
+from dexmani_policy.training.resume import prepare_resume
 
 
 def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int) -> tuple[int, int]:

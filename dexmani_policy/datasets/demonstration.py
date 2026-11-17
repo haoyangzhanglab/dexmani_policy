@@ -7,21 +7,21 @@ from typing import Any
 import numpy as np
 import torch
 
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int
 from dexmani_policy.common.image_util import (
-    preprocess_rgb_train,
     preprocess_rgb_eval,
+    preprocess_rgb_train,
     validate_rgb_preprocessing,
 )
 from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int
+from dexmani_policy.datasets.episode_store import EpisodeStore
+from dexmani_policy.datasets.sampler import SequenceSampler
+from dexmani_policy.datasets.split import format_split_summary, split_episodes
 from dexmani_policy.datasets.transforms import (
     AUGMENTATION_SPECS,
     PointCoordinateNoise,
     random_sample_points,
 )
-from dexmani_policy.datasets.split import split_episodes
-from dexmani_policy.datasets.episode_store import EpisodeStore
-from dexmani_policy.datasets.sampler import SequenceSampler
 
 
 class DemonstrationDataset(torch.utils.data.Dataset):
@@ -120,12 +120,9 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
     def training_summary(self):
         store = self.episode_store
-        unused = ~(self.train_mask | self.val_mask)
         return (
-            f"{Path(store.path).name}: source groups={store.count_groups():,}, segments={store.n_episodes:,}; "
-            f"train groups={store.count_groups(self.train_mask):,}/segments={int(self.train_mask.sum()):,}, "
-            f"val groups={store.count_groups(self.val_mask):,}/segments={int(self.val_mask.sum()):,} (留出但未验证), "
-            f"unused groups={store.count_groups(unused):,}/segments={int(unused.sum()):,}, train windows={len(self):,}, "
+            f"{Path(store.path).name}: {format_split_summary(store, self.train_mask, self.val_mask)}; "
+            f"val 留出但未验证; train windows={len(self):,}; "
             f"fields={', '.join(self.data_keys)}"
         )
 
@@ -139,10 +136,9 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         return len(self.sampler)
 
     def sample_to_data(self, sample):
-        action = sample[self.action_key]
         return {
-            "obs": {m: sample[m] for m in self.sensor_modalities},
-            "action": action,
+            "obs": {key: sample[key] for key in self.sensor_modalities},
+            "action": sample[self.action_key],
         }
 
     def __getitem__(self, idx):

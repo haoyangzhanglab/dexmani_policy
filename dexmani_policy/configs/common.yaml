@@ -22,7 +22,7 @@ normalization:
   action: limits
 
 ema:
-  _target_: dexmani_policy.training.common.optimization.EMA
+  _target_: dexmani_policy.training.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75

@@ -2,7 +2,7 @@ import copy
 
 from torch.utils.data import Dataset
 
-from dexmani_policy.datasets.split import split_episodes
+from dexmani_policy.datasets.split import format_split_summary, split_episodes
 
 
 class ObservationPretrainDataset(Dataset):
@@ -23,12 +23,8 @@ class ObservationPretrainDataset(Dataset):
 
     def training_summary(self):
         store = self.episode_store
-        unused = ~(self.train_mask | self.val_mask)
         return (
-            f"{store.path}: source groups={store.count_groups():,}, segments={store.n_episodes:,}; "
-            f"train groups={store.count_groups(self.train_mask):,}/segments={int(self.train_mask.sum()):,}, "
-            f"val groups={store.count_groups(self.val_mask):,}/segments={int(self.val_mask.sum()):,}, "
-            f"unused groups={store.count_groups(unused):,}/segments={int(unused.sum()):,}, "
+            f"{store.path}: {format_split_summary(store, self.train_mask, self.val_mask)}; "
             f"train windows={len(self):,}"
         )
 

@@ -95,7 +95,6 @@ class LinearNormalizer(nn.Module):
     def __getitem__(self, key) -> FieldNormalizer:
         return self.fields[key]
 
-
-def validate_normalizer_state(normalizer: LinearNormalizer) -> None:
-    for key, field in normalizer.fields.items():
-        field.validate(key)
+    def validate(self) -> None:
+        for key, field in self.fields.items():
+            field.validate(key)

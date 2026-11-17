@@ -25,7 +25,7 @@ python -m pip install -e . --no-deps
 ```bash
 RUN=experiments/train/dp3/pick_apple_messy/run01
 bash scripts/training/train.sh dp3 workspace.output_dir="$RUN" hydra.run.dir="$RUN"
-python -m dexmani_policy.training.common.resume --run "$RUN"
+python -m dexmani_policy.training.resume --run "$RUN"
 bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episodes 10
 ```
 

@@ -9,47 +9,45 @@ from dexmani_policy.common.config import (
     POINT_CLOUD_FIELDS,
     TACTILE_FEATURE_SHAPES,
 )
-from dexmani_policy.common.normalizer import (
-    FieldNormalizer,
-    LinearNormalizer,
-    validate_normalizer_state,
-)
+from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer
 
 
-def fit_normalizer(
-    dataset, normalizer: LinearNormalizer, fields, *, initial_state=None, inherited_fields=(), hand_affine=None,
+def fit_observation_normalizer(
+    dataset, normalizer: LinearNormalizer, fields, *, initial_state=None, inherited_fields=(),
 ) -> None:
-    """Fit limits fields, loading inherited affine into the existing modules."""
+    """Fit observation limits, retaining affine inherited from encoder pretraining."""
     if initial_state is not None:
         inherited = LinearNormalizer()
         for key in inherited_fields:
             inherited.fields[key] = normalizer[key]
         inherited.load_state_dict(initial_state, strict=True)
-        validate_normalizer_state(inherited)
+        inherited.validate()
     for key in tuple(fields):
         if key in inherited_fields:
             continue
-        expected_shape = normalizer[key].scale.shape
-        chunks = dataset.iter_normalization_data(key)
-        if key == "action" and hand_affine is not None:
-            arm_dim = normalizer[key].scale.numel() - hand_affine["scale"].numel()
-            normalizer.fit_field(key, (values[..., :arm_dim] for values in chunks))
-            field = normalizer[key]
-            normalizer.fields[key] = FieldNormalizer(
-                torch.cat((field.scale, hand_affine["scale"])),
-                torch.cat((field.offset, hand_affine["offset"])),
-            )
-        else:
-            normalizer.fit_field(key, chunks)
-        if normalizer[key].scale.shape != expected_shape:
-            raise ValueError(f"Fitted affine shape mismatch for {key}: expected {tuple(expected_shape)}")
-        if key == "action" and dataset.action_key == "action_ee":
-            normalizer[key].scale[3:9] = 1
-            normalizer[key].offset[3:9] = 0
+        normalizer.fit_field(key, dataset.iter_normalization_data(key))
+
+
+def fit_action_normalizer(dataset, normalizer: LinearNormalizer, *, hand_affine=None) -> None:
+    chunks = dataset.iter_normalization_data("action")
+    if hand_affine is None:
+        normalizer.fit_field("action", chunks)
+    else:
+        # The hand representation must retain the coordinate system of its prior.
+        arm_dim = normalizer["action"].scale.numel() - hand_affine["scale"].numel()
+        normalizer.fit_field("action", (values[..., :arm_dim] for values in chunks))
+        arm = normalizer["action"]
+        normalizer.fields["action"] = FieldNormalizer(
+            torch.cat((arm.scale, hand_affine["scale"])),
+            torch.cat((arm.offset, hand_affine["offset"])),
+        )
+    field = normalizer["action"]
+    if dataset.action_key == "action_ee":
+        field.scale[3:9] = 1
+        field.offset[3:9] = 0
 
 
 def build_dataset(cfg):
-    """Construct training samples and describe their stored field dimensions."""
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     buffer = dataset.episode_store
     if buffer.attrs["task_name"] != cfg.task_name:
@@ -62,9 +60,7 @@ def build_dataset(cfg):
     dt = float(buffer.attrs["dt"])
     if not isfinite(dt) or dt <= 0:
         raise ValueError(f"Invalid dataset dt: {dt}")
-    dims = {
-        key: int(buffer[key].shape[-1]) for key in dataset.sensor_modalities
-    }
+    dims = {key: int(buffer[key].shape[-1]) for key in dataset.sensor_modalities}
     for key in (FIELD_FEATURE_SHAPES.keys() | TACTILE_FEATURE_SHAPES.keys()) & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
     if dataset.pc_dim is not None:
@@ -107,7 +103,7 @@ def build_train_loader(cfg, dataset):
 
 
 def record_data_processing(cfg, dataset):
-    """记录实际读取字段的处理参数；可选研究记录不参与模型恢复准入。"""
+    """记录实际读取字段的处理参数。"""
     from omegaconf import open_dict
 
     processing = dataset.episode_store.attrs.get("data_processing")

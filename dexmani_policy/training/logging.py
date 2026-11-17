@@ -9,6 +9,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.training.runtime import close_resources
 
 
 class ExperimentLogger:
@@ -31,7 +32,7 @@ class ExperimentLogger:
                     dir=str(self.output_dir), id=uuid.uuid4().hex, resume="never", **wandb_cfg
                 )
             except BaseException:
-                self.close()
+                close_resources(self.close)
                 raise
 
     def save_config(self, hydra_config):
@@ -49,11 +50,10 @@ class ExperimentLogger:
             self.wandb_run.log(data, step=step)
 
     def close(self):
-        try:
-            self.metrics_file.close()
-        finally:
-            if self.wandb_run is not None:
-                self.wandb_run.finish()
+        closers = [self.metrics_file.close]
+        if self.wandb_run is not None:
+            closers.append(self.wandb_run.finish)
+        close_resources(*closers)
 
 
 def accumulate_metrics(totals, metrics):

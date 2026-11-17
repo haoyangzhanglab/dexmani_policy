@@ -1,8 +1,4 @@
 import argparse
-import os
-import signal
-from collections.abc import Callable
-from contextlib import ExitStack
 from pathlib import Path
 
 import hydra
@@ -10,29 +6,29 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
+from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import (
     dict_apply,
     get_rng_state,
     set_rng_state,
     set_seed,
 )
-from dexmani_policy.training.common import training_signal_handlers
-from dexmani_policy.training.common.config import load_config
-from dexmani_policy.training.common.data import (
+from dexmani_policy.training.config import check_fresh_output, load_config
+from dexmani_policy.training.data import (
     build_train_loader,
     close_data_loader,
-    fit_normalizer,
+    fit_observation_normalizer,
     record_data_processing,
 )
-from dexmani_policy.training.common.logging import (
+from dexmani_policy.training.logging import (
     ExperimentLogger,
     accumulate_metrics,
     to_log_scalars,
 )
-from dexmani_policy.training.common.optimization import build_scheduler
+from dexmani_policy.training.optimization import build_scheduler, clip_gradients, restore_optimizer
+from dexmani_policy.training.runtime import close_resources, training_signals
 
 
 def load_run(method, argv=None):
@@ -59,8 +55,8 @@ def load_run(method, argv=None):
             source = directory / "checkpoints/latest.pt"
         else:
             directory = source.parent.parent
-        checkpoint = torch.load(source, map_location="cpu", weights_only=False, mmap=True)
-        cfg = OmegaConf.create(checkpoint["effective_config"])
+        checkpoint = load_checkpoint(source)
+        cfg = OmegaConf.create(checkpoint.effective_config)
         cfg.workspace.output_dir = str(directory)
     else:
         cfg = load_config(args.config or f"pretrain/obs/{method}", args.overrides)
@@ -88,8 +84,8 @@ def load_run(method, argv=None):
 
 
 def export_encoder(checkpoint, output_path):
-    state = checkpoint["model_state"]
-    normalization = checkpoint["effective_config"]["normalization"]
+    state = checkpoint.model_state
+    normalization = checkpoint.effective_config["normalization"]
     payload = {
         f"{name}_state": {
             key.removeprefix(f"{name}."): value.detach().cpu()
@@ -97,9 +93,9 @@ def export_encoder(checkpoint, output_path):
         }
         for name in ("encoder", "normalizer")
     }
-    payload["data_processing"] = checkpoint["effective_config"].get("data_processing")
+    payload["data_processing"] = checkpoint.effective_config["data_processing"]
     payload["normalization"] = dict(normalization)
-    payload["global_step"] = checkpoint["global_step"]
+    payload["global_step"] = checkpoint.global_step
     if not payload["encoder_state"]:
         raise ValueError("Checkpoint has no encoder.* parameters")
     output_path = Path(output_path)
@@ -108,34 +104,9 @@ def export_encoder(checkpoint, output_path):
         torch.save(payload, temporary)
 
 
-def save_run(model, optimizer, scheduler, cfg, step):
-    output = Path(cfg.workspace.output_dir)
-    config = OmegaConf.to_container(cfg, resolve=True)
-    checkpoint = {
-        "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict(), "global_step": step,
-        "effective_config": config,
-    }
-    checkpoint_dir = output / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    with atomic_path(checkpoint_dir / "latest.pt") as temporary:
-        torch.save(checkpoint, temporary)
-    return checkpoint
-
-
-def restore_run(model, optimizer, checkpoint) -> int:
-    # The optimizer already owns these Parameters, so restore their values in place.
-    model.load_state_dict(checkpoint["model_state"], strict=True)
-    validate_normalizer_state(model.normalizer)
-    if optimizer.param_groups[0]["param_names"] != checkpoint["optimizer_state"]["param_groups"][0]["param_names"]:
-        raise ValueError("Optimizer parameter order changed")
-    optimizer.load_state_dict(checkpoint["optimizer_state"])
-    return checkpoint["global_step"]
-
-
 @torch.no_grad()
-def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[], bool]):
-    if stop_requested():
+def evaluate(model, dataset, batch_size, device, *, stop):
+    if stop.requested:
         return None
     rng_state, training = get_rng_state(device), model.training
     try:
@@ -143,30 +114,26 @@ def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[],
         totals: dict[str, torch.Tensor] = {}
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         for batch in loader:
-            if stop_requested():
+            if stop.requested:
                 return None
             count = len(next(iter(batch["obs"].values())))
             _, metrics = model(dict_apply(batch, lambda x: x.to(device)))
             accumulate_metrics(totals, {key: value * count for key, value in metrics.items()})
-            if stop_requested():
+            if stop.requested:
                 return None
         return {f"val/{key}": value / len(dataset) for key, value in totals.items()}
     finally:
-        model.train(training)
-        set_rng_state(rng_state, device)
+        close_resources(lambda: model.train(training), lambda: set_rng_state(rng_state, device))
 
 
 def train(method, model_class, argv=None):
     cfg, checkpoint, max_updates = load_run(method, argv)
     resuming = checkpoint is not None
-    if resuming and checkpoint["global_step"] >= cfg.training.loop.total_train_steps:
-        print(f"Pretraining already completed at step {checkpoint['global_step']}")
+    if resuming and checkpoint.global_step >= cfg.training.loop.total_train_steps:
+        print(f"Pretraining already completed at step {checkpoint.global_step}")
         return
     if not resuming:
-        for name in ("config.yaml", "metrics.jsonl", "encoder.pt", "checkpoints"):
-            path = Path(cfg.workspace.output_dir) / name
-            if path.exists():
-                raise FileExistsError(f"Pretraining output already exists: {path}")
+        check_fresh_output(cfg.workspace.output_dir, "encoder.pt")
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
     positive_int(cfg.training.loop.log_interval_steps, "training.loop.log_interval_steps")
@@ -181,11 +148,11 @@ def train(method, model_class, argv=None):
         positive_int(cfg.training.loop.total_train_steps, "training.loop.total_train_steps")
         positive_int(cfg.training.loop.gradient_accumulation_steps, "training.loop.gradient_accumulation_steps")
 
-    set_seed(cfg.training.seed + (checkpoint["global_step"] if resuming else 0))
+    set_seed(cfg.training.seed + (checkpoint.global_step if resuming else 0))
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     if method == "cordvip" and cfg.model.contact_loss_weight > 0 and resuming:
-        previous = checkpoint["effective_config"].get("data_processing") or {}
-        geometry_sha256 = previous.get("object_pointcloud", {}).get("geometry_sha256")
+        previous = checkpoint.effective_config["data_processing"]
+        geometry_sha256 = previous["object_pointcloud"]["geometry_sha256"]
         if dataset.geometry_sha256 != geometry_sha256:
             raise ValueError("Contact supervision resume requires the same object geometry_sha256")
     record_data_processing(cfg, dataset)
@@ -208,16 +175,22 @@ def train(method, model_class, argv=None):
     else:
         model = model_class(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
     if not resuming:
-        fit_normalizer(dataset, model.normalizer, model.normalizer.fields)
+        fit_observation_normalizer(dataset, model.normalizer, model.normalizer.fields)
     device = torch.device(cfg.training.device)
     model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
     optimizer = torch.optim.AdamW([{"params": parameters, "param_names": list(names)}], **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
-    step = restore_run(model, optimizer, checkpoint) if resuming else 0
+    step = 0
+    if resuming:
+        # The optimizer already owns these Parameters; restore their values in place.
+        model.load_state_dict(checkpoint.model_state, strict=True)
+        model.normalizer.validate()
+        restore_optimizer(optimizer, checkpoint.optimizer_state)
+        step = checkpoint.global_step
     scheduler = build_scheduler(
         optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total,
-        state=checkpoint["scheduler_state"] if resuming else None,
+        state=checkpoint.scheduler_state if resuming else None,
     )
     del checkpoint
     updates_per_epoch = (batches_per_epoch + accumulation - 1) // accumulation
@@ -225,23 +198,10 @@ def train(method, model_class, argv=None):
     logger = ExperimentLogger(**cfg.workspace, resuming=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
-    stop_requested = False
-
-    def request_stop(signum, frame):
-        nonlocal stop_requested
-        signame = signal.Signals(signum).name
-        if stop_requested:
-            print(f"\nSecond {signame} — forcing exit.", flush=True)
-            os._exit(1)
-        print(f"\n{signame} — stopping and saving at the next update boundary.", flush=True)
-        stop_requested = True
-
     iterator = None
-    with ExitStack() as stack:
-        stack.callback(logger.close)
-        stack.callback(lambda: close_data_loader(loader, iterator))
+    try:
         logger.save_config(cfg)
-        with training_signal_handlers(request_stop):
+        with training_signals() as stop:
             initial_step = step
             while step < stop_step:
                 model.train()
@@ -265,11 +225,7 @@ def train(method, model_class, argv=None):
                         (loss / group_size).backward()
                         if record:
                             accumulate_metrics(totals, metrics)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        parameters, float("inf"), error_if_nonfinite=False,
-                    ).detach()
-                    if not (finite_loss & torch.isfinite(grad_norm)):
-                        raise RuntimeError(f"Non-finite loss or gradient norm at step {step}")
+                    clip_gradients(parameters, finite_loss, step=step)
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
                         model.update_teacher(current_epoch)
@@ -278,36 +234,38 @@ def train(method, model_class, argv=None):
                     scheduler.step()
                     step += 1
                     if record:
-                        logger.log(
-                            to_log_scalars(
-                                {"train/" + key: value / group_size for key, value in totals.items()}
-                                | {
-                                    "train/lr": lr,
-                                    "train/epoch": current_epoch,
-                                }
-                            ),
-                            step,
-                        )
+                        metrics = {f"train/{key}": value / group_size for key, value in totals.items()}
+                        metrics.update({"train/lr": lr, "train/epoch": current_epoch})
+                        logger.log(to_log_scalars(metrics), step)
                     epoch = step // updates_per_epoch
                     epoch_end = step % updates_per_epoch == 0
                     if validation is not None and epoch_end and epoch % cfg.training.val_every_epochs == 0:
-                        metrics = evaluate(model, validation, cfg.dataloader.batch_size, device,
-                                           stop_requested=lambda: stop_requested)
+                        metrics = evaluate(model, validation, cfg.dataloader.batch_size, device, stop=stop)
                         if metrics is not None:
                             logger.log(to_log_scalars(metrics), step)
                     periodic = (
                         epoch_end and epoch % cfg.training.save_every_epochs == 0
                         if is_afro else step % cfg.training.save_every_updates == 0
                     )
-                    should_stop = stop_requested or step >= stop_step
+                    should_stop = stop.requested or step >= stop_step
                     if periodic or should_stop:
-                        saved = save_run(model, optimizer, scheduler, cfg, step)
+                        saved = Checkpoint(
+                            global_step=step,
+                            model_state=model.state_dict(),
+                            optimizer_state=optimizer.state_dict(),
+                            scheduler_state=scheduler.state_dict(),
+                            effective_config=OmegaConf.to_container(cfg, resolve=True),
+                        )
+                        save_checkpoint(logger.output_dir / "checkpoints/latest.pt", saved)
                     if should_stop:
                         break
                 if should_stop:
                     break
-            export_encoder(saved, Path(cfg.workspace.output_dir) / "encoder.pt")
-            print(f"[{type(model).__name__}] Saved raw encoder.pt and checkpoints/latest.pt at epoch={epoch}, step={step}/{total}")
+            export_encoder(saved, logger.output_dir / "encoder.pt")
+            print(f"[{type(model).__name__}] Saved encoder.pt and checkpoints/latest.pt "
+                  f"at epoch={epoch}, step={step}/{total}")
+    finally:
+        close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():
@@ -315,7 +273,7 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False, mmap=True)
+    checkpoint = load_checkpoint(args.checkpoint)
     export_encoder(checkpoint, args.output)
 
 

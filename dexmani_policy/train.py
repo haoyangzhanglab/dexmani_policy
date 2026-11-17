@@ -12,21 +12,19 @@ from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import set_project_root
-from dexmani_policy.common.normalizer import (
-    normalization_feature_shapes,
-    validate_normalizer_state,
-)
+from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.training.common.config import (
+from dexmani_policy.training.config import (
     assemble_policy_config,
     prepare_training,
     register_resolvers,
     validate_config,
     validate_normalization,
 )
-from dexmani_policy.training.common.data import (
+from dexmani_policy.training.data import (
     build_dataset,
-    fit_normalizer,
+    fit_action_normalizer,
+    fit_observation_normalizer,
     record_data_processing,
 )
 from dexmani_policy.training.trainer import PolicyTrainer
@@ -72,11 +70,16 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
             source = cfg.initialization.encoder
             if source is not None:
                 payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
-                encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
+                encoder = (
+                    model.obs_encoder.pc_encoder if method == "afro"
+                    else model.obs_encoder.interaction_encoder
+                )
                 encoder.load_state_dict(payload["encoder_state"], strict=True)
                 pretrained_state = payload["normalizer_state"]
-                inherited_fields = (("point_cloud",) if method == "afro" else
-                                    ("hand_pointcloud", "object_pointcloud", "joint_state"))
+                inherited_fields = (
+                    ("point_cloud",) if method == "afro"
+                    else ("hand_pointcloud", "object_pointcloud", "joint_state")
+                )
                 with open_dict(cfg.normalization):
                     for key in inherited_fields:
                         cfg.normalization[key] = payload["normalization"][key]
@@ -86,10 +89,12 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
     feature_shapes = normalization_feature_shapes(field_dims, cfg.normalization)
     model.configure_normalizer(field_dims, feature_shapes)
     if checkpoint is None:
-        fit_normalizer(
-            dataset, model.normalizer, feature_shapes, initial_state=pretrained_state,
-            inherited_fields=inherited_fields, hand_affine=hand_affine,
+        observation_fields = [key for key in feature_shapes if key != "action"]
+        fit_observation_normalizer(
+            dataset, model.normalizer, observation_fields, initial_state=pretrained_state,
+            inherited_fields=inherited_fields,
         )
+        fit_action_normalizer(dataset, model.normalizer, hand_affine=hand_affine)
         print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
         if method == "dexlatent":
             model.fit_latent_normalizer(dataset)
@@ -98,7 +103,7 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
         model.load_state_dict(checkpoint.model_state, strict=True, assign=True)
     model.to(device=cfg.training.device, dtype=torch.float32)
     if checkpoint is not None:
-        validate_normalizer_state(model.normalizer)
+        model.normalizer.validate()
     return model
 
 
@@ -133,10 +138,9 @@ def build_trainer(cfg, *, checkpoint=None):
                 if tactile._target_ != saved_tactile["_target_"]:
                     raise ValueError("Tactile encoder differs from initialization policy")
             cfg.initialization.policy = None
+    validate_config(cfg)
     if checkpoint is None:
         prepare_training(cfg)
-    else:
-        validate_config(cfg)
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)

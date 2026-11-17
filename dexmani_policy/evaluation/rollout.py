@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 from hydra.utils import get_class
 
-from dexmani_policy.common.checkpoint import restore_policy, load_checkpoint
+from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
-from dexmani_policy.common.inference import resolve_inference_settings
+from dexmani_policy.common.inference import resolve_inference_settings, restore_policy
 from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.evaluation.metrics import summarize_episodes

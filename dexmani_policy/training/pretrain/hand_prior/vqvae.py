@@ -18,10 +18,11 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
-from dexmani_policy.datasets.split import split_episodes
-from dexmani_policy.training.common.config import load_config
-from dexmani_policy.training.common.optimization import build_scheduler
+from dexmani_policy.datasets.episode_store import EpisodeStore
+from dexmani_policy.datasets.pretrain.hand import load_hand_array
+from dexmani_policy.datasets.split import format_split_summary, split_episodes
+from dexmani_policy.training.config import check_fresh_output, load_config
+from dexmani_policy.training.optimization import build_scheduler, clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
 logger = logging.getLogger(__name__)
@@ -32,21 +33,8 @@ def codebook_chunk_size(num_codes: int) -> int:
     return min(4096, max(1, (16 * 1024 * 1024) // (num_codes * 4)))
 
 
-def load_hand_array(buffer, episode_mask):
-    count = np.diff(np.r_[0, buffer.episode_ends])[episode_mask].sum()
-    values = np.empty((count, 12), dtype=np.float32)
-    cursor = 0
-    for start, chunk in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=episode_mask):
-        check_finite(buffer, "action", start, chunk, columns=slice(7, 19))
-        values[cursor:cursor + len(chunk)] = chunk
-        cursor += len(chunk)
-    return values
-
-
 def prepare_hand_data(cfg):
     buffer = EpisodeStore(cfg.dataset.zarr_path, keys=["action"])
-    if buffer["action"].shape[1:] != (19,):
-        raise ValueError("VQ pretraining requires action shape [T,19]")
     train, val = split_episodes(
         buffer.episode_groups, seed=cfg.dataset.seed,
         val_episodes=cfg.dataset.val_episodes, max_train_episodes=cfg.dataset.max_train_episodes,
@@ -58,10 +46,7 @@ def prepare_hand_data(cfg):
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)))
     cfg.dataset.zarr_path = buffer.path
     logger.info(
-        "VQ source groups/segments: total=%d/%d train=%d/%d val=%d/%d unused=%d/%d; train frames=%d",
-        buffer.count_groups(), buffer.n_episodes, buffer.count_groups(train), train.sum(),
-        buffer.count_groups(val), val.sum(), buffer.count_groups(~(train | val)),
-        (~(train | val)).sum(), len(train_hand),
+        "VQ %s; train frames=%d", format_split_summary(buffer, train, val), len(train_hand),
     )
     logger.info("Hand normalization: fitted from train episodes only")
     train_hand = normalizer["hand"].normalize(train_hand).numpy()
@@ -97,10 +82,7 @@ def train(cfg):
     if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
     output_dir = Path(cfg.workspace.output_dir).expanduser()
-    for name in ("config.yaml", "metrics.jsonl", "checkpoints", "codebook.npz"):
-        path = output_dir / name
-        if path.exists():
-            raise FileExistsError(f"VQ training output already exists: {path}")
+    check_fresh_output(output_dir, "codebook.npz")
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir()
@@ -165,12 +147,10 @@ def train(cfg):
             recon_loss, commitment_loss, recon_mse = vqvae(batch)
             total_loss = recipe.enc_loss_weight * recon_loss + recipe.vq_loss_weight * commitment_loss
             total_loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                vqvae.parameters(), recipe.max_grad_norm or float("inf"), error_if_nonfinite=False
+            clip_gradients(
+                vqvae.parameters(), torch.isfinite(total_loss.detach()),
+                recipe.max_grad_norm, step=scheduler.last_epoch,
             )
-            # Combine the checks to synchronize CUDA only once per update.
-            if not (torch.isfinite(total_loss.detach()) & torch.isfinite(grad_norm)):
-                raise FloatingPointError("Nonfinite VQ training loss or gradient norm")
             lr = optimizer.param_groups[0]["lr"]
             optimizer.step()
             scheduler.step()

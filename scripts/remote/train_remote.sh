@@ -33,7 +33,7 @@ done
 SESSION="dex_$(date +%Y%m%d_%H%M%S)_${RANDOM}_${RANDOM}"
 SOURCE="${REPO%/}/outputs/remote_sources/$SESSION"
 if $RESUME; then
-    COMMAND=(-u -m dexmani_policy.training.common.resume --run "$RUN" "$@" --device cuda:0)
+    COMMAND=(-u -m dexmani_policy.training.resume --run "$RUN" "$@" --device cuda:0)
 else
     CONFIG="${1:?Specify one fresh method config}"
     shift

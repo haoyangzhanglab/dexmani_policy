@@ -3,6 +3,13 @@ import numpy as np
 from dexmani_policy.common.config import positive_int
 
 
+def format_split_summary(store, train_mask, val_mask):
+    parts = [f"source groups={store.count_groups():,}, segments={store.n_episodes:,}"]
+    for name, mask in (("train", train_mask), ("val", val_mask), ("unused", ~(train_mask | val_mask))):
+        parts.append(f"{name} groups={store.count_groups(mask):,}/segments={int(mask.sum()):,}")
+    return "; ".join(parts)
+
+
 def split_episodes(
     episode_groups,
     *,

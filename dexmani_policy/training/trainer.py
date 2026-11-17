@@ -1,7 +1,5 @@
 import copy
-import os
-import signal
-from typing import Any, cast
+from typing import Any
 
 import hydra
 import torch
@@ -9,19 +7,18 @@ from omegaconf import OmegaConf
 from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
-from dexmani_policy.common.checkpoint import (
-    Checkpoint, policy_state_dict, save_checkpoint,
-)
+from dexmani_policy.common.checkpoint import Checkpoint, policy_state_dict, save_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader
-from dexmani_policy.training.common.logging import (
+from dexmani_policy.training.data import build_train_loader, close_data_loader
+from dexmani_policy.training.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
-from dexmani_policy.training.common.optimization import build_optimizer, build_scheduler
-from dexmani_policy.training.common import training_signal_handlers
+from dexmani_policy.training.optimization import (
+    build_optimizer, build_scheduler, clip_gradients, restore_optimizer,
+)
+from dexmani_policy.training.runtime import close_resources, training_signals
 
 
 class PolicyTrainer:
@@ -58,7 +55,7 @@ class PolicyTrainer:
                 raise ValueError("Resume checkpoint is missing EMA state")
             ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
             ema_model.to(device=device, dtype=torch.float32)
-            validate_normalizer_state(ema_model.normalizer)
+            ema_model.normalizer.validate()
         if ema_model is not None:
             # Bind current Parameters only after assignment and device migration.
             ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
@@ -77,13 +74,7 @@ class PolicyTrainer:
         self.global_step = 0
 
         if checkpoint is not None:
-            groups, saved = self.optimizer.param_groups, checkpoint.optimizer_state["param_groups"]
-            if len(groups) != len(saved) or any(
-                a["param_names"] != b["param_names"]
-                for a, b in zip(groups, saved)
-            ):
-                raise ValueError("Optimizer parameter groups changed")
-            self.optimizer.load_state_dict(checkpoint.optimizer_state)
+            restore_optimizer(self.optimizer, checkpoint.optimizer_state)
             self.global_step = checkpoint.global_step
             if self.global_step > self.total_train_steps:
                 raise ValueError("Checkpoint global_step exceeds the training budget")
@@ -99,7 +90,6 @@ class PolicyTrainer:
             param for group in self.optimizer.param_groups for param in group["params"]
         ]
         self.last_grad_norm = None
-        self.stop_requested = False
         self.milestone_steps = {
             (pct * self.total_train_steps + 99) // 100 for pct in (20, 40, 60, 80, 100)
         }
@@ -111,7 +101,7 @@ class PolicyTrainer:
         try:
             self.logger.save_config(self.cfg)
         except BaseException:
-            self.logger.close()
+            close_resources(self.logger.close)
             raise
 
     def compile_models(self):
@@ -124,20 +114,12 @@ class PolicyTrainer:
                 model.compile_backbone(mode=mode)
 
     def close(self):
-        try:
-            close_data_loader(self.train_loader)
-        finally:
-            self.logger.close()
+        close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)
 
     def optimizer_step(self, finite_loss: torch.Tensor) -> None:
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.trainable_parameters, self.max_grad_norm or float("inf"), error_if_nonfinite=False,
-        ).detach()
-        if not (finite_loss & torch.isfinite(grad_norm)):
-            raise RuntimeError(
-                f"Non-finite loss or gradient norm at step {self.global_step}"
-            )
-        self.last_grad_norm = grad_norm
+        self.last_grad_norm = clip_gradients(
+            self.trainable_parameters, finite_loss, self.max_grad_norm, step=self.global_step,
+        )
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
@@ -173,21 +155,13 @@ class PolicyTrainer:
             ),
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
-            effective_config=cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True)),
+            effective_config=OmegaConf.to_container(self.cfg, resolve=True),
         )
         checkpoint_path = save_checkpoint(self.checkpoint_dir / f"step_{global_step:08d}.pt", checkpoint)
         with atomic_path(self.checkpoint_dir / "latest.pt") as temporary:
             temporary.unlink()
             temporary.symlink_to(checkpoint_path.name)
         print(f"Saved {checkpoint_path}")
-
-    def signal_handler(self, signum, frame):
-        signame = signal.Signals(signum).name
-        if self.stop_requested:
-            print(f"\nSecond {signame} — forcing exit.", flush=True)
-            os._exit(1)
-        print(f"\n{signame} — stopping and saving at the next update boundary.", flush=True)
-        self.stop_requested = True
 
     def log_step(self, group_metrics, pbar, *, lr, epoch):
         metrics = {
@@ -228,10 +202,9 @@ class PolicyTrainer:
             self.ema_model.eval()
 
         initial_step = self.global_step
-        self.stop_requested = False
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        with training_signal_handlers(self.signal_handler), tqdm(
+        with training_signals() as stop, tqdm(
             initial=self.global_step,
             total=self.total_train_steps,
             desc="Steps",
@@ -239,7 +212,6 @@ class PolicyTrainer:
             mininterval=5.0,
             miniters=1,
         ) as pbar:
-
             iterator = None
             try:
                 while self.global_step < stop_step:
@@ -277,7 +249,7 @@ class PolicyTrainer:
                             }
                             self.log_step(group_metrics, pbar, lr=lr, epoch=epoch)
 
-                        should_stop = self.stop_requested or self.global_step >= stop_step
+                        should_stop = stop.requested or self.global_step >= stop_step
                         if self.global_step in self.milestone_steps or should_stop:
                             self.save_checkpoint()
                         if should_stop:
@@ -286,8 +258,6 @@ class PolicyTrainer:
                         break
 
             finally:
-                try:
-                    self.model.eval()
-                finally:
-                    if iterator is not None:
-                        close_data_loader(self.train_loader, iterator)
+                close_resources(
+                    self.model.eval, lambda: close_data_loader(self.train_loader, iterator),
+                )
