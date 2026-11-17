@@ -55,8 +55,7 @@ def preprocess_point_cloud(
     training: bool = True,
 ) -> torch.Tensor:
     """Sample FP32 points, with deterministic FPS at evaluation."""
-    if pc.dtype != torch.float32:
-        pc = pc.float()
+    pc = pc.float()
     if pc.shape[1] > num_points:
         fps_config = resolve_fps_random_config(fps_random_config, training)
         pc = farthest_point_sample(pc, num_points, **fps_config)

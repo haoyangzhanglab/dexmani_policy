@@ -109,7 +109,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" -- \
   dp3 task_name=pick_apple training.seed=42
 ```
 
-脚本自动同步源码，为本次启动保留独立快照，并链接到已准备的数据和权重目录。默认通过 tmux 在后台运行，训练产物写入 `RUN`，终端输出写入日志。启动信息会打印 Source、Session 和 Log。一个实验目录同时只启动一个训练进程。
+脚本自动同步源码，排除本地缓存、构建产物和实验输出，为本次启动保留独立快照，并链接到已准备的数据和权重目录。默认通过 tmux 在后台运行，训练产物写入 `RUN`，终端输出写入日志。启动信息会打印 Source、Session 和 Log。一个实验目录同时只启动一个训练进程。
 
 ### 前台运行与 GPU 选择
 
@@ -160,11 +160,11 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
   --num-workers 4
 ```
 
-续训恢复 checkpoint 保存的训练配方与状态，不再次传入方法名或模型配置。`--` 后传续训入口的运行参数，例如 `--num-workers`；可追加 `--max-updates 100` 限制本次执行步数，不改变实验总预算。延长预算使用 `--total-steps 150000`，已完成的实验也可继续；本次数据从新一轮遍历开始，不恢复旧 batch 或 RNG。
+续训恢复 checkpoint 保存的训练配方与状态，不再次传入方法名或模型配置。`--` 后传续训入口的运行参数，例如 `--num-workers`；可追加 `--max-updates 100` 限制本次执行步数，不改变实验总预算。延长预算使用 `--total-steps 150000`，已完成的实验也可继续。续训从新一轮数据遍历开始，并按当前步数重新设置随机种子。
 
 `metrics.jsonl` 只追加指标，不修复或裁剪历史。`config.yaml` 保留初始配置快照，续训以 checkpoint 的 `effective_config` 为准。
 
-续训源码须与 checkpoint 的模型结构一致；模型参数按键名和形状严格恢复，不迁移旧模型快照。
+续训源码须与 checkpoint 的模型结构一致，模型参数按键名和形状严格恢复。
 
 需要前台续训时，在 `--` 前加入 `--fg`。源码仍由启动脚本同步，数据沿用已准备的远端目录。
 

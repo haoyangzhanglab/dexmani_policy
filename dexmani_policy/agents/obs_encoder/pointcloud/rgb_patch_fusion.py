@@ -1,10 +1,43 @@
-"""Average valid RGB samples within each point patch, then fuse with geometry."""
+"""Project RGB features onto point patches and fuse them with geometry."""
+
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .camera_projection import ImageProjection
+from .camera_projection import ImageProjection, project_to_image
+from .ops import index_points
+
+
+def project_rgb_patches(
+    obs: dict[str, torch.Tensor], points: torch.Tensor, patches: dict[str, torch.Tensor],
+    *, image_processor, rgb_encoder, sampling: Literal["center", "group_mean"],
+) -> tuple[torch.Tensor, ImageProjection]:
+    """Build the RGB feature grid and its projection for point-patch sampling."""
+    rgb, image_transform = image_processor.process_images(obs["rgb"], return_transform=True)
+    image_hw = (rgb.shape[-2], rgb.shape[-1])
+    # Sampling coordinates assume the patch grid covers the whole processed image.
+    if any(size % rgb_encoder.patch_size for size in image_hw):
+        raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
+    patch_grid = tuple(size // rgb_encoder.patch_size for size in image_hw)
+    image_grid = rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
+    sample_xyz = patches["xyz"].unsqueeze(2)
+    if sampling == "group_mean":
+        sample_xyz = index_points(points[..., :3], patches["neighbor_idx"])
+    bt = points.shape[0]
+    projection = project_to_image(
+        points=sample_xyz.flatten(1, 2),
+        intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
+        extrinsics=obs["camera_extrinsic"].reshape(bt, 3, 4),
+        image_transform=image_transform,
+        image_hw=image_hw,
+    )
+    group_shape = sample_xyz.shape[1:3]
+    return image_grid, ImageProjection(
+        projection.grid_xy.unflatten(1, group_shape),
+        projection.valid.unflatten(1, group_shape),
+    )
 
 
 class RGBPatchFusion(nn.Module):
@@ -21,16 +54,6 @@ class RGBPatchFusion(nn.Module):
         projection: ImageProjection,
     ) -> torch.Tensor:
         grid, valid = projection
-        if rgb_grid.shape[0] != geometry_tokens.shape[0]:
-            raise ValueError("RGB and geometry must have the same BT")
-        if (
-            grid.ndim != 4
-            or grid.shape[:2] != geometry_tokens.shape[:2]
-            or grid.shape[-1] != 2
-            or grid.shape[2] < 1
-            or valid.shape != grid.shape[:-1]
-        ):
-            raise ValueError("projection requires grid [BT,G,K,2] and valid [BT,G,K]")
         with torch.autocast(device_type=rgb_grid.device.type, enabled=False):
             rgb_input = rgb_grid.permute(0, 3, 1, 2).float()
             if valid.shape[2] == 1:

@@ -2,6 +2,41 @@
 
 灵巧手操作策略学习研究仓库，围绕示教数据、观测表征和动作生成，提供统一的训练与仿真评测流程。
 
+## 快速使用
+
+在仓库根目录执行以下命令。脚本默认使用名为 `policy` 的 Conda 环境：
+
+```bash
+conda create -n policy python=3.10
+conda activate policy
+```
+
+先安装与本机 CUDA 匹配的 PyTorch 2.4.1 和 torchvision 0.19.1，再安装其余依赖与本项目：
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+```
+
+点云 FPS/KNN 另需安装与 Torch/CUDA 匹配的 PyTorch3D，已验证版本为 0.7.8。仿真评测需安装 `dexmani_sim`；各策略需要的初始化权重见[预训练资源](data/README.md)。
+
+准备好 `robot_data/pick_apple_messy.zarr` 后，以 DP3 为例启动训练；新训练使用独立输出目录，续训复用同一目录：
+
+```bash
+RUN=experiments/train/dp3/pick_apple_messy/run01
+bash scripts/training/train.sh dp3 workspace.output_dir="$RUN" hydra.run.dir="$RUN"
+python -m dexmani_policy.training.common.resume --run "$RUN"
+bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episodes 10
+```
+
+使用配方配置的数据和初始化权重，快速检查训练与续训：
+
+```bash
+python -B -m dexmani_policy.test_tools.smoke_test dp3
+```
+
+默认训练 4 步、续训 2 步，`--device` 可覆盖配方设备；不指定 `--output-dir` 时自动清理产物。`--config-dir` 可加载外部目录中的配置，相对数据、权重和输出路径均相对于启动目录。
+
 ## 整体流程
 
 **`dexmani_sim` 示教 / `dexmani_real` 显式字段导出 → 本仓库训练策略 → 仿真评测 / 真机部署**
@@ -16,17 +51,7 @@
 
 仿真数据的每个 episode 独立划分；Real 数据按原始采集分组划分，连续段仍独立采样。同一采集的段不会跨 train/val；`val_episodes` 和 `max_train_episodes` 均按采集组计数，日志同时显示组数与段数。核心模块及其数据流见[项目架构](docs/项目架构.md)。
 
-本次 Real 数据格式直接要求完整的逐段 `source_episodes` 和 `source_row_ranges`，不读取旧来源格式。普通训练、续训和部署允许处理参数及合法模板变化；接触预训练仅在 `model.contact_loss_weight > 0` 时要求 1024 个固定物体点槽及共享 `geometry_sha256`，详见[观测预训练](docs/观测预训练.md)。
-
-本地链路验证使用 `PYTHONDONTWRITEBYTECODE=1 python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、处理参数变化、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。指定配方时可用 `--config-dir` 加载外部目录中的配置；smoke 工具保持启动目录，所有相对数据、权重和输出路径均相对于启动目录。
-
-回归测试覆盖相对注意力、触觉融合、RGB–Point 编码、多模态交互编码器的 Base-aligned 几何与反向传播，以及来源分组、真实 CPU checkpoint 恢复和接触监督的固定槽约束：
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q
-```
-
-需要 pytest；缺少 CUDA、PyTorch3D 或 CUDA 不支持 BF16 时，跳过对应用例。多模态集成测试使用轻量、随机初始化的 DINOv3，无需下载权重。独立触觉融合测试不依赖 PyTorch3D，覆盖 CPU/CUDA、FP16/BF16 autocast 和参数更新后的零力恒等。
+Real 数据要求完整的逐段 `source_episodes` 和 `source_row_ranges`。普通训练、续训和部署允许处理参数及合法模板变化；接触预训练仅在 `model.contact_loss_weight > 0` 时要求 1024 个固定物体点槽及共享 `geometry_sha256`，详见[观测预训练](docs/观测预训练.md)。
 
 ## 策略方向
 

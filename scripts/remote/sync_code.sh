@@ -25,10 +25,12 @@ if [[ -e "$1" ]]; then
 fi
 BASH
 rsync -azs --progress "${DRY_RUN[@]}" \
-    --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.egg-info/' \
+    --exclude='.git/' --exclude='__pycache__/' --exclude='*.py[cod]' --exclude='*.so' \
+    --exclude='build/' --exclude='dist/' --exclude='*.egg-info/' --exclude='*.egg' \
+    --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.ruff_cache/' --exclude='.mypy_cache/' \
+    --exclude='.ipynb_checkpoints/' --exclude='.DS_Store' \
     --exclude='/.agents/' --exclude='/.codex/' --exclude='/.claude/' --exclude='/.vscode/' \
     --exclude='/.aws/' --exclude='/.env*' \
-    --exclude='/.ruff_cache/' --exclude='/.mypy_cache/' --exclude='/.DS_Store' \
     --exclude='/data' --exclude='/robot_data' --exclude='/experiments' \
     --exclude='/wandb' --exclude='/_wandb' \
     --exclude='/outputs' --exclude='/logs' --exclude='/results' --exclude='/bin' \

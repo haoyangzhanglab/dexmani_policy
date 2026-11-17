@@ -68,7 +68,7 @@ class ForceTransformer(nn.Module):
         cond_embeddings = torch.cat((time_emb, self.cond_obs_emb(context)), dim=1)
         memory = self.condition_mlp(cond_embeddings + self.cond_pos_emb)
         x = input_emb + self.pos_emb
-        x = self.decoder(tgt=x, memory=memory, tgt_mask=self.causal_mask)
+        x = self.decoder(tgt=x, memory=memory, tgt_mask=self.causal_mask, tgt_is_causal=True)
         return self.head(self.ln_f(x))
 
 

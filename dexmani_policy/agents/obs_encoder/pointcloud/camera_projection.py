@@ -22,8 +22,7 @@ def pixels_to_grid(
         raise ValueError("image dimensions must be positive (height, width)")
 
     with torch.autocast(device_type=pixels.device.type, enabled=False):
-        if pixels.dtype != torch.float32:
-            pixels = pixels.float()
+        pixels = pixels.float()
         size = pixels.new_tensor((width, height))
         valid = ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1) & valid
         grid = (pixels + 0.5).div_(size).mul_(2).sub_(1)
@@ -34,27 +33,27 @@ def pixels_to_grid(
 
 @torch.no_grad()
 def project_to_image(
-    points_world: torch.Tensor,
+    points: torch.Tensor,
     intrinsics: torch.Tensor,
-    T_camera_from_world: torch.Tensor,
+    extrinsics: torch.Tensor,
     image_transform: torch.Tensor,
     image_hw: tuple[int, int],
 ) -> ImageProjection:
-    """Project world XYZ [BT,N,3] through OpenCV cameras into the processed image."""
-    if points_world.ndim != 3 or points_world.shape[-1] != 3:
-        raise ValueError("points_world must have shape [BT,N,3]")
-    bt = points_world.shape[0]
+    """Project XYZ [BT,N,3] using extrinsics from the point frame to OpenCV cameras."""
+    if points.ndim != 3 or points.shape[-1] != 3:
+        raise ValueError("points must have shape [BT,N,3]")
+    bt = points.shape[0]
     for name, value, shape in (
         ("intrinsics", intrinsics, (bt, 3, 3)),
-        ("T_camera_from_world", T_camera_from_world, (bt, 3, 4)),
+        ("extrinsics", extrinsics, (bt, 3, 4)),
         ("image_transform", image_transform, (bt, 3, 3)),
     ):
         if value.shape != shape:
             raise ValueError(f"{name} must have shape {shape}")
 
-    with torch.autocast(device_type=points_world.device.type, enabled=False):
-        points = points_world.float()
-        transform = T_camera_from_world.float()
+    with torch.autocast(device_type=points.device.type, enabled=False):
+        points = points.float()
+        transform = extrinsics.float()
         camera_intrinsics = intrinsics.float()
         image_affine = image_transform.float()
         # Explicit FP32 products avoid TF32 rounding at image boundaries.

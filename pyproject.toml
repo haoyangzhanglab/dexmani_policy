@@ -14,18 +14,14 @@ dependencies = [
     "omegaconf",
     "diffusers",
     "zarr>=2.18,<3",
-    "numcodecs",
     "tqdm",
     "transformers",
     "timm>=1.0.22,<1.1",
     "safetensors",
-    "accelerate",
-    "tokenizers",
     "huggingface-hub",
     "peft",
     "wandb",
     "imageio-ffmpeg",
-    "pyyaml",
 ]
 
 [project.optional-dependencies]

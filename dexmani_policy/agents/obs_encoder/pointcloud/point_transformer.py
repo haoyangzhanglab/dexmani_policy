@@ -28,11 +28,12 @@ class LocalGeometryEmbedding(nn.Module):
         self.context_mlp = build_mlp([2 * local_hidden_dim, local_hidden_dim, local_hidden_dim])
         self.projection = nn.Linear(local_hidden_dim, channels)
 
-    def forward(self, relative_xyz: torch.Tensor, attributes: torch.Tensor) -> torch.Tensor:
-        points = torch.cat(
-            (relative_xyz.float() / self.geometry_scale, attributes.float()), dim=-1,
-        )
-        features = self.point_mlp(points.to(self.point_mlp[0].weight.dtype))
+    def forward(
+        self, points: torch.Tensor, centers: torch.Tensor, neighbors: torch.Tensor,
+    ) -> torch.Tensor:
+        grouped_points = index_points(points, neighbors)
+        grouped_points[..., :3].sub_(centers.unsqueeze(2)).div_(self.geometry_scale)
+        features = self.point_mlp(grouped_points.to(self.point_mlp[0].weight.dtype))
         context = features.amax(dim=2, keepdim=True)
         features = torch.cat((features, context.expand_as(features)), dim=-1)
         features = self.context_mlp(features)
@@ -94,10 +95,7 @@ class LocalPatchEncoder(nn.Module):
                 self.training,
             )
 
-        grouped_points = index_points(points, neighbors)
-        relative_xyz = grouped_points[..., :3] - centers.unsqueeze(2)
-        attributes = grouped_points[..., 3:]
-        tokens = self.geometry_embedding(relative_xyz, attributes)
+        tokens = self.geometry_embedding(points, centers, neighbors)
         # Preserve absolute metric position alongside relative geometry.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)

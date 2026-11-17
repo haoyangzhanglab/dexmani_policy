@@ -1,4 +1,4 @@
-# Validated policy Python 3.10 environment pins; pyproject.toml lists dependencies.
+# Validated policy Python 3.10 environment pins; pyproject.toml lists direct dependencies.
 # Install Torch/torchvision for your CUDA runtime first; these pins
 # accept the matching +cu124 builds. PyTorch3D is a separate compiled backend.
 torch==2.4.1

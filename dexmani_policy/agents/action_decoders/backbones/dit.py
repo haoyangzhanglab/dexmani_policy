@@ -4,7 +4,6 @@ Reference: huggingface/lerobot at 45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6,
 src/lerobot/policies/smolvla/{modeling_smolvla,smolvlm_with_expert}.py.
 Each layer projects fixed observation features directly to expert K/V. Context
 already carries spatial/type information; only frame embeddings are added here.
-This is a from-scratch backbone, not checkpoint-compatible with SmolVLA.
 Time and velocity follow the calling decoder's convention.
 """
 

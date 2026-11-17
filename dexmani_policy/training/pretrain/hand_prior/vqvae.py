@@ -164,12 +164,13 @@ def train(cfg):
             optimizer.zero_grad(set_to_none=True)
             recon_loss, commitment_loss, recon_mse = vqvae(batch)
             total_loss = recipe.enc_loss_weight * recon_loss + recipe.vq_loss_weight * commitment_loss
-            if not torch.isfinite(total_loss):
-                raise FloatingPointError("Nonfinite VQ training loss")
             total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                vqvae.parameters(), recipe.max_grad_norm or float("inf"), error_if_nonfinite=True
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                vqvae.parameters(), recipe.max_grad_norm or float("inf"), error_if_nonfinite=False
             )
+            # Combine the checks to synchronize CUDA only once per update.
+            if not (torch.isfinite(total_loss.detach()) & torch.isfinite(grad_norm)):
+                raise FloatingPointError("Nonfinite VQ training loss or gradient norm")
             lr = optimizer.param_groups[0]["lr"]
             optimizer.step()
             scheduler.step()

@@ -7,10 +7,9 @@ from typing import Literal
 import torch
 from torch import nn
 
-from .pointcloud.camera_projection import ImageProjection, project_to_image
-from .pointcloud.ops import index_points, preprocess_point_cloud
+from .pointcloud.ops import preprocess_point_cloud
 from .pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
-from .pointcloud.rgb_patch_fusion import RGBPatchFusion
+from .pointcloud.rgb_patch_fusion import RGBPatchFusion, project_rgb_patches
 from .proprio import StateEncoder
 from .rgb.build import build_rgb_encoder
 
@@ -82,45 +81,15 @@ class RGBPointObservationEncoder(nn.Module):
         }
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        bt = obs["point_cloud"].shape[0]
-        if obs["rgb"].ndim != 4 or obs["rgb"].shape[:2] != (bt, 3):
-            raise ValueError("rgb must have shape [BT,3,H,W]")
-        if obs["joint_state"].shape[0] != bt:
-            raise ValueError("joint_state and point_cloud must have the same BT")
-        for name, width in (("camera_intrinsic", 9), ("camera_extrinsic", 12)):
-            if obs[name].shape != (bt, width):
-                raise ValueError(f"{name} must have shape [BT,{width}]")
-        if bt % self.n_obs_steps:
-            raise ValueError("BT must be divisible by n_obs_steps")
-
         points = preprocess_point_cloud(
             obs["point_cloud"], self.num_points,
             self.patch_encoder.fps_random_config, training=self.training,
         )
         patches = self.patch_encoder(points)
 
-        rgb, image_transform = self.image_processor.process_images(obs["rgb"], return_transform=True)
-        image_hw = (rgb.shape[-2], rgb.shape[-1])
-        # Sampling coordinates assume the patch grid covers the whole processed image.
-        if any(size % self.rgb_encoder.patch_size for size in image_hw):
-            raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
-        patch_grid = tuple(size // self.rgb_encoder.patch_size for size in image_hw)
-        image_grid = self.rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
-        sample_xyz = patches["xyz"].unsqueeze(2)
-        if self.rgb_semantic_sampling == "group_mean":
-            sample_xyz = index_points(points[..., :3], patches["neighbor_idx"])
-        projection = project_to_image(
-            points_world=sample_xyz.flatten(1, 2),
-            intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
-            T_camera_from_world=obs["camera_extrinsic"].reshape(bt, 3, 4),
-            image_transform=image_transform,
-            image_hw=image_hw,
-        )
-
-        group_shape = sample_xyz.shape[1:3]
-        projection = ImageProjection(
-            projection.grid_xy.unflatten(1, group_shape),
-            projection.valid.unflatten(1, group_shape),
+        image_grid, projection = project_rgb_patches(
+            obs, points, patches, image_processor=self.image_processor,
+            rgb_encoder=self.rgb_encoder, sampling=self.rgb_semantic_sampling,
         )
         tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
         spatial = self.spatial_encoder(tokens, patches["xyz"])
