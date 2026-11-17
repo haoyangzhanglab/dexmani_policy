@@ -12,12 +12,16 @@ from dexmani_policy.common.image_util import resize_image_transform
 
 
 @pytest.fixture(params=[("cpu", False), ("cuda", True)])
-def projection_device(request, monkeypatch):
+def projection_device(request):
     device, tf32 = request.param
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", tf32)
-    return device
+    original_tf32 = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+        yield device
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = original_tf32
 
 
 @pytest.mark.parametrize("resize", [False, True])
