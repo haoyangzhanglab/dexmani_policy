@@ -97,7 +97,7 @@ def export_encoder(checkpoint, output_path):
         }
         for name in ("encoder", "normalizer")
     }
-    payload["data_processing"] = checkpoint["effective_config"]["data_processing"]
+    payload["data_processing"] = checkpoint["effective_config"].get("data_processing")
     payload["normalization"] = dict(normalization)
     payload["global_step"] = checkpoint["global_step"]
     if not payload["encoder_state"]:
@@ -183,7 +183,12 @@ def train(method, model_class, argv=None):
 
     set_seed(cfg.training.seed + (checkpoint["global_step"] if resuming else 0))
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    record_data_processing(cfg, dataset, resuming=resuming)
+    if method == "cordvip" and cfg.model.contact_loss_weight > 0 and resuming:
+        previous = checkpoint["effective_config"].get("data_processing") or {}
+        geometry_sha256 = previous.get("object_pointcloud", {}).get("geometry_sha256")
+        if dataset.geometry_sha256 != geometry_sha256:
+            raise ValueError("Contact supervision resume requires the same object geometry_sha256")
+    record_data_processing(cfg, dataset)
     cfg.zarr_path = dataset.episode_store.path
     cfg.dataset.zarr_path = cfg.zarr_path
     print(f"[Dataset] {dataset.training_summary()}")

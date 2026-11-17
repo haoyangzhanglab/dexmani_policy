@@ -34,9 +34,10 @@ class CordViP(nn.Module):
         self.hand_head = build_mlp(
             [n_obs_steps * (visual_dim + arm_dim), 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
         )
-        self.contact_head = build_mlp(
-            [visual_dim, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
-        )
+        if contact_loss_weight > 0:
+            self.contact_head = build_mlp(
+                [visual_dim, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
+            )
         self.contact_loss_weight = contact_loss_weight
         self.arm_loss_weight = arm_loss_weight
         self.hand_loss_weight = hand_loss_weight

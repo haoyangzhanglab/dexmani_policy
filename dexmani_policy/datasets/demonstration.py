@@ -89,7 +89,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 raise ValueError("Calibrated RGB/point clouds cannot use independent XYZ coordinate noise")
 
         self.train_mask, self.val_mask = split_episodes(
-            self.episode_store.n_episodes, val_episodes=val_episodes,
+            self.episode_store.episode_groups, val_episodes=val_episodes,
             seed=seed, max_train_episodes=max_train_episodes,
         )
         if len(self.episode_store[action_key].shape) != 2:
@@ -119,11 +119,13 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         return self.obs_horizon - 1
 
     def training_summary(self):
+        store = self.episode_store
+        unused = ~(self.train_mask | self.val_mask)
         return (
-            f"{Path(self.episode_store.path).name}: total episodes={self.episode_store.n_episodes:,}, "
-            f"train episodes={int(self.train_mask.sum()):,}, "
-            f"val episodes={int(self.val_mask.sum()):,} (留出但未验证), "
-            f"unused episodes={int((~(self.train_mask | self.val_mask)).sum()):,}, train windows={len(self):,}, "
+            f"{Path(store.path).name}: source groups={store.count_groups():,}, segments={store.n_episodes:,}; "
+            f"train groups={store.count_groups(self.train_mask):,}/segments={int(self.train_mask.sum()):,}, "
+            f"val groups={store.count_groups(self.val_mask):,}/segments={int(self.val_mask.sum()):,} (留出但未验证), "
+            f"unused groups={store.count_groups(unused):,}/segments={int(unused.sum()):,}, train windows={len(self):,}, "
             f"fields={', '.join(self.data_keys)}"
         )
 
