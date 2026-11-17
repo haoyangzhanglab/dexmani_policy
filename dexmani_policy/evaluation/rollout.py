@@ -3,6 +3,7 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hydra.utils import get_class
 
@@ -18,8 +19,8 @@ from dexmani_policy.evaluation.seeds import (
 )
 
 
-def get_runner_class(options):
-    return get_class(options.get("_target_", "dexmani_policy.env_runner.sim_runner.SimRunner"))
+if TYPE_CHECKING:
+    from dexmani_policy.env_runner.sim_runner import SimRunner
 
 
 def create_run_directory(root, directory=None):
@@ -44,7 +45,8 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     state_dict = loaded.ema_model_state if weights == "ema" else loaded.model_state
     global_step = loaded.global_step
     del loaded
-    runner_class = get_runner_class(cfg["env_runner"])
+    options = dict(cfg["env_runner"])
+    runner_class: type[SimRunner] = get_class(options.pop("_target_"))
     if seeds is None:
         seeds, _ = split_evaluation_seeds(runner_class.load_seed_pool(cfg["env_runner"]["task_name"]), seed, episodes)
     else:
@@ -52,8 +54,6 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
         if not seeds:
             raise ValueError("Evaluation seeds must be nonempty")
         validate_evaluation_seed(seed)
-    options = dict(cfg["env_runner"])
-    options.pop("_target_", None)
     directory = create_run_directory(checkpoint.parent.parent / "eval", output_dir)
     path = directory / "result_details.json"
     render_mode = (options.get("env_kwargs") or {}).get("render_mode")

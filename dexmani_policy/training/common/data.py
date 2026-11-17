@@ -1,4 +1,5 @@
 from math import isfinite, prod
+from typing import cast
 
 import hydra
 import torch
@@ -117,7 +118,7 @@ def record_data_processing(cfg, dataset, *, resuming=False):
         else attrs.get("data_processing", {})
     )
     if resuming:
-        previous = OmegaConf.to_container(cfg.data_processing, resolve=True)
+        previous = cast(dict, OmegaConf.to_container(cfg.data_processing, resolve=True))
         for name in dataset.sensor_modalities:
             if metadata.get(name) != previous.get(name):
                 raise ValueError(f"Resume data_processing mismatch: {name}")

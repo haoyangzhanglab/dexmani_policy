@@ -17,11 +17,6 @@ def load_policy(path, *, weights=None, inference_steps=None, device="cuda:0", se
         path = (path / "checkpoints/latest.pt").resolve()
     checkpoint = load_checkpoint(path)
     cfg = checkpoint.effective_config
-    if "data_processing" not in cfg:
-        raise ValueError(
-            "Checkpoint is missing required data_processing metadata. "
-            "Please retrain with the current code."
-        )
     weights, steps = resolve_inference_settings(cfg, weights=weights, inference_steps=inference_steps)
     state = checkpoint.ema_model_state if weights == "ema" else checkpoint.model_state
     del checkpoint

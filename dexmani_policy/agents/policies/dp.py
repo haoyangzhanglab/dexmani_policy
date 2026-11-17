@@ -21,10 +21,10 @@ class DPEncoder(nn.Module):
         self,
         rgb_backbone_name: Literal["resnet", "dino", "dinov3", "siglip"],
         state_dim: int,
+        state_key: str,
         n_obs_steps: int,
         state_out_dim: int = 64,
         rgb_backbone_config: dict | None = None,
-        state_key: str = "joint_state",
     ) -> None:
         super().__init__()
         self.rgb_encoder, self.image_processor = build_rgb_encoder(
@@ -66,6 +66,7 @@ class DP(Policy):
         action_dim: int,
         rgb_backbone_name: Literal["resnet", "dino", "dinov3", "siglip"],
         state_dim: int,
+        state_key: str,
         state_out_dim: int = 64,
         rgb_backbone_config: dict | None = None,
         diffusion_step_embed_dim: int = 256,
@@ -77,16 +78,15 @@ class DP(Policy):
         prediction_type: str = "sample",
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
-        state_key: str = "joint_state",
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
         obs_encoder = DPEncoder(
             rgb_backbone_name,
             state_dim,
+            state_key,
             n_obs_steps,
             state_out_dim,
             rgb_backbone_config=rgb_backbone_config,
-            state_key=state_key,
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,

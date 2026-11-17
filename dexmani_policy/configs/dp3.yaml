@@ -38,6 +38,7 @@ agent:
   encoder_type: dp3  # dp3：MLP；idp3：Conv。
   pc_dim: 6
   pc_out_dim: 128
+  state_key: joint_state
   state_dim: 19
   num_points: 1024
 

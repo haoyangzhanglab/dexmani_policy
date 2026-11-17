@@ -47,6 +47,7 @@ eval:
   use_ema: ${training.use_ema}
 
 env_runner:
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   env_kwargs:
     randomize_model_id: false
     randomize_table_height: true

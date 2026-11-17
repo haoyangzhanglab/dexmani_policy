@@ -18,14 +18,16 @@ def register_resolvers():
     OmegaConf.register_new_resolver("run_id", lambda: LAUNCH_ID, replace=True)
 
 
-def load_config(config, overrides=()):
+def load_config(config, overrides=(), *, config_dir=None):
     path = Path(config)
     if path.is_absolute() or ".." in path.parts or not str(config) or str(config).startswith("~"):
-        raise ValueError("Config must be a name or relative path under dexmani_policy/configs")
+        raise ValueError("Config must be a name or relative path under the config directory")
     name = path.with_suffix("").as_posix() if path.suffix == ".yaml" else path.as_posix()
     register_resolvers()
-    with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
-        cfg = hydra.compose(config_name=name, overrides=list(overrides))
+    directory = CONFIG_ROOT if config_dir is None else Path(config_dir).expanduser().resolve()
+    search = [] if config_dir is None else [f'hydra.searchpath=["file://{CONFIG_ROOT}"]']
+    with hydra.initialize_config_dir(config_dir=str(directory), version_base=None):
+        cfg = hydra.compose(config_name=name, overrides=[*search, *overrides])
     return assemble_policy_config(cfg) if "policy_name" in cfg else cfg
 
 

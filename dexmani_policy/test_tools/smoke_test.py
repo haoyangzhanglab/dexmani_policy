@@ -11,7 +11,7 @@ import torch
 import zarr
 
 from dexmani_policy.common.checkpoint import load_checkpoint
-from dexmani_policy.common.config import positive_int, set_project_root
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 from dexmani_policy.deployment import load_policy
 from dexmani_policy.train import run_training
@@ -169,18 +169,18 @@ def check_cordvip(root, device, *, max_updates, resume_updates):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", nargs="?", help="Recipe name; omit for synthetic DP3/CordViP checks")
+    parser.add_argument("--config-dir", type=Path, help="External recipe directory (requires config)")
     parser.add_argument("--override", action="append", default=[], help="Repeatable Hydra override (requires config)")
     parser.add_argument("--device", help="Defaults to CPU for synthetic checks, or the recipe device")
     parser.add_argument("--output-dir", type=Path, help="Keep test artifacts here instead of a temporary directory")
     parser.add_argument("--max-updates", type=int, help="Fresh updates: 2 for synthetic checks, 4 for a recipe")
     parser.add_argument("--resume-updates", type=int, default=2)
     args = parser.parse_args(argv)
-    if args.config is None and args.override:
-        parser.error("--override requires a config name")
+    if args.config is None and (args.override or args.config_dir is not None):
+        parser.error("--config-dir and --override require a config name")
     max_updates = args.max_updates if args.max_updates is not None else (4 if args.config else 2)
     positive_int(max_updates, "max_updates")
     positive_int(args.resume_updates, "resume_updates")
-    set_project_root()
     output = nullcontext(args.output_dir) if args.output_dir is not None else tempfile.TemporaryDirectory(prefix="dexmani-smoke-")
     with output as directory:
         directory = Path(directory).expanduser().resolve()
@@ -190,7 +190,7 @@ def main(argv=None):
             check_cordvip(directory / "cordvip", args.device or "cpu",
                           max_updates=max_updates, resume_updates=args.resume_updates)
         else:
-            cfg = load_config(args.config, args.override)
+            cfg = load_config(args.config, args.override, config_dir=args.config_dir)
             if args.device is not None:
                 cfg.training.device = args.device
             step, final = run_smoke(cfg, directory, max_updates=max_updates, resume_updates=args.resume_updates)

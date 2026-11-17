@@ -16,9 +16,9 @@
 
 当前流程面向仿真示教训练与仿真评测。核心模块及其数据流见[项目架构](docs/项目架构.md)。
 
-本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。
+本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。指定配方时可用 `--config-dir` 加载外部目录中的配置；smoke 工具保持启动目录，所有相对数据、权重和输出路径均相对于启动目录。
 
-回归测试覆盖相对注意力、触觉融合、RGB–Point 编码、多模态交互编码器的 Base-aligned 几何与反向传播，以及部署 Checkpoint 元数据契约：
+回归测试覆盖相对注意力、触觉融合、RGB–Point 编码、多模态交互编码器的 Base-aligned 几何与反向传播，以及训练数据处理记录与恢复一致性：
 
 ```bash
 python -m pytest -q

@@ -22,11 +22,11 @@ class DP3Encoder(nn.Module):
         pc_dim: int,
         pc_out_dim: int,
         state_dim: int,
+        state_key: str,
         num_points: int,
         n_obs_steps: int,
         state_out_dim: int = 64,
         fps_random_config: dict | None = None,
-        state_key: str = "joint_state",
     ) -> None:
         super().__init__()
         encoder_cls: type[PointNet] | type[MultiStagePointNet]
@@ -75,6 +75,7 @@ class DP3(Policy):
         pc_dim: int,
         pc_out_dim: int,
         state_dim: int,
+        state_key: str,
         num_points: int,
         state_out_dim: int = 64,
         fps_random_config: dict | None = None,
@@ -87,7 +88,6 @@ class DP3(Policy):
         prediction_type: str = "sample",
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
-        state_key: str = "joint_state",
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
         obs_encoder = DP3Encoder(
@@ -95,11 +95,11 @@ class DP3(Policy):
             pc_dim,
             pc_out_dim,
             state_dim,
+            state_key,
             num_points,
             n_obs_steps,
             state_out_dim,
             fps_random_config=fps_random_config,
-            state_key=state_key,
         )
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
