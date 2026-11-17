@@ -48,7 +48,7 @@ def prepare_hand_data(cfg):
     if buffer["action"].shape[1:] != (19,):
         raise ValueError("VQ pretraining requires action shape [T,19]")
     train, val = split_episodes(
-        buffer.n_episodes, seed=cfg.dataset.seed,
+        buffer.episode_groups, seed=cfg.dataset.seed,
         val_episodes=cfg.dataset.val_episodes, max_train_episodes=cfg.dataset.max_train_episodes,
     )
 
@@ -57,8 +57,12 @@ def prepare_hand_data(cfg):
     normalizer = LinearNormalizer()
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)))
     cfg.dataset.zarr_path = buffer.path
-    logger.info("VQ episodes: total=%d train=%d val=%d unused=%d; train frames=%d",
-                buffer.n_episodes, train.sum(), val.sum(), (~(train | val)).sum(), len(train_hand))
+    logger.info(
+        "VQ source groups/segments: total=%d/%d train=%d/%d val=%d/%d unused=%d/%d; train frames=%d",
+        buffer.count_groups(), buffer.n_episodes, buffer.count_groups(train), train.sum(),
+        buffer.count_groups(val), val.sum(), buffer.count_groups(~(train | val)),
+        (~(train | val)).sum(), len(train_hand),
+    )
     logger.info("Hand normalization: fitted from train episodes only")
     train_hand = normalizer["hand"].normalize(train_hand).numpy()
     if val_hand is not None:

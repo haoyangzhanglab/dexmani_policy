@@ -58,7 +58,10 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int, re
 
 def make_source(path):
     source = zarr.open_group(str(path), mode="w-")
-    source.attrs.update(task_name="pick_apple_messy", dt=0.05, action_space="joint")
+    source.attrs.update(
+        task_name="pick_apple_messy", dt=0.05, action_space="joint",
+        data_processing={"point_cloud": {"num_points": 8, "voxel_size": 0.01}},
+    )
     source.create_dataset("meta/episode_ends", data=np.array([6, 12], dtype=np.int64))
     rng = np.random.default_rng(11)
     for key, shape in (
@@ -99,6 +102,7 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     source = make_source(root / "source.zarr")
     replacement_path = root / "replacement.zarr"
     replacement = make_source(replacement_path)
+    replacement.attrs["data_processing"] = {"point_cloud": {"num_points": 8, "voxel_size": 0.02}}
     replacement.create_dataset("meta/episode_ends", data=np.array([3, 6, 9, 12]), overwrite=True)
     replacement["data/action"][:] += 1
     cfg = load_config("dp3", [
@@ -116,6 +120,9 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
     run = root / "run"
     step, final = run_smoke(cfg, run, max_updates=max_updates, resume_updates=resume_updates,
                            resume_zarr_path=replacement_path)
+    saved = load_checkpoint(run / "checkpoints/latest.pt")
+    assert saved.effective_config["data_processing"] == replacement.attrs["data_processing"]
+    del saved
     print(f"PASS training/save/resume: fresh={step}, resumed={final}", flush=True)
 
     observation = {key: source[f"data/{key}"][:2] for key in cfg.dataset.sensor_modalities}
@@ -138,12 +145,20 @@ def check_synthetic(root, device, *, max_updates, resume_updates):
 def check_cordvip(root, device, *, max_updates, resume_updates):
     root.mkdir()
     source = make_source(root / "source.zarr")
+    source.attrs["data_processing"] = {
+        "object_pointcloud": {"geometry_sha256": "a" * 64},
+        "hand_pointcloud": {"num_points": 8},
+    }
     rng = np.random.default_rng(17)
     for key, count in (("hand_pointcloud", 8), ("object_pointcloud", 12)):
         source.create_dataset(f"data/{key}", data=rng.normal(size=(12, count, 3)))
     replacement = root / "replacement.zarr"
     shutil.copytree(root / "source.zarr", replacement)
     replaced = zarr.open_group(str(replacement), mode="a")
+    replaced.attrs["data_processing"] = {
+        "object_pointcloud": {"geometry_sha256": None},
+        "hand_pointcloud": {"num_points": 8},
+    }
     replaced["data/action"][:] += 1
     replaced["meta/episode_ends"][:] = [4, 12]
     cfg = load_config("cordvip", [

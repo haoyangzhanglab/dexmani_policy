@@ -4,7 +4,7 @@
 
 ## 整体流程
 
-**`dexmani_sim` 生成示教 → 本仓库训练策略 → `dexmani_sim` 闭环评测**
+**`dexmani_sim` 示教 / `dexmani_real` 显式字段导出 → 本仓库训练策略 → 仿真评测 / 真机部署**
 
 训练将示教轨迹组织为观测历史与动作窗口，策略编码图像、点云、机器人状态或触觉，学习生成动作序列。执行端按策略约定执行动作，再根据新观测重新预测，形成闭环。
 
@@ -14,14 +14,16 @@
 - **动作表示**：直接生成关节目标，或通过手姿码本、连续手部潜表示还原动作。
 - **学习目标**：动作模仿学习，以及观测预训练、一致性学习和未来触觉监督。
 
-当前流程面向仿真示教训练与仿真评测。核心模块及其数据流见[项目架构](docs/项目架构.md)。
+仿真数据的每个 episode 独立划分；Real 数据按原始采集分组划分，连续段仍独立采样。同一采集的段不会跨 train/val；`val_episodes` 和 `max_train_episodes` 均按采集组计数，日志同时显示组数与段数。核心模块及其数据流见[项目架构](docs/项目架构.md)。
 
-本地链路验证使用 `python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。指定配方时可用 `--config-dir` 加载外部目录中的配置；smoke 工具保持启动目录，所有相对数据、权重和输出路径均相对于启动目录。
+本次 Real 数据格式直接要求完整的逐段 `source_episodes` 和 `source_row_ranges`，不读取旧来源格式。普通训练、续训和部署允许处理参数及合法模板变化；接触预训练仅在 `model.contact_loss_weight > 0` 时要求 1024 个固定物体点槽及共享 `geometry_sha256`，详见[观测预训练](docs/观测预训练.md)。
 
-回归测试覆盖相对注意力、触觉融合、RGB–Point 编码、多模态交互编码器的 Base-aligned 几何与反向传播，以及训练数据处理记录与恢复一致性：
+本地链路验证使用 `PYTHONDONTWRITEBYTECODE=1 python -m dexmani_policy.test_tools.smoke_test --device cpu`，通过临时合成数据检查 DP3/CordViP 的数据、处理参数变化、训练、续训和部署。不指定 `--output-dir` 时自动清理验证产物。指定配方时可用 `--config-dir` 加载外部目录中的配置；smoke 工具保持启动目录，所有相对数据、权重和输出路径均相对于启动目录。
+
+回归测试覆盖相对注意力、触觉融合、RGB–Point 编码、多模态交互编码器的 Base-aligned 几何与反向传播，以及来源分组、真实 CPU checkpoint 恢复和接触监督的固定槽约束：
 
 ```bash
-python -m pytest -q
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q
 ```
 
 需要 pytest；缺少 CUDA、PyTorch3D 或 CUDA 不支持 BF16 时，跳过对应用例。多模态集成测试使用轻量、随机初始化的 DINOv3，无需下载权重。独立触觉融合测试不依赖 PyTorch3D，覆盖 CPU/CUDA、FP16/BF16 autocast 和参数更新后的零力恒等。

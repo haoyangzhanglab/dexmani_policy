@@ -11,7 +11,7 @@ class ObservationPretrainDataset(Dataset):
         self.episode_store = episode_store
         self.normalization_fields = normalization_fields
         self.train_mask, self.val_mask = split_episodes(
-            episode_store.n_episodes, seed=seed,
+            episode_store.episode_groups, seed=seed,
             val_episodes=val_episodes, max_train_episodes=max_train_episodes,
         )
         self.sampler = self.build_sampler(self.train_mask)
@@ -22,10 +22,13 @@ class ObservationPretrainDataset(Dataset):
         return len(self.sampler)
 
     def training_summary(self):
+        store = self.episode_store
+        unused = ~(self.train_mask | self.val_mask)
         return (
-            f"{self.episode_store.path}: total episodes={self.episode_store.n_episodes:,}, "
-            f"train={int(self.train_mask.sum()):,}, val={int(self.val_mask.sum()):,}, "
-            f"unused={int((~(self.train_mask | self.val_mask)).sum()):,}, "
+            f"{store.path}: source groups={store.count_groups():,}, segments={store.n_episodes:,}; "
+            f"train groups={store.count_groups(self.train_mask):,}/segments={int(self.train_mask.sum()):,}, "
+            f"val groups={store.count_groups(self.val_mask):,}/segments={int(self.val_mask.sum()):,}, "
+            f"unused groups={store.count_groups(unused):,}/segments={int(unused.sum()):,}, "
             f"train windows={len(self):,}"
         )
 

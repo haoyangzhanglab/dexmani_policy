@@ -41,6 +41,26 @@ class EpisodeStore:
                 if values.dtype.kind != "f":
                     raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
         self.episode_ends = ends.astype(np.int64, copy=False)
+        if self.attrs.get("format") == "dexmani.real.canonical":
+            sources = self.attrs.get("source_episodes")
+            if (
+                not isinstance(sources, list) or len(sources) != self.n_episodes
+                or any(not isinstance(source, str) or not source for source in sources)
+            ):
+                raise ValueError(f"{self.path}: source_episodes must identify every Real segment")
+            ranges = np.asarray(self.attrs.get("source_row_ranges"))
+            lengths = np.diff(np.r_[0, self.episode_ends])
+            if (
+                ranges.shape != (self.n_episodes, 2) or ranges.dtype.kind not in "iu"
+                or np.any(ranges[:, 0] < 0)
+                or np.any(ranges[:, 1] <= ranges[:, 0])
+                or np.any(ranges[:, 1] - ranges[:, 0] != lengths)
+            ):
+                raise ValueError(f"{self.path}: source_row_ranges must match every Real segment length")
+            self.episode_groups = sources
+        else:
+            # Current simulation stores contain independent episodes.
+            self.episode_groups = list(range(self.n_episodes))
 
     def read(self, key, rows, *, columns=None):
         arr = self[key]
@@ -65,6 +85,12 @@ class EpisodeStore:
     @property
     def n_episodes(self):
         return len(self.episode_ends)
+
+    def count_groups(self, episode_mask=None):
+        return len({
+            source for index, source in enumerate(self.episode_groups)
+            if episode_mask is None or episode_mask[index]
+        })
 
     def keys(self):
         return self.data.keys()
