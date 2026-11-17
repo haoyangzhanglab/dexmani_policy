@@ -247,6 +247,8 @@ def test_contact_geometry_generation_preserves_sources_and_summary(tmp_path, dig
     )
     source.create_dataset("meta/episode_ends", data=np.array([1, 2]))
     source.create_dataset("data/joint_state", data=np.zeros((2, 19), dtype=np.float32))
+    actions = np.arange(14, dtype=np.float32).reshape(2, 7)
+    source.create_dataset("data/action", data=actions)
     source.create_dataset("data/hand_pointcloud", data=np.stack((hand, hand + [1, 2, 3])).astype(np.float32))
     source.create_dataset("data/object_pointcloud", data=np.stack((objects, objects + [1, 2, 3])).astype(np.float32))
     output = tmp_path / "contact.zarr"
@@ -254,6 +256,7 @@ def test_contact_geometry_generation_preserves_sources_and_summary(tmp_path, dig
     result = zarr.open_group(str(output), mode="r")
     assert dict(result.attrs) == dict(source.attrs)
     np.testing.assert_array_equal(result["meta/episode_ends"], [1, 2])
+    np.testing.assert_array_equal(result["data/action"], actions)
     # For this plane and one hand point, the normal distance is exactly 0.02 m.
     distance = np.linalg.norm(objects.astype(np.float64) - hand, axis=-1)
     weighted = distance * np.exp(1 - .02 / (distance + 1e-8))
