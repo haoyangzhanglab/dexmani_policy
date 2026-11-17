@@ -36,6 +36,8 @@ class ODEPolicy(Policy):
         solver="euler", vel_scale=0.05, perturb_prob=0.5, perturb_decay=0.7,
         perturb_std=0.01, side_head=0, eps_center=True,
     ):
+        if action_dim != 19 or state_dim != 19:
+            raise ValueError("ODE requires 19D joint actions/state")
         if horizon - n_obs_steps + 1 != n_action_steps:
             raise ValueError("ODE requires horizon - n_obs_steps + 1 == n_action_steps")
 

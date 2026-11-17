@@ -12,6 +12,7 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DexLatent(Policy):
+    required_identity_fields = frozenset({"rgb", "point_cloud", "camera_intrinsic", "camera_extrinsic"})
     supported_action_keys = ("action",)
     arm_dim = 7
     decoder_action_dim = 39
@@ -95,13 +96,6 @@ class DexLatent(Policy):
     def _encode_action_parts(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         normalized = self.normalizer["action"].normalize(actions)
         return normalized[..., : self.arm_dim], self.hand_prior.encode(normalized[..., self.arm_dim :])
-
-    def fit_latent_normalizer(self, dataset) -> None:
-        latents = (
-            self._encode_action_parts(chunk)[1]
-            for chunk in dataset.iter_normalization_data("action")
-        )
-        self.normalizer.fit_field("hand_latent", latents)
 
     def _encode_actions(self, actions: torch.Tensor) -> torch.Tensor:
         arm, latent = self._encode_action_parts(actions)

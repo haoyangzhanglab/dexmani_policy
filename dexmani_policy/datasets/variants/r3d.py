@@ -6,33 +6,40 @@ AUX_EE_DIM = 9
 
 
 class R3DDataset(DemonstrationDataset):
-    def __init__(self, zarr_path, **kwargs):
-        if kwargs.get("action_key", "action") != "action":
+    def __init__(self, zarr_path, *, use_aux_ee=False, **kwargs):
+        # The base constructor reads data_keys and consumed_fields.
+        self.use_aux_ee = use_aux_ee
+        if use_aux_ee and kwargs.get("action_key", "action") != "action":
             raise ValueError("R3D auxiliary targets require joint action")
         super().__init__(zarr_path, **kwargs)
-        shape = self.episode_store["action_ee"].shape
-        if len(shape) != 2 or shape[-1] < AUX_EE_DIM:
-            raise ValueError("R3D auxiliary action_ee requires at least 9 columns")
+        if use_aux_ee:
+            shape = self.episode_store["action_ee"].shape
+            if len(shape) != 2 or shape[-1] < AUX_EE_DIM:
+                raise ValueError("R3D auxiliary action_ee requires at least 9 columns")
 
     @property
     def data_keys(self):
-        return super().data_keys + ["action_ee"]
+        return super().data_keys + (["action_ee"] if self.use_aux_ee else [])
 
     @property
     def consumed_fields(self):
-        return {**super().consumed_fields, "action_ee": slice(0, AUX_EE_DIM)}
+        fields = super().consumed_fields
+        if self.use_aux_ee:
+            fields["action_ee"] = slice(0, AUX_EE_DIM)
+        return fields
 
     @property
     def action_dim(self):
-        return super().action_dim + AUX_EE_DIM
+        return super().action_dim + (AUX_EE_DIM if self.use_aux_ee else 0)
 
     def sample_to_data(self, sample):
         data = super().sample_to_data(sample)
-        data["action"] = np.concatenate((data["action"], sample["action_ee"]), axis=-1)
+        if self.use_aux_ee:
+            data["action"] = np.concatenate((data["action"], sample["action_ee"]), axis=-1)
         return data
 
     def iter_normalization_data(self, key):
-        if key != "action":
+        if key != "action" or not self.use_aux_ee:
             yield from super().iter_normalization_data(key)
             return
         columns = self.consumed_fields["action_ee"]

@@ -22,6 +22,7 @@ dataset:
   sensor_modalities: [hand_pointcloud, object_pointcloud, joint_state]
   augmentation_cfg: null
 agent:
+  action_dim: null
   _target_: dexmani_policy.agents.policies.cordvip.CordViP
   down_dims: [512, 1024, 2048]
   diffusion_step_embed_dim: 64

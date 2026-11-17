@@ -31,11 +31,8 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
             if buffer["contact_map"].shape[1:] != (1024,):
                 raise ValueError("Contact labels must match the 1024 object point slots")
             processing = buffer.attrs.get("data_processing") or {}
-            self.geometry_sha256 = processing.get("object_pointcloud", {}).get("geometry_sha256")
-            if (
-                not isinstance(self.geometry_sha256, str) or len(self.geometry_sha256) != 64
-                or any(c not in "0123456789abcdef" for c in self.geometry_sha256)
-            ):
+            geometry = processing.get("object_pointcloud", {}).get("geometry_sha256")
+            if not isinstance(geometry, str) or not geometry:
                 raise ValueError("Contact supervision requires a shared object geometry_sha256 for fixed point slots")
         super().__init__(
             buffer, normalization_fields={

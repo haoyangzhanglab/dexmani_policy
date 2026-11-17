@@ -56,14 +56,14 @@ class ExperimentLogger:
         close_resources(*closers)
 
 
-def accumulate_metrics(totals, metrics):
+def accumulate_metrics(totals, metrics, *, weight: int) -> None:
     """Accumulate detached scalars without synchronizing the device."""
     for key, value in metrics.items():
         if torch.is_tensor(value):
             value = value.detach().reshape(()).to(dtype=torch.float64)
         else:
             value = float(value)
-        totals[key] = totals.get(key, 0.0) + value
+        totals[key] = totals.get(key, 0.0) + value * weight
 
 
 def to_log_scalars(metrics: dict[str, Any]) -> dict[str, float]:

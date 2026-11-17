@@ -12,6 +12,13 @@ def restore_optimizer(optimizer, state):
     optimizer.load_state_dict(state)
 
 
+def normalize_gradients(parameters, sample_count):
+    # Backward accumulated sum(n_i * L_i); divide before measuring or clipping.
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad.div_(sample_count)
+
+
 def clip_gradients(parameters, finite_loss, max_grad_norm=0.0, *, step):
     norm = torch.nn.utils.clip_grad_norm_(
         parameters, max_grad_norm or float("inf"), error_if_nonfinite=False,

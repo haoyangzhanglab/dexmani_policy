@@ -33,6 +33,7 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
+  action_dim: null
   clip_sample: true
   _target_: dexmani_policy.agents.policies.adaptac.AdapTac
 

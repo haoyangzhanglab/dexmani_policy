@@ -16,7 +16,7 @@ from dexmani_policy.training.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
 from dexmani_policy.training.optimization import (
-    build_optimizer, build_scheduler, clip_gradients, restore_optimizer,
+    build_optimizer, build_scheduler, clip_gradients, normalize_gradients, restore_optimizer,
 )
 from dexmani_policy.training.runtime import close_resources, training_signals
 
@@ -130,7 +130,7 @@ class PolicyTrainer:
         self,
         batch: dict[str, Any],
         *,
-        loss_divisor: int = 1,
+        loss_weight: int = 1,
         log_metrics: bool = True,
     ):
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
@@ -142,7 +142,7 @@ class PolicyTrainer:
         ):
             raw_loss, log_dict = self.model(batch, log_metrics=log_metrics, **loss_kwargs)
 
-        (raw_loss / loss_divisor).backward()
+        (raw_loss if loss_weight == 1 else raw_loss * loss_weight).backward()
         return raw_loss.detach(), log_dict
 
     def save_checkpoint(self):
@@ -229,22 +229,28 @@ class PolicyTrainer:
                         )
                         finite_loss = torch.ones((), dtype=torch.bool, device=self.device)
                         group_metric_sums: dict[str, torch.Tensor | float] = {}
+                        sample_count = 0
                         for _ in range(group_size):
                             batch = next(iterator)
+                            count = batch["action"].shape[0]
+                            sample_count += count
                             loss, log_dict = self.train_microbatch(
-                                batch, loss_divisor=group_size, log_metrics=record_group,
+                                batch, loss_weight=count if group_size > 1 else 1,
+                                log_metrics=record_group,
                             )
                             finite_loss.logical_and_(torch.isfinite(loss))
                             if record_group:
-                                accumulate_metrics(group_metric_sums, log_dict)
+                                accumulate_metrics(group_metric_sums, log_dict, weight=count)
 
+                        if group_size > 1:
+                            normalize_gradients(self.trainable_parameters, sample_count)
                         lr = self.optimizer.param_groups[0]["lr"]
                         self.optimizer_step(finite_loss)
                         self.global_step += 1
                         pbar.update(1)
                         if record_group:
                             group_metrics = {
-                                key: value / group_size
+                                key: value / sample_count
                                 for key, value in group_metric_sums.items()
                             }
                             self.log_step(group_metrics, pbar, lr=lr, epoch=epoch)

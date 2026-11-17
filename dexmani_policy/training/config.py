@@ -28,18 +28,11 @@ def load_config(config, overrides=(), *, config_dir=None):
 
 
 def assemble_policy_config(cfg):
-    """Derive action layouts and sampling windows from the recipe."""
+    """Assemble the shared dataset, window and environment protocol."""
     with open_dict(cfg):
         action_key = cfg.action_key
         if action_key not in ("action", "action_ee", "action_rotvec"):
             raise ValueError("action_key must be action, action_ee or action_rotvec")
-        method = cfg.policy_name
-        auxiliary = method == "r3d" and cfg.use_aux_ee
-        if auxiliary and action_key != "action":
-            raise ValueError("R3D auxiliary targets require joint action")
-
-        if action_key != "action_rotvec":
-            cfg.agent.action_dim = 28 if auxiliary else (21 if action_key == "action_ee" else 19)
         for key in ("horizon", "n_obs_steps", "n_action_steps"):
             cfg.agent[key] = cfg[key]
         cfg.dataset.update(
@@ -47,11 +40,6 @@ def assemble_policy_config(cfg):
             horizon=cfg.horizon, obs_horizon=cfg.n_obs_steps,
             pad_before=cfg.n_obs_steps - 1, pad_after=cfg.n_action_steps - 1,
         )
-        if method == "r3d":
-            cfg.dataset._target_ = (
-                "dexmani_policy.datasets.variants.r3d.R3DDataset" if auxiliary
-                else "dexmani_policy.datasets.demonstration.DemonstrationDataset"
-            )
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         cfg.env_runner.task_name = cfg.task_name
@@ -63,43 +51,22 @@ def assemble_policy_config(cfg):
     return cfg
 
 
+def normalize_output_dir(cfg) -> Path:
+    output_dir = Path(cfg.workspace.output_dir).expanduser().resolve(strict=False)
+    cfg.workspace.output_dir = str(output_dir)
+    return output_dir
+
+
 def check_fresh_output(output_dir, *extra_files):
-    output_dir = Path(output_dir).expanduser()
+    output_dir = Path(output_dir)
     for name in ("config.yaml", "metrics.jsonl", "checkpoints", *extra_files):
         path = output_dir / name
         if path.exists():
             raise FileExistsError(f"Training output already exists: {path}")
 
 
-def prepare_training(cfg) -> None:
-    check_fresh_output(cfg.workspace.output_dir)
-    if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
-        name = cfg.agent.rgb_backbone_name
-        if name in ("dino", "siglip"):
-            rgb = dict(cfg.agent.get("rgb_backbone_config") or {})
-            if rgb.get("architecture") is None:
-                source = cfg.initialization.rgb
-                if source is None:
-                    raise ValueError("Fresh HF RGB requires initialization.rgb or an explicit architecture")
-                from transformers import AutoConfig, SiglipVisionConfig
-
-                config_class = SiglipVisionConfig if name == "siglip" else AutoConfig
-                rgb["architecture"] = config_class.from_pretrained(source).to_dict()
-            with open_dict(cfg.agent):
-                cfg.agent.rgb_backbone_config = rgb
-
-
-def validate_normalization(cfg, field_dims):
-    spec = cfg.normalization
-
-    physical = set()
-    if cfg.policy_name in {"sat", "dqrise", "dexlatent"}:
-        physical = {"point_cloud", "camera_intrinsic", "camera_extrinsic"}
-    elif cfg.policy_name == "adaptac":
-        physical = {"point_cloud"}
-    if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
-        physical.add("rgb")
-    for key in physical.intersection(field_dims):
+def validate_normalization(policy, spec, field_dims):
+    for key in policy.required_identity_fields.intersection(field_dims):
         if key in spec and spec[key] != "identity":
             raise ValueError(f"{key} must use identity for image preprocessing or physical geometry")
 

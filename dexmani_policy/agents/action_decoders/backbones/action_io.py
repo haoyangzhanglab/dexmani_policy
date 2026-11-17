@@ -2,9 +2,21 @@
 
 import torch
 from torch import nn
+from timm.layers import RmsNorm
 
-from .ditx import DiTXOutput
 from .modules import initialize_linear
+
+
+class SATReadout(nn.Module):
+    def __init__(self, hidden_dim: int, horizon: int) -> None:
+        super().__init__()
+        self.norm = RmsNorm(hidden_dim, eps=1e-6)
+        self.hidden = nn.Linear(hidden_dim, hidden_dim)
+        self.activation = nn.GELU(approximate="tanh")
+        self.output = nn.Linear(hidden_dim, horizon)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.output(self.activation(self.hidden(self.norm(tokens))))
 
 
 class SATActionIO(nn.Module):
@@ -17,9 +29,9 @@ class SATActionIO(nn.Module):
         self.joint_embed = nn.Embedding(12, hidden_dim // 4)
         self.register_buffer("robot_ids", torch.tensor([0] * 7 + [1] * 12), persistent=False)
         self.register_buffer("joint_ids", torch.tensor([*range(7), *range(12)]), persistent=False)
-        self.final_layer = DiTXOutput(hidden_dim, horizon)
+        self.final_layer = SATReadout(hidden_dim, horizon)
         self.apply(initialize_linear)
-        nn.init.zeros_(self.final_layer.ffn_final.fc2.weight)
+        nn.init.zeros_(self.final_layer.output.weight)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         trajectory = self.x_embedder(x.transpose(1, 2))

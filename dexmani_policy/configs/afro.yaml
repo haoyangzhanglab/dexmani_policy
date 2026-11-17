@@ -20,6 +20,7 @@ dataset:
   sensor_modalities: [point_cloud, joint_state]
   augmentation_cfg: null
 agent:
+  action_dim: null
   _target_: dexmani_policy.agents.policies.afro.AFRO
   freeze_visual: true
   down_dims: [512, 1024, 2048]

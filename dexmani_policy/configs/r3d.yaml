@@ -23,6 +23,8 @@ dataloader:
   drop_last: true
 
 dataset:
+  _target_: dexmani_policy.datasets.variants.r3d.R3DDataset
+  use_aux_ee: ${use_aux_ee}
   sensor_modalities: ["joint_state", "point_cloud"]
 
   # 点 dropout 在 Uni3D 内执行。
@@ -34,6 +36,7 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
+  action_dim: null
   clip_sample: true
   _target_: dexmani_policy.agents.policies.r3d.R3D
   use_aux_ee: ${use_aux_ee}

@@ -54,6 +54,7 @@ class DPEncoder(nn.Module):
 
 
 class DP(Policy):
+    required_identity_fields = frozenset({"rgb"})
     supports_rtc = True
     supported_action_keys = ("action", "action_ee", "action_rotvec")
 

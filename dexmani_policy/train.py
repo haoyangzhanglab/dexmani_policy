@@ -12,20 +12,19 @@ from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import set_project_root
-from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.config import (
     assemble_policy_config,
-    prepare_training,
+    check_fresh_output,
+    normalize_output_dir,
     register_resolvers,
     validate_config,
-    validate_normalization,
 )
-from dexmani_policy.training.data import (
-    build_dataset,
-    fit_action_normalizer,
-    fit_observation_normalizer,
-    record_data_processing,
+from dexmani_policy.training.data import build_dataset, record_data_processing
+from dexmani_policy.training.policy_init.common import (
+    configure_normalizer,
+    fit_normalizers,
+    instantiate_policy,
 )
 from dexmani_policy.training.trainer import PolicyTrainer
 
@@ -36,69 +35,53 @@ def _train(cfg):
     run_training(cfg, max_updates=cfg.get("max_updates"))
 
 
-def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
+def _build_fresh_policy(cfg, dataset, field_dims):
     method = cfg.policy_name
-    if checkpoint is not None and field_dims != cfg.normalization_dims:
-        raise ValueError("Checkpoint data/model mismatch: normalization_dims")
-
-    codebook = hand_affine = None
-    if checkpoint is None and method == "dqrise":
-        from dexmani_policy.agents.hand_prior.codebook import load_codebook
-
-        source = cfg.initialization.codebook
-        if source is None:
-            raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
-        codebook, hand_affine = load_codebook(source)
-        with open_dict(cfg.agent):
-            cfg.agent.num_codes = codebook.num_codes
-    model = hydra.utils.instantiate(cfg.agent, _convert_="all")
-    if dataset.episode_store[dataset.action_key].shape[-1] != model.control_action_dim:
-        raise ValueError("Dataset primary action width must match policy control output")
-
-    if checkpoint is None:
-        if method in {"dp", "sat", "dqrise", "dexlatent"}:
-            model.obs_encoder.rgb_encoder.initialize_weights(cfg.initialization.rgb)
-        elif method == "r3d":
-            model.obs_encoder.pc_encoder.initialize_weights(cfg.initialization.uni3d)
-        pretrained_state = None
-        inherited_fields: tuple[str, ...] = ()
-        if method == "dqrise":
-            model.hand_codebook = codebook
-        elif method == "dexlatent":
-            hand_affine = model.hand_prior.initialize_weights(cfg.initialization.dexlatent)
-        elif method in {"afro", "cordvip"}:
-            source = cfg.initialization.encoder
-            if source is not None:
-                payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
-                encoder = (
-                    model.obs_encoder.pc_encoder if method == "afro"
-                    else model.obs_encoder.interaction_encoder
-                )
-                encoder.load_state_dict(payload["encoder_state"], strict=True)
-                pretrained_state = payload["normalizer_state"]
-                inherited_fields = (
-                    ("point_cloud",) if method == "afro"
-                    else ("hand_pointcloud", "object_pointcloud", "joint_state")
-                )
-                with open_dict(cfg.normalization):
-                    for key in inherited_fields:
-                        cfg.normalization[key] = payload["normalization"][key]
-                inherited_fields = tuple(key for key in inherited_fields if cfg.normalization[key] == "limits")
-                del payload
-    validate_normalization(cfg, field_dims)
-    feature_shapes = normalization_feature_shapes(field_dims, cfg.normalization)
-    model.configure_normalizer(field_dims, feature_shapes)
-    if checkpoint is None:
-        observation_fields = [key for key in feature_shapes if key != "action"]
-        fit_observation_normalizer(
-            dataset, model.normalizer, observation_fields, initial_state=pretrained_state,
-            inherited_fields=inherited_fields,
-        )
-        fit_action_normalizer(dataset, model.normalizer, hand_affine=hand_affine)
-        print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
-        if method == "dexlatent":
-            model.fit_latent_normalizer(dataset)
+    if method == "dp":
+        from dexmani_policy.training.policy_init.dp import build_fresh_policy
+    elif method == "sat":
+        from dexmani_policy.training.policy_init.sat import build_fresh_policy
+    elif method == "dqrise":
+        from dexmani_policy.training.policy_init.dqrise import build_fresh_policy
+    elif method == "dexlatent":
+        from dexmani_policy.training.policy_init.dexlatent import build_fresh_policy
+    elif method == "r3d":
+        from dexmani_policy.training.policy_init.r3d import build_fresh_policy
+    elif method == "afro":
+        from dexmani_policy.training.policy_init.afro import build_fresh_policy
+    elif method == "cordvip":
+        from dexmani_policy.training.policy_init.cordvip import build_fresh_policy
     else:
+        model = instantiate_policy(cfg.agent, dataset)
+        fit_normalizers(model, dataset, cfg.normalization, field_dims)
+        return model
+    return build_fresh_policy(
+        cfg.agent, cfg.initialization, cfg.normalization, dataset, field_dims,
+    )
+
+
+def _prepare_warm_start(method, agent, saved_agent):
+    if method == "dqrise":
+        from dexmani_policy.training.policy_init.dqrise import prepare_warm_start
+    elif method == "adaptac":
+        from dexmani_policy.training.policy_init.adaptac import prepare_warm_start
+    elif method in {"dp", "sat", "dexlatent"}:
+        from dexmani_policy.training.policy_init.rgb import (
+            inherit_rgb_architecture as prepare_warm_start,
+        )
+    else:
+        return
+    prepare_warm_start(agent, saved_agent)
+
+
+def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
+    if checkpoint is None:
+        model = _build_fresh_policy(cfg, dataset, field_dims)
+    else:
+        if field_dims != cfg.normalization_dims:
+            raise ValueError("Checkpoint data/model mismatch: normalization_dims")
+        model = instantiate_policy(cfg.agent, dataset)
+        configure_normalizer(model, cfg.normalization, field_dims)
         # Assignment replaces Parameters; the optimizer must be constructed afterwards.
         model.load_state_dict(checkpoint.model_state, strict=True, assign=True)
     model.to(device=cfg.training.device, dtype=torch.float32)
@@ -109,6 +92,7 @@ def _prepare_policy(cfg, dataset, field_dims, *, checkpoint=None):
 
 def build_trainer(cfg, *, checkpoint=None):
     cfg = copy.deepcopy(cfg)
+    normalize_output_dir(cfg)
     source = cfg.initialization.policy
     if checkpoint is not None and source is not None:
         raise ValueError("initialization.policy and resume are mutually exclusive")
@@ -121,26 +105,15 @@ def build_trainer(cfg, *, checkpoint=None):
         with open_dict(cfg):
             cfg.normalization = saved["normalization"]
             cfg.normalization_dims = saved["normalization_dims"]
-            if cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
-                if cfg.agent.rgb_backbone_name != saved["agent"]["rgb_backbone_name"]:
-                    raise ValueError("RGB backbone differs from initialization policy")
-                rgb = dict(cfg.agent.get("rgb_backbone_config") or {})
-                if rgb.get("architecture") is None:
-                    architecture = saved["agent"]["rgb_backbone_config"].get("architecture")
-                    if architecture is not None:
-                        rgb["architecture"] = architecture
-                cfg.agent.rgb_backbone_config = rgb
-            if cfg.policy_name == "dqrise" and cfg.agent.get("num_codes") is None:
-                cfg.agent.num_codes = saved["agent"]["num_codes"]
-            if cfg.policy_name == "adaptac":
-                tactile = cfg.agent.tactile_encoder
-                saved_tactile = saved["agent"]["tactile_encoder"]
-                if tactile._target_ != saved_tactile["_target_"]:
-                    raise ValueError("Tactile encoder differs from initialization policy")
             cfg.initialization.policy = None
+        _prepare_warm_start(cfg.policy_name, cfg.agent, saved["agent"])
     validate_config(cfg)
     if checkpoint is None:
-        prepare_training(cfg)
+        check_fresh_output(cfg.workspace.output_dir)
+    if model_checkpoint is None and cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
+        from dexmani_policy.training.policy_init.rgb import resolve_rgb_architecture
+
+        resolve_rgb_architecture(cfg.agent, cfg.initialization.rgb)
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
@@ -167,16 +140,12 @@ def build_trainer(cfg, *, checkpoint=None):
         OmegaConf.resolve(cfg)
     trainer = PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
     if cfg.policy_name == "afro":
-        if checkpoint is not None:
-            weights = f"resume checkpoint (step={checkpoint.global_step})"
-        elif source is not None:
-            weights = f"policy checkpoint: {source}"
-        elif cfg.initialization.encoder is not None:
-            weights = f"encoder: {cfg.initialization.encoder}"
-        else:
-            weights = "random initialization"
-        frozen = not any(p.requires_grad for p in model.obs_encoder.pc_encoder.parameters())
-        print(f"[AFRO] weights={weights}, visual_frozen={frozen}")
+        from dexmani_policy.training.policy_init.afro import log_initialization
+
+        log_initialization(
+            model, cfg.initialization.encoder, source,
+            checkpoint.global_step if checkpoint is not None else None,
+        )
     return trainer
 
 

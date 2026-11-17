@@ -21,7 +21,7 @@ from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.hand import load_hand_array
 from dexmani_policy.datasets.split import format_split_summary, split_episodes
-from dexmani_policy.training.config import check_fresh_output, load_config
+from dexmani_policy.training.config import check_fresh_output, load_config, normalize_output_dir
 from dexmani_policy.training.optimization import build_scheduler, clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
@@ -81,16 +81,15 @@ def train(cfg):
         positive_int(recipe[name], name)
     if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
-    output_dir = Path(cfg.workspace.output_dir).expanduser()
+    output_dir = normalize_output_dir(cfg)
     check_fresh_output(output_dir, "codebook.npz")
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir()
-    logger.info("VQ run: %s", output_dir.resolve())
+    logger.info("VQ run: %s", output_dir)
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
     train_norm, val_norm, normalizer = prepare_hand_data(cfg)
-    cfg.workspace.output_dir = str(output_dir)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     train_loader = DataLoader(

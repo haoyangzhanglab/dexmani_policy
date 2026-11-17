@@ -11,6 +11,7 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class SAT(Policy):
+    required_identity_fields = frozenset({"rgb", "point_cloud", "camera_intrinsic", "camera_extrinsic"})
     supports_rtc = True
     supported_action_keys = ("action",)
 

@@ -42,10 +42,10 @@ def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float)
 
 
 class Policy(nn.Module):
+    required_identity_fields: frozenset[str] = frozenset()
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
     supports_rtc: bool = False
     requires_prev_action: bool = False
-    loss_groups: dict[str, tuple[int, int, float]] | None = None
 
     def __init__(
         self,
@@ -133,8 +133,6 @@ class Policy(nn.Module):
     ) -> tuple[torch.Tensor, dict]:
         condition = self._encode_obs(batch["obs"])
         target = self._encode_actions(batch["action"])
-        if self.loss_groups is not None:
-            kwargs["dim_groups"] = self.loss_groups
         return self.action_decoder.compute_loss(
             condition, target, log_metrics=log_metrics, **kwargs
         )

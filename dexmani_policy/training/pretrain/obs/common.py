@@ -15,7 +15,7 @@ from dexmani_policy.common.pytorch_util import (
     set_rng_state,
     set_seed,
 )
-from dexmani_policy.training.config import check_fresh_output, load_config
+from dexmani_policy.training.config import check_fresh_output, load_config, normalize_output_dir
 from dexmani_policy.training.data import (
     build_train_loader,
     close_data_loader,
@@ -27,7 +27,9 @@ from dexmani_policy.training.logging import (
     accumulate_metrics,
     to_log_scalars,
 )
-from dexmani_policy.training.optimization import build_scheduler, clip_gradients, restore_optimizer
+from dexmani_policy.training.optimization import (
+    build_scheduler, clip_gradients, normalize_gradients, restore_optimizer,
+)
 from dexmani_policy.training.runtime import close_resources, training_signals
 
 
@@ -111,14 +113,14 @@ def evaluate(model, dataset, batch_size, device, *, stop):
     rng_state, training = get_rng_state(device), model.training
     try:
         model.eval()
-        totals: dict[str, torch.Tensor] = {}
+        totals: dict[str, torch.Tensor | float] = {}
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         for batch in loader:
             if stop.requested:
                 return None
-            count = len(next(iter(batch["obs"].values())))
+            count = next(iter(batch["obs"].values())).shape[0]
             _, metrics = model(dict_apply(batch, lambda x: x.to(device)))
-            accumulate_metrics(totals, {key: value * count for key, value in metrics.items()})
+            accumulate_metrics(totals, metrics, weight=count)
             if stop.requested:
                 return None
         return {f"val/{key}": value / len(dataset) for key, value in totals.items()}
@@ -128,6 +130,7 @@ def evaluate(model, dataset, batch_size, device, *, stop):
 
 def train(method, model_class, argv=None):
     cfg, checkpoint, max_updates = load_run(method, argv)
+    normalize_output_dir(cfg)
     resuming = checkpoint is not None
     if resuming and checkpoint.global_step >= cfg.training.loop.total_train_steps:
         print(f"Pretraining already completed at step {checkpoint.global_step}")
@@ -152,8 +155,8 @@ def train(method, model_class, argv=None):
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     if method == "cordvip" and cfg.model.contact_loss_weight > 0 and resuming:
         previous = checkpoint.effective_config["data_processing"]
-        geometry_sha256 = previous["object_pointcloud"]["geometry_sha256"]
-        if dataset.geometry_sha256 != geometry_sha256:
+        current = dataset.episode_store.attrs["data_processing"]
+        if current["object_pointcloud"]["geometry_sha256"] != previous["object_pointcloud"]["geometry_sha256"]:
             raise ValueError("Contact supervision resume requires the same object geometry_sha256")
     record_data_processing(cfg, dataset)
     cfg.zarr_path = dataset.episode_store.path
@@ -214,17 +217,22 @@ def train(method, model_class, argv=None):
                         or (step + 1) % cfg.training.loop.log_interval_steps == 0
                         or step + 1 == stop_step
                     )
-                    totals: dict[str, torch.Tensor] = {}
+                    totals: dict[str, torch.Tensor | float] = {}
                     optimizer.zero_grad(set_to_none=True)
                     finite_loss = torch.ones((), dtype=torch.bool, device=device)
+                    sample_count = 0
                     for _ in range(group_size):
                         batch = next(iterator)
+                        count = next(iter(batch["obs"].values())).shape[0]
+                        sample_count += count
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         loss, metrics = model(batch)
                         finite_loss.logical_and_(torch.isfinite(loss.detach()))
-                        (loss / group_size).backward()
+                        (loss * count if group_size > 1 else loss).backward()
                         if record:
-                            accumulate_metrics(totals, metrics)
+                            accumulate_metrics(totals, metrics, weight=count)
+                    if group_size > 1:
+                        normalize_gradients(parameters, sample_count)
                     clip_gradients(parameters, finite_loss, step=step)
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
@@ -234,7 +242,7 @@ def train(method, model_class, argv=None):
                     scheduler.step()
                     step += 1
                     if record:
-                        metrics = {f"train/{key}": value / group_size for key, value in totals.items()}
+                        metrics = {f"train/{key}": value / sample_count for key, value in totals.items()}
                         metrics.update({"train/lr": lr, "train/epoch": current_epoch})
                         logger.log(to_log_scalars(metrics), step)
                     epoch = step // updates_per_epoch

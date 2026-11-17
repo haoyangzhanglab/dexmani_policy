@@ -124,6 +124,11 @@ class R3D(Policy):
             "ee": (self.joint_dim, self.joint_dim + self.ee_dim, aux_loss_weight),
         } if use_aux_ee else None
 
+    def compute_loss(self, batch: dict, *, log_metrics: bool = True, **kwargs):
+        if self.loss_groups is not None:
+            kwargs["dim_groups"] = self.loss_groups
+        return super().compute_loss(batch, log_metrics=log_metrics, **kwargs)
+
     @property
     def control_action_dim(self) -> int:
         return self.joint_dim if self.use_aux_ee else self.action_dim
