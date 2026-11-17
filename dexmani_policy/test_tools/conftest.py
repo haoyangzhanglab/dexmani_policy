@@ -1,8 +1,11 @@
+from contextlib import closing
+
 import numpy as np
 import pytest
 import torch
 import zarr
 
+from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 from dexmani_policy.training.config import load_config
 
 
@@ -50,3 +53,31 @@ def small_dp3_config(make_demo):
             "agent.down_dims=[16,32]", "agent.num_points=8", *overrides,
         ])
     return create
+
+
+@pytest.fixture(autouse=True)
+def preserve_process_state():
+    rng = get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    deterministic = torch.backends.cudnn.deterministic
+    benchmark = torch.backends.cudnn.benchmark
+    precision = torch.get_float32_matmul_precision()
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = benchmark
+        torch.set_float32_matmul_precision(precision)
+        set_rng_state(rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+
+
+@pytest.fixture
+def small_dp3_checkpoint(tmp_path, small_dp3_config):
+    from dexmani_policy.training.trainer import build_trainer
+
+    directory = tmp_path / "dp3_run"
+    with closing(build_trainer(small_dp3_config(directory))) as trainer:
+        trainer.train(max_updates=1)
+    return directory / "checkpoints/latest.pt"

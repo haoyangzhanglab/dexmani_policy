@@ -1,24 +1,91 @@
 import copy
+from pathlib import Path
 from typing import Any
 
 import hydra
+import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
-from dexmani_policy.common.checkpoint import Checkpoint, policy_state_dict, save_checkpoint
+from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy_state_dict, save_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.training.data import build_train_loader, close_data_loader
+from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.pytorch_util import dict_apply, set_seed
+from dexmani_policy.training import initialization
+from dexmani_policy.training.config import check_fresh_output, normalize_output_dir, validate_config
+from dexmani_policy.training.data import build_dataset, build_train_loader, close_data_loader, record_data_processing
 from dexmani_policy.training.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
 from dexmani_policy.training.optimization import (
     build_optimizer, build_scheduler, clip_gradients, normalize_gradients, restore_optimizer,
 )
-from dexmani_policy.training.runtime import close_resources, training_signals
+from dexmani_policy.training.runtime import training_signals
+
+
+def build_trainer(cfg, *, checkpoint=None):
+    cfg = copy.deepcopy(cfg)
+    normalize_output_dir(cfg)
+    source = cfg.initialization.policy
+    if checkpoint is not None and source is not None:
+        raise ValueError("initialization.policy and resume are mutually exclusive")
+    model_checkpoint = checkpoint
+    if source is not None:
+        model_checkpoint = load_checkpoint(Path(source).expanduser())
+        saved = model_checkpoint.effective_config
+        if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
+            raise ValueError("Policy initialization requires the same policy and action semantics")
+        with open_dict(cfg):
+            cfg.normalization = saved["normalization"]
+            cfg.normalization_dims = saved["normalization_dims"]
+            cfg.initialization.policy = None
+        initialization.prepare_warm_start(cfg.policy_name, cfg.agent, saved["agent"])
+    validate_config(cfg)
+    if checkpoint is None:
+        check_fresh_output(cfg.workspace.output_dir)
+    if model_checkpoint is None and cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
+        initialization.resolve_rgb_architecture(cfg.agent, cfg.initialization.rgb)
+    set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
+    dataset, data_description = build_dataset(cfg)
+    record_data_processing(cfg, dataset)
+    if checkpoint is not None:
+        data_dt = data_description["control_dt_s"]
+        policy_dt = cfg.control_dt_s
+        if not np.isclose(data_dt, policy_dt, rtol=1e-6, atol=1e-9):
+            raise ValueError(
+                f"Resume control_dt_s mismatch: dataset dt={data_dt} s, "
+                f"checkpoint control_dt_s={policy_dt} s"
+            )
+    with open_dict(cfg):
+        cfg.zarr_path = dataset.episode_store.path
+        cfg.dataset.zarr_path = cfg.zarr_path
+        if checkpoint is None:
+            cfg.control_dt_s = data_description["control_dt_s"]
+    model = initialization.build_policy(cfg, dataset, data_description["field_dims"], checkpoint=model_checkpoint)
+    if checkpoint is None:
+        with open_dict(cfg):
+            cfg.pop("max_updates", None)
+            cfg.normalization_dims = model.normalization_dims
+            cfg.agent.update(model.effective_config)
+        OmegaConf.resolve(cfg)
+    return PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
+
+
+def run_trainer(trainer, *, max_updates=None):
+    try:
+        trainer.compile_models()
+        trainer.train(max_updates=max_updates)
+        return trainer.global_step
+    finally:
+        close_resources(trainer.close)
+
+
+def run_training(cfg, *, max_updates=None):
+    return run_trainer(build_trainer(cfg), max_updates=max_updates)
 
 
 class PolicyTrainer:
@@ -106,12 +173,11 @@ class PolicyTrainer:
 
     def compile_models(self):
         if self.cfg.training.use_compile:
-            mode = self.cfg.training.get("compile_mode", "reduce-overhead")
             models = [self.model]
             if self.model.requires_ema_for_loss:
                 models.append(self.ema_model)
             for model in models:
-                model.compile_backbone(mode=mode)
+                model.compile_backbone(mode=self.cfg.training.compile_mode)
 
     def close(self):
         close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)

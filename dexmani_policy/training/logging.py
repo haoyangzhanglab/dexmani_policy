@@ -8,8 +8,7 @@ from typing import Any
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.training.runtime import close_resources
+from dexmani_policy.common.io_util import atomic_path, close_resources
 
 
 class ExperimentLogger:

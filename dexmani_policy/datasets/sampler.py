@@ -75,11 +75,18 @@ class SequenceSampler:
 
     def sample_sequence(self, idx):
         result = {}
-        rows = self.sample_source_rows(idx)
+        start, end, sample_start = self.indices[idx]
         for key, columns in self.fields.items():
             length = self.field_horizons.get(key, self.sequence_length)
-            selected = rows[:length]
-            start, end = int(selected[0]), int(selected[-1]) + 1
-            values = self.episode_store.read(key, slice(start, end), columns=columns)
-            result[key] = values if end - start == length else values[selected - start]
+            # Even a horizon wholly inside left padding needs the first source frame.
+            before = min(sample_start, length - 1)
+            stop = min(end, start + length - before)
+            values = self.episode_store.read(key, slice(start, stop), columns=columns)
+            if len(values) != length:
+                padded = np.empty((length, *values.shape[1:]), dtype=values.dtype)
+                padded[:before] = values[0]
+                padded[before:before + len(values)] = values
+                padded[before + len(values):] = values[-1]
+                values = padded
+            result[key] = values
         return result

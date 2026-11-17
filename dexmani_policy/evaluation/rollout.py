@@ -1,17 +1,17 @@
-import logging
 import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import torch
 from hydra.utils import get_class
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.inference import resolve_inference_settings, restore_policy
-from dexmani_policy.common.io_util import write_json
+from dexmani_policy.common.io_util import close_resources, write_json
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.evaluation.metrics import summarize_episodes
 from dexmani_policy.evaluation.seeds import (
@@ -60,6 +60,9 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     if render_mode == "human" and not os.environ.get("DISPLAY"):
         raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
     set_seed(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("highest")
     agent = restore_policy(cfg, state_dict, device)
     del state_dict
     action_steps = positive_int(agent.n_action_steps if action_steps is None else action_steps, "action_steps")
@@ -85,12 +88,8 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
             record["episodes"].append(episode)
             record["statistics"] = summarize_episodes(record["episodes"])
             write_json(path, record)
-    except BaseException:
-        try:
-            results.close()
-        except BaseException:
-            logging.exception("Failed to close rollout after evaluation error")
-        raise
+    finally:
+        close_resources(results.close)
     record["completed"] = True
     write_json(path, record)
     print(f"{record['statistics']}; {path}")

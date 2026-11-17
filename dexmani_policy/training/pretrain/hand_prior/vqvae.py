@@ -89,6 +89,8 @@ def train(cfg):
     logger.info("VQ run: %s", output_dir)
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
     train_norm, val_norm, normalizer = prepare_hand_data(cfg)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))

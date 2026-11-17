@@ -106,7 +106,6 @@ def restore_policy(
     from dexmani_policy.common.normalizer import normalization_feature_shapes
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
-    torch.set_float32_matmul_precision("highest")
     if state_dict is None:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
 

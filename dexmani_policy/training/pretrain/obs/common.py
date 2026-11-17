@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.pytorch_util import (
     dict_apply,
     get_rng_state,
@@ -30,7 +30,7 @@ from dexmani_policy.training.logging import (
 from dexmani_policy.training.optimization import (
     build_scheduler, clip_gradients, normalize_gradients, restore_optimizer,
 )
-from dexmani_policy.training.runtime import close_resources, training_signals
+from dexmani_policy.training.runtime import training_signals
 
 
 def load_run(method, argv=None):
@@ -152,6 +152,8 @@ def train(method, model_class, argv=None):
         positive_int(cfg.training.loop.gradient_accumulation_steps, "training.loop.gradient_accumulation_steps")
 
     set_seed(cfg.training.seed + (checkpoint.global_step if resuming else 0))
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
     if method == "cordvip" and cfg.model.contact_loss_weight > 0 and resuming:
         previous = checkpoint.effective_config["data_processing"]

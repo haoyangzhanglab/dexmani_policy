@@ -9,8 +9,10 @@ from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int, set_project_root
 
 
-def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
-                   use_compile=None, compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None, total_steps=None):
+def prepare_resume(
+    run, *, device=None, num_workers=None, log_interval=None, use_compile=None,
+    compile_mode=None, cudnn_benchmark=None, wandb=False, zarr_path=None, total_steps=None,
+):
     directory = Path(run).expanduser().resolve()
     source = directory / "checkpoints" / "latest.pt"
     checkpoint = load_checkpoint(source)
@@ -40,7 +42,7 @@ def prepare_resume(run, *, device=None, num_workers=None, log_interval=None,
         if zarr_path is not None:
             cfg.zarr_path = str(zarr_path)
             cfg.dataset.zarr_path = cfg.zarr_path
-    from dexmani_policy.train import build_trainer
+    from dexmani_policy.training.trainer import build_trainer
 
     return build_trainer(cfg, checkpoint=checkpoint)
 
@@ -59,13 +61,16 @@ def main(argv=None):
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--zarr-path")
     args = parser.parse_args(argv)
+    args.run = str(Path(args.run).expanduser().resolve(strict=False))
+    if args.zarr_path is not None:
+        args.zarr_path = str(Path(args.zarr_path).expanduser().resolve(strict=False))
     set_project_root()
     options = vars(args)
     max_updates = options.pop("max_updates")
     trainer = prepare_resume(**options)
     if trainer is None:
         return
-    from dexmani_policy.train import run_trainer
+    from dexmani_policy.training.trainer import run_trainer
 
     run_trainer(trainer, max_updates=max_updates)
 

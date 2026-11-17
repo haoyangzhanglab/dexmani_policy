@@ -1,5 +1,6 @@
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -8,13 +9,14 @@ import zarr
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint import load_checkpoint
+from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
-from dexmani_policy.train import build_trainer
 from dexmani_policy.training.config import load_config
 from dexmani_policy.training.pretrain.hand_prior.vqvae import train as train_vq
 from dexmani_policy.training.pretrain.obs import common as obs_training
 from dexmani_policy.training.pretrain.obs.cordvip import CordViP
 from dexmani_policy.training.resume import prepare_resume
+from dexmani_policy.training.trainer import build_trainer, run_trainer
 
 
 @pytest.fixture(params=["~/run", "relative/run", "absolute"])
@@ -62,7 +64,12 @@ def test_vq_artifact_paths(output_path, make_demo):
         "vq_vae.batch_size=12", "vq_vae.warmup_steps=0", "vq_vae.hidden_dim=16",
         "vq_vae.latent_dim=8", "vq_vae.num_layers=1",
     ])
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.set_float32_matmul_precision("medium")
     train_vq(cfg)
+    assert not torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark
+    assert torch.get_float32_matmul_precision() == "medium"
     assert cfg.workspace.output_dir == str(expected)
     assert OmegaConf.load(expected / "config.yaml").workspace.output_dir == str(expected)
     for name in ("metrics.jsonl", "codebook.npz", "checkpoints/last.pt"):
@@ -91,7 +98,12 @@ def test_observation_artifacts(output_path, contact_data, monkeypatch):
         "n_obs_steps=1", "dataloader.num_workers=0", "dataloader.batch_size=2",
         "training.loop.total_train_steps=3", "training.loop.gradient_accumulation_steps=2",
     ]
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.set_float32_matmul_precision("medium")
     obs_training.train("cordvip", CordViP, args)
+    assert not torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark
+    assert torch.get_float32_matmul_precision() == "medium"
     saved = load_checkpoint(directory / "checkpoints/latest.pt")
     assert saved.global_step == 1
     assert saved.effective_config["workspace"]["output_dir"] == str(directory)
@@ -148,3 +160,65 @@ def test_disabled_contact_does_not_require_labels_or_geometry(contact_data):
     loss.backward()
     assert torch.isfinite(loss)
     assert set(metrics) == {"loss", "arm", "hand"}
+
+
+@pytest.mark.parametrize("mode,benchmark", [(None, False), ("default", True)])
+def test_training_options_and_resume(tmp_path, small_dp3_config, monkeypatch, mode, benchmark):
+    overrides = [] if mode is None else [f"training.compile_mode={mode}"]
+    cfg = small_dp3_config(
+        tmp_path / "run", "training.use_compile=true",
+        f"training.cudnn_benchmark={str(benchmark).lower()}", *overrides,
+    )
+    expected = "reduce-overhead" if mode is None else mode
+    compiled = []
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = not benchmark
+    torch.set_float32_matmul_precision("medium")
+    with closing(build_trainer(cfg)) as trainer:
+        assert not torch.backends.cudnn.deterministic
+        assert torch.backends.cudnn.benchmark == benchmark
+        assert torch.get_float32_matmul_precision() == "medium"
+        monkeypatch.setattr(trainer.model, "compile_backbone", lambda *, mode: compiled.append(mode))
+        trainer.compile_models()
+        trainer.train(max_updates=1)
+        assert torch.get_float32_matmul_precision() == "highest"
+    with closing(prepare_resume(tmp_path / "run")) as resumed:
+        assert resumed.cfg.training.compile_mode == expected
+        assert resumed.cfg.training.cudnn_benchmark == benchmark
+        monkeypatch.setattr(resumed.model, "compile_backbone", lambda *, mode: compiled.append(mode))
+        resumed.compile_models()
+    assert compiled == [expected, expected]
+
+
+def test_afro_pretraining_inherits_matmul(tmp_path, monkeypatch):
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.set_float32_matmul_precision("medium")
+
+    def stop_before_data(*args, **kwargs):
+        assert not torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark
+        assert torch.get_float32_matmul_precision() == "medium"
+        raise RuntimeError("stop before data")
+
+    monkeypatch.setattr(obs_training.hydra.utils, "instantiate", stop_before_data)
+    with pytest.raises(RuntimeError, match="stop before data"):
+        obs_training.train("afro", None, ["--output-dir", str(tmp_path), "--device", "cpu"])
+
+
+def test_training_failure_closes_all_resources(capsys):
+    closed = []
+
+    def fail():
+        raise ValueError("training failed")
+
+    def fail_close():
+        raise RuntimeError("close failed")
+
+    trainer = SimpleNamespace(
+        compile_models=fail,
+        close=lambda: close_resources(fail_close, lambda: closed.append(True)),
+    )
+    with pytest.raises(ValueError, match="training failed"):
+        run_trainer(trainer)
+    assert closed == [True]
+    assert "close failed" in capsys.readouterr().err

@@ -2,16 +2,14 @@
 
 import argparse
 import tempfile
-from contextlib import closing, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
-
-import torch
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.train import run_training
 from dexmani_policy.training.config import load_config
 from dexmani_policy.training.resume import prepare_resume
+from dexmani_policy.training.trainer import run_trainer, run_training
 
 
 def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int) -> tuple[int, int]:
@@ -22,21 +20,7 @@ def run_smoke(cfg, directory: Path, *, max_updates: int, resume_updates: int) ->
     step = run_training(cfg, max_updates=max_updates)
     assert step == max_updates, "Fresh update count mismatch"
     trainer = prepare_resume(directory)
-    assert trainer is not None
-    with closing(trainer):
-        assert trainer.global_step == step, "Resume source mismatch"
-        checkpoint = load_checkpoint(directory / "checkpoints" / "latest.pt")
-        torch.testing.assert_close(trainer.model.state_dict(), checkpoint.model_state, check_device=False)
-        if trainer.ema_model is not None:
-            torch.testing.assert_close(trainer.ema_model.state_dict(), checkpoint.ema_model_state, check_device=False)
-        optimizer_state = trainer.optimizer.state_dict()
-        torch.testing.assert_close(optimizer_state["state"], checkpoint.optimizer_state["state"], check_device=False)
-        assert optimizer_state["param_groups"] == checkpoint.optimizer_state["param_groups"]
-        assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
-        del checkpoint, optimizer_state
-        trainer.compile_models()
-        trainer.train(max_updates=resume_updates)
-        final = trainer.global_step
+    final = run_trainer(trainer, max_updates=resume_updates)
     expected = min(step + resume_updates, cfg.training.loop.total_train_steps)
     assert final == expected, "Resume update count mismatch"
     saved = load_checkpoint(directory / "checkpoints" / "latest.pt")

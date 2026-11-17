@@ -12,10 +12,10 @@ from torch import nn
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
-from dexmani_policy.deployment import load_policy
-from dexmani_policy.train import _prepare_policy, build_trainer
 from dexmani_policy.training.config import load_config, validate_config
+from dexmani_policy.training.initialization import build_policy
 from dexmani_policy.training.resume import prepare_resume
+from dexmani_policy.training.trainer import build_trainer
 
 
 class SmallRGBEncoder(nn.Module):
@@ -70,7 +70,7 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         cfg.initialization.dexlatent = str(path)
         affine = prior.initialize_weights(path)
         scale, offset = affine["scale"], affine["offset"]
-    model = _prepare_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+    model = build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
     torch.testing.assert_close(model.obs_encoder.rgb_encoder.state_dict(), rgb.state_dict())
     torch.testing.assert_close(model.normalizer["action"].scale[7:], scale)
     torch.testing.assert_close(model.normalizer["action"].offset[7:], offset)
@@ -93,7 +93,7 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         "training.device=cpu", "agent.action_dim=19", "agent.hidden_dim=16",
         "agent.n_layers=1", "agent.n_head=2", "initialization.rgb=null",
     ])
-    sat = _prepare_policy(sat_cfg, dataset, {"action": 19, "joint_state": 19})
+    sat = build_policy(sat_cfg, dataset, {"action": 19, "joint_state": 19})
     with torch.no_grad():
         sat.normalizer["action"].scale.fill_(9)
         sat.obs_encoder.rgb_encoder.weight.zero_()
@@ -129,7 +129,7 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
     torch.save({"encoder_state": encoder.state_dict(), "normalizer_state": inherited.state_dict(),
                 "normalization": dict.fromkeys(fields, mode)}, source)
     cfg.initialization.encoder = str(source)
-    model = _prepare_policy(cfg, dataset, dims)
+    model = build_policy(cfg, dataset, dims)
     actual_encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
     torch.testing.assert_close(actual_encoder.state_dict(), encoder.state_dict())
     for key in fields:
@@ -160,8 +160,7 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monk
         raise AssertionError("checkpoint restoration must not fit normalization")
 
     monkeypatch.setattr(LinearNormalizer, "fit_field", forbidden)
-    monkeypatch.setattr("dexmani_policy.train._build_fresh_policy", forbidden)
-    monkeypatch.setattr("dexmani_policy.training.policy_init.rgb.resolve_rgb_architecture", forbidden)
+    monkeypatch.setattr("dexmani_policy.training.initialization.resolve_rgb_architecture", forbidden)
     with closing(prepare_resume(directory)) as resumed:
         torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
         torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
@@ -172,19 +171,6 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monk
         actual_parameters = {id(p) for p in resumed.model.parameters() if p.requires_grad}
         assert {id(p) for group in resumed.optimizer.param_groups for p in group["params"]} == actual_parameters
         assert {id(p) for p in resumed.ema_updater.parameters} == actual_parameters
-        observation = {key: value.numpy() for key, value in resumed.train_loader.dataset[0]["obs"].items()}
-        for weights, model in (("raw", resumed.model), ("ema", resumed.ema_model)):
-            with closing(load_policy(directory, weights=weights, device="cpu", seed=7, inference_steps=2)) as runtime:
-                model.eval()
-                torch.testing.assert_close(runtime.agent.state_dict(), model.state_dict())
-                assert runtime.info.control_action_dim == 19
-                assert runtime.info.action_mode == "joint"
-                assert runtime.info.data_processing == saved.effective_config["data_processing"]
-                expected = model.predict_action(
-                    {key: torch.from_numpy(value).unsqueeze(0) for key, value in observation.items()},
-                    inference_steps=2, generator=torch.Generator().manual_seed(7),
-                )["future_actions"][0].numpy()
-                np.testing.assert_allclose(runtime.predict(observation), expected)
     warm_cfg = small_dp3_config(tmp_path / "warm", f"initialization.policy={directory / 'checkpoints/latest.pt'}")
     with closing(build_trainer(warm_cfg)) as warm:
         torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
@@ -199,7 +185,7 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monk
 def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     from transformers import AutoConfig, AutoModel, Dinov2Config, SiglipVisionConfig, SiglipVisionModel
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
-    from dexmani_policy.training.policy_init.rgb import inherit_rgb_architecture, resolve_rgb_architecture
+    from dexmani_policy.training.initialization import inherit_rgb_architecture, resolve_rgb_architecture
 
     config_class = Dinov2Config if kind == "dino" else SiglipVisionConfig
     architecture = config_class(hidden_size=16, intermediate_size=32, num_hidden_layers=1,
@@ -234,21 +220,20 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
 
 
 def test_method_owned_warm_checks():
-    from dexmani_policy.training.policy_init.adaptac import prepare_warm_start as tactile_warm
-    from dexmani_policy.training.policy_init.dqrise import prepare_warm_start as dq_warm
+    from dexmani_policy.training.initialization import prepare_warm_start
 
     agent = OmegaConf.create({"rgb_backbone_name": "dino", "rgb_backbone_config": {}})
     saved = {"rgb_backbone_name": "dino", "rgb_backbone_config": {"architecture": {"hidden_size": 16}}, "num_codes": 5}
-    dq_warm(agent, saved)
+    prepare_warm_start("dqrise", agent, saved)
     assert agent.num_codes == 5
     assert agent.rgb_backbone_config.architecture.hidden_size == 16
     agent.num_codes = 7
-    dq_warm(agent, saved)
+    prepare_warm_start("dqrise", agent, saved)
     assert agent.num_codes == 7
     tactile = OmegaConf.create({"tactile_encoder": {"_target_": "force"}})
-    tactile_warm(tactile, {"tactile_encoder": {"_target_": "force"}})
+    prepare_warm_start("adaptac", tactile, {"tactile_encoder": {"_target_": "force"}})
     with pytest.raises(ValueError, match="Tactile encoder"):
-        tactile_warm(tactile, {"tactile_encoder": {"_target_": "taxel"}})
+        prepare_warm_start("adaptac", tactile, {"tactile_encoder": {"_target_": "taxel"}})
 
 
 @pytest.mark.parametrize("method,fields", [

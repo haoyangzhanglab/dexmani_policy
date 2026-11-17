@@ -34,6 +34,7 @@ training:
   seed: 42
   device: cuda:0
   cudnn_benchmark: true
+  compile_mode: reduce-overhead
   use_bfloat16: false
   use_ema: true
   lr_warmup_steps: 500

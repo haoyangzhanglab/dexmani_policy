@@ -37,6 +37,8 @@ python -B -m dexmani_policy.test_tools.smoke_test dp3
 
 默认训练 4 步、续训 2 步，`--device` 可覆盖配方设备；不指定 `--output-dir` 时自动清理产物。`--config-dir` 可加载外部目录中的配置，相对数据、权重和输出路径均相对于启动目录。
 
+smoke 入口检查更新步数和 checkpoint 发布；完整状态恢复、路径及推理行为的回归测试集中在 `dexmani_policy/test_tools/`，运行 `python -B -m pytest -q dexmani_policy/test_tools`。
+
 ## 整体流程
 
 **`dexmani_sim` 示教 / `dexmani_real` 显式字段导出 → 本仓库训练策略 → 仿真评测 / 真机部署**

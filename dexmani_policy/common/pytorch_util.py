@@ -12,9 +12,6 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-
 
 def get_rng_state(device="cpu") -> dict[str, Any]:
     """Capture process RNG, excluding DataLoader worker state."""

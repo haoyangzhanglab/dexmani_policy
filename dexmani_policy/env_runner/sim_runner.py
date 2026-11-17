@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -9,14 +9,15 @@ import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
+from dexmani_policy.common.io_util import close_resources
 
 
 class SimRunner:
     @staticmethod
     def load_seed_pool(task_name):
-        from dexmani_policy.evaluation.seeds import load_seed_pool
+        from dexmani_sim import DATA_DIR
 
-        return load_seed_pool(task_name)
+        return [int(value) for value in (DATA_DIR / "eval_seeds" / f"{task_name}.txt").read_text().split()]
 
     def __init__(
         self,
@@ -36,29 +37,16 @@ class SimRunner:
         self.sensor_modalities = list(sensor_modalities)
         self.rgb_preprocessing = rgb_preprocessing
 
-        self.obs_buffer: dict[str, np.ndarray] = {}
-        self.obs_cursor = 0
+        self.obs_buffer: deque[dict[str, np.ndarray]] = deque(maxlen=n_obs_steps)
 
     def update_obs(self, observation: dict[str, np.ndarray]):
-        position = self.obs_cursor % self.n_obs_steps
-        for name in self.sensor_modalities:
-            value = observation[name]
-            if name not in self.obs_buffer:
-                shape = (self.n_obs_steps, *value.shape)
-                self.obs_buffer[name] = np.empty(shape, dtype=value.dtype)
-            self.obs_buffer[name][position] = value
-        self.obs_cursor += 1
+        # Environments can reuse their observation arrays on the next control step.
+        self.obs_buffer.append({name: observation[name].copy() for name in self.sensor_modalities})
 
     def get_stacked_obs(self) -> dict[str, np.ndarray]:
-        if self.obs_cursor < self.n_obs_steps:
-            # Pad missing history with the first observed frame.
-            indices = np.maximum(
-                np.arange(self.n_obs_steps) - self.n_obs_steps + self.obs_cursor, 0
-            )
-        else:
-            indices = (self.obs_cursor + np.arange(self.n_obs_steps)) % self.n_obs_steps
-
-        return {name: buffer[indices] for name, buffer in self.obs_buffer.items()}
+        history = list(self.obs_buffer)
+        history = [history[0]] * (self.n_obs_steps - len(history)) + history
+        return {name: np.stack([obs[name] for obs in history]) for name in self.sensor_modalities}
 
     def get_obs_batch(self, device, *, normalization_dims) -> dict[str, torch.Tensor]:
         return prepare_observations(
@@ -68,7 +56,6 @@ class SimRunner:
 
     def reset(self):
         self.obs_buffer.clear()
-        self.obs_cursor = 0
 
     def predict_action_chunk(
         self, obs_batch, agent, inference_steps: int | None = None, *,
@@ -164,19 +151,9 @@ class SimRunner:
                         yield result
                         raise
                 yield result
-        except BaseException as error:
+        finally:
             if env is not None:
-                try:
-                    env.close()
-                except BaseException:
-                    # Generator.close() is a normal shutdown, so report cleanup failures.
-                    if isinstance(error, GeneratorExit):
-                        raise
-                    logging.exception("Failed to close environment after simulation error")
-            raise
-        else:
-            if env is not None:
-                env.close()
+                close_resources(env.close)
 
     def make_env(self, *, record_video: bool):
         from dexmani_sim import resolve_env_class
@@ -193,9 +170,6 @@ class SimRunner:
                     f"Policy control_dt_s={self.control_dt_s} s"
                 )
         except BaseException:
-            try:
-                env.close()
-            except BaseException:
-                logging.exception("Failed to close environment after initialization error")
+            close_resources(env.close)
             raise
         return env
