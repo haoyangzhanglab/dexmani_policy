@@ -23,7 +23,8 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        normalized = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + self.eps)
+        values = x.float()
+        normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + self.eps)
         return normalized.to(x.dtype) * self.weight.to(x.dtype)
 
 
@@ -33,11 +34,14 @@ class RotaryEmbedding(nn.Module):
         self.head_dim = head_dim
         self.register_buffer("indices", torch.arange(head_dim // 2), persistent=False)
 
-    def forward(self, x, positions):
-        # SmolVLA rotates the two halves, rather than adjacent even/odd channels.
+    def forward(self, positions):
         frequencies = 10000.0 ** (-2.0 * self.indices.float() / self.head_dim)
         angles = positions.float()[:, None] * frequencies[None]
-        cos, sin = angles.cos()[None, None], angles.sin()[None, None]
+        return angles.cos()[None, None], angles.sin()[None, None]
+
+    @staticmethod
+    def apply_rotary(x, cos, sin):
+        # SmolVLA rotates the two halves, rather than adjacent even/odd channels.
         first, second = x.float().chunk(2, dim=-1)
         return torch.cat((first * cos - second * sin, second * cos + first * sin), -1).to(x.dtype)
 
@@ -72,7 +76,7 @@ class GatedMLP(nn.Module):
 class ExpertBlock(nn.Module):
     def __init__(
         self, dim, n_head, n_kv_head, head_dim, intermediate_dim,
-        cross_attention, p_drop_attn, qkv_bias, qk_norm, temporal_actions,
+        cross_attention, p_drop_attn, qkv_bias, qk_norm,
     ):
         super().__init__()
         self.n_head = n_head
@@ -80,7 +84,6 @@ class ExpertBlock(nn.Module):
         self.head_dim = head_dim
         self.cross_attention = cross_attention
         self.p_drop_attn = p_drop_attn
-        self.temporal_actions = temporal_actions
         kv_dim = n_kv_head * head_dim
 
         self.input_norm = RMSNorm(dim)
@@ -96,8 +99,6 @@ class ExpertBlock(nn.Module):
         self.o_proj = nn.Linear(n_head * head_dim, dim, bias=False)
         self.post_attention_norm = RMSNorm(dim)
         self.mlp = GatedMLP(dim, intermediate_dim)
-        if temporal_actions:
-            self.rope = RotaryEmbedding(head_dim)
 
     def split_heads(self, x, n_head):
         return x.unflatten(-1, (n_head, self.head_dim)).transpose(1, 2)
@@ -108,31 +109,26 @@ class ExpertBlock(nn.Module):
         value = self.split_heads(self.context_v_proj(context), self.n_kv_head)
         return self.k_norm(key), value
 
-    def forward(self, x, context, *, context_kv=None):
+    def forward(self, x, context, *, context_kv=None, rotary=None, joint_attn_mask=None):
         key, value = self.prepare_context_kv(context) if context_kv is None else context_kv
-        prefix_length = key.shape[2]
         hidden = self.input_norm(x)
         query = self.q_norm(self.split_heads(self.q_proj(hidden), self.n_head))
         attention_mask = None
-        if self.temporal_actions:
-            positions = torch.arange(x.shape[1], device=x.device)
-            query = self.rope(query, positions)
+        if rotary is not None:
+            query = RotaryEmbedding.apply_rotary(query, *rotary)
         if not self.cross_attention:
             action_key = self.k_norm(self.split_heads(self.k_proj(hidden), self.n_kv_head))
-            if self.temporal_actions:
-                action_key = self.rope(action_key, positions)
+            if rotary is not None:
+                action_key = RotaryEmbedding.apply_rotary(action_key, *rotary)
             action_value = self.split_heads(self.v_proj(hidden), self.n_kv_head)
             key = torch.cat((key, action_key), dim=2)
             value = torch.cat((value, action_value), dim=2)
-            if self.temporal_actions:
-                # SDPA's non-square is_causal mask would hide part of the prefix.
-                attention_mask = torch.arange(key.shape[2], device=x.device)[None] <= (
-                    prefix_length + positions[:, None]
-                )
+            attention_mask = joint_attn_mask
 
         groups = self.n_head // self.n_kv_head
-        key = key.repeat_interleave(groups, dim=1)
-        value = value.repeat_interleave(groups, dim=1)
+        if groups > 1:
+            key = key.repeat_interleave(groups, dim=1)
+            value = value.repeat_interleave(groups, dim=1)
         # Keep the projection dtype so SDPA can select fused BF16/FP16 kernels.
         output = F.scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask,
@@ -203,6 +199,7 @@ class DiT(nn.Module):
         self.action_io = action_io
         if action_io is None:
             self.input_embedder = nn.Linear(action_dim, hidden_dim)
+            self.rope = RotaryEmbedding(head_dim)
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.timestep_embedder = TimeEmbedding(timestep_embed_dim)
@@ -216,7 +213,6 @@ class DiT(nn.Module):
                 hidden_dim, n_head, n_kv_head, head_dim, intermediate_dim,
                 cross_attention=index % self_attn_every_n_layers != 0,
                 p_drop_attn=p_drop_attn, qkv_bias=qkv_bias, qk_norm=qk_norm,
-                temporal_actions=action_io is None,
             )
             for index in range(n_layers)
         )
@@ -261,8 +257,20 @@ class DiT(nn.Module):
         hidden = self.action_time_mlp(torch.cat((
             hidden, time[:, None].expand(-1, hidden.shape[1], -1),
         ), dim=-1))
+
+        rotary = joint_attn_mask = None
+        if self.action_io is None:
+            positions = torch.arange(hidden.shape[1], device=hidden.device)
+            rotary = self.rope(positions)
+            prefix_length = context.shape[1]
+            # SDPA's non-square is_causal mask would hide part of the prefix.
+            joint_attn_mask = torch.arange(
+                prefix_length + hidden.shape[1], device=hidden.device,
+            )[None] <= prefix_length + positions[:, None]
+
         for index, block in enumerate(self.dit_blocks):
             hidden = block(
                 hidden, context_c, context_kv=None if context_kv is None else context_kv[index],
+                rotary=rotary, joint_attn_mask=joint_attn_mask,
             )
         return hidden

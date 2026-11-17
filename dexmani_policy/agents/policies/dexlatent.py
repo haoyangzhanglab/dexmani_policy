@@ -13,8 +13,8 @@ from dexmani_policy.agents.policies.base import Policy
 
 class DexLatent(Policy):
     supported_action_keys = ("action",)
-    hand_dim = 12
-    flow_action_dim = 39
+    arm_dim = 7
+    decoder_action_dim = 39
 
     def __init__(
         self,
@@ -42,6 +42,7 @@ class DexLatent(Policy):
     ) -> None:
         if action_dim != 19:
             raise ValueError("DexLatent requires 19D joint actions/state")
+
         obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=19,
@@ -53,9 +54,10 @@ class DexLatent(Policy):
             rgb_backbone_name=rgb_backbone_name,
             rgb_semantic_sampling=rgb_semantic_sampling,
         )
+
         backbone = DiTX(
             horizon=horizon,
-            action_dim=self.flow_action_dim,
+            action_dim=self.decoder_action_dim,
             n_obs_steps=n_obs_steps,
             obs_token_dim=obs_encoder.out_dim,
             timestep_embed_dim=timestep_embed_dim,
@@ -67,11 +69,13 @@ class DexLatent(Policy):
             qk_norm=qk_norm,
             p_drop_attn=p_drop_attn,
         )
+
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
             time_shift_alpha=time_shift_alpha,
         )
+
         super().__init__(
             obs_encoder=obs_encoder,
             action_decoder=action_decoder,
@@ -88,37 +92,23 @@ class DexLatent(Policy):
         )
 
     @torch.no_grad()
-    def _encode_actions(self, actions) -> tuple[torch.Tensor, torch.Tensor]:
+    def _encode_action_parts(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         normalized = self.normalizer["action"].normalize(actions)
-        return normalized[..., :7], self.hand_prior.encode(normalized[..., 7:])
+        return normalized[..., : self.arm_dim], self.hand_prior.encode(normalized[..., self.arm_dim :])
 
     def fit_latent_normalizer(self, dataset) -> None:
-        latents = (self._encode_actions(chunk)[1] for chunk in dataset.iter_normalization_data("action"))
+        latents = (
+            self._encode_action_parts(chunk)[1]
+            for chunk in dataset.iter_normalization_data("action")
+        )
         self.normalizer.fit_field("hand_latent", latents)
 
-    def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
-        condition = self._encode_obs(batch["obs"])
-        arm, latent = self._encode_actions(batch["action"])
-        flow_target = torch.cat([arm, self.normalizer["hand_latent"].normalize(latent)], dim=-1)
-        return self.action_decoder.compute_loss(
-            condition, flow_target, log_metrics=log_metrics,
-        )
+    def _encode_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        arm, latent = self._encode_action_parts(actions)
+        return torch.cat((arm, self.normalizer["hand_latent"].normalize(latent)), dim=-1)
 
-    @torch.no_grad()
-    def _predict_from_condition(
-        self, condition: torch.Tensor, inference_steps: int | None = None,
-        *, generator: torch.Generator | None = None,
-        rtc_prefix: torch.Tensor | None = None,
-        delay_steps: int = 0,
-        rtc_guidance_cap: float = 0.0,
-    ) -> dict[str, torch.Tensor]:
-        if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
-            raise NotImplementedError("DexLatent does not support RTC")
-        prediction = self.action_decoder.predict_action(
-            condition, (condition.shape[0], self.horizon, self.flow_action_dim),
-            inference_steps=inference_steps, generator=generator,
-        )
-        latent = self.normalizer["hand_latent"].unnormalize(prediction[..., 7:])
+    def _decode_actions(self, prediction: torch.Tensor) -> torch.Tensor:
+        arm = prediction[..., : self.arm_dim]
+        latent = self.normalizer["hand_latent"].unnormalize(prediction[..., self.arm_dim :])
         hand = self.hand_prior.decode(latent)
-        prediction = self.normalizer["action"].unnormalize(torch.cat([prediction[..., :7], hand], dim=-1))
-        return self._action_output(prediction)
+        return self.normalizer["action"].unnormalize(torch.cat((arm, hand), dim=-1))

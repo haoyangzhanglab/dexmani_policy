@@ -15,7 +15,6 @@ from dexmani_policy.agents.policies.base import Policy, module_parameter_group
 
 
 class CordViPEncoder(nn.Module):
-
     def __init__(self, n_obs_steps):
         super().__init__()
         self.interaction_encoder = ContactCoordinationEncoder()
@@ -56,12 +55,16 @@ class CordViP(Policy):
         if action_dim != 19:
             raise ValueError("CordViP uses XYZ and arm7+hand12 state/actions")
         validate_unet_horizon(horizon, down_dims)
+
         obs_encoder = CordViPEncoder(n_obs_steps)
+
         backbone = ConditionalUNet1D(
             action_dim, obs_encoder.out_dim, diffusion_step_embed_dim,
             down_dims, kernel_size, n_groups, cond_predict_scale,
         )
+
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)
+
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):

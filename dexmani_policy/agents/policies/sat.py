@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Literal
 
+from dexmani_policy.agents.action_decoders.backbones.action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.hand_prior.action_io import SATActionIO
 from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
 
@@ -44,6 +44,7 @@ class SAT(Policy):
             raise ValueError("SAT requires joint action_dim=19 and hidden_dim divisible by 4")
         if backbone_type not in {"ditx", "dit"}:
             raise ValueError("SAT backbone_type must be 'ditx' or 'dit'")
+
         obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -55,7 +56,9 @@ class SAT(Policy):
             rgb_backbone_name=rgb_backbone_name,
             rgb_semantic_sampling=rgb_semantic_sampling,
         )
+
         backbone_cls = DiT if backbone_type == "dit" else DiTX
+
         backbone = backbone_cls(
             horizon=horizon,
             action_dim=action_dim,
@@ -71,11 +74,13 @@ class SAT(Policy):
             qk_norm=qk_norm,
             action_io=SATActionIO(horizon, hidden_dim),
         )
+
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
             time_shift_alpha=time_shift_alpha,
         )
+
         super().__init__(
             obs_encoder=obs_encoder,
             action_decoder=action_decoder,

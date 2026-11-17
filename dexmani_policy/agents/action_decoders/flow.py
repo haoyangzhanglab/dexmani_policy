@@ -16,6 +16,50 @@ def interpolate_flow(noise, target, timestep):
     return (1.0 - timestep) * noise + timestep * target
 
 
+def _sample_flow(
+    decoder, cond, action_shape, inference_steps, *,
+    generator, rtc_prefix, delay_steps, history_offset, rtc_guidance_cap,
+    target_t_sample_mode=None,
+):
+    num_steps = (
+        decoder.num_inference_steps
+        if inference_steps is None
+        else positive_int(inference_steps, "inference_steps")
+    )
+    if rtc_enabled(rtc_prefix, action_shape, history_offset, rtc_guidance_cap):
+        return guided_flow(
+            decoder, cond, action_shape, rtc_prefix,
+            delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
+            steps=num_steps, generator=generator,
+            target_t_sample_mode=target_t_sample_mode,
+        )
+
+    sample = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
+    step_size = 1.0 / num_steps
+    context_kv = (
+        decoder.model.prepare_context_kv(cond)
+        if not decoder.training and num_steps > 1 else None
+    )
+    timesteps = euler_time_grid(num_steps, sample)
+    target_times = None
+    if target_t_sample_mode is not None:
+        target_times = (
+            torch.full_like(timesteps, step_size)
+            if target_t_sample_mode == "relative" else timesteps + step_size
+        )
+
+    model_kwargs = {}
+    for index, timestep in enumerate(timesteps):
+        if target_times is not None:
+            model_kwargs["target_t"] = target_times[index].expand(action_shape[0])
+        velocity = decoder.model(
+            x=sample, timestep=timestep.expand(action_shape[0]), context=cond,
+            context_kv=context_kv, **model_kwargs,
+        )
+        sample = sample + step_size * velocity
+    return sample
+
+
 class RectifiedFlow(nn.Module):
     requires_ema_for_loss = False
 
@@ -50,10 +94,7 @@ class RectifiedFlow(nn.Module):
         target_v = actions - noise
         pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v.float(), target_v.float())
-        metrics = {}
-        if log_metrics:
-            metrics = {"loss": loss.detach()}
-        return loss, metrics
+        return loss, {"loss": loss.detach()} if log_metrics else {}
 
     @torch.no_grad()
     def predict_action(
@@ -68,30 +109,11 @@ class RectifiedFlow(nn.Module):
         history_offset=0,
         rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
-        num_steps = (
-            self.num_inference_steps
-            if inference_steps is None
-            else positive_int(inference_steps, "inference_steps")
+        return _sample_flow(
+            self, cond, action_shape, inference_steps,
+            generator=generator, rtc_prefix=rtc_prefix, delay_steps=delay_steps,
+            history_offset=history_offset, rtc_guidance_cap=rtc_guidance_cap,
         )
-
-        if rtc_enabled(rtc_prefix, action_shape, history_offset, rtc_guidance_cap):
-            return guided_flow(
-                self, cond, action_shape, rtc_prefix,
-                delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
-                steps=num_steps, generator=generator,
-            )
-
-        batch_size = action_shape[0]
-        x = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
-        dt = 1.0 / num_steps
-
-        context_kv = self.model.prepare_context_kv(cond) if not self.training and num_steps > 1 else None
-        for timestep in euler_time_grid(num_steps, x):
-            t = timestep.expand(batch_size)
-            velocity = self.model(x=x, timestep=t, context=cond, context_kv=context_kv)
-            x = x + dt * velocity
-
-        return x
 
 
 class ConsistencyFlow(nn.Module):
@@ -133,8 +155,7 @@ class ConsistencyFlow(nn.Module):
             device=actions.device,
         )
         t_view = t.view(batch_size, *([1] * (actions.ndim - 1)))
-        dt = torch.zeros((batch_size,), device=actions.device, dtype=t.dtype)
-        target_t = dt if self.target_t_sample_mode == "relative" else t
+        target_t = torch.zeros_like(t) if self.target_t_sample_mode == "relative" else t
 
         x0 = torch.randn_like(actions)
         return {
@@ -258,41 +279,9 @@ class ConsistencyFlow(nn.Module):
         history_offset=0,
         rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
-        num_steps = (
-            self.num_inference_steps
-            if inference_steps is None
-            else positive_int(inference_steps, "inference_steps")
+        return _sample_flow(
+            self, cond, action_shape, inference_steps,
+            generator=generator, rtc_prefix=rtc_prefix, delay_steps=delay_steps,
+            history_offset=history_offset, rtc_guidance_cap=rtc_guidance_cap,
+            target_t_sample_mode=self.target_t_sample_mode,
         )
-
-        if rtc_enabled(rtc_prefix, action_shape, history_offset, rtc_guidance_cap):
-            return guided_flow(
-                self, cond, action_shape, rtc_prefix,
-                delay=delay_steps, offset=history_offset, beta=rtc_guidance_cap,
-                steps=num_steps, generator=generator,
-                target_t_sample_mode=self.target_t_sample_mode,
-            )
-
-        batch_size = action_shape[0]
-        x = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
-        dt = 1.0 / num_steps
-        context_kv = self.model.prepare_context_kv(cond) if not self.training and num_steps > 1 else None
-        timesteps = euler_time_grid(num_steps, x)
-        target_times = (
-            torch.full_like(timesteps, dt)
-            if self.target_t_sample_mode == "relative"
-            else timesteps + dt
-        )
-
-        for timestep, target_time in zip(timesteps, target_times):
-            t = timestep.expand(batch_size)
-            target_t = target_time.expand(batch_size)
-            velocity = self.model(
-                x=x,
-                timestep=t,
-                target_t=target_t,
-                context=cond,
-                context_kv=context_kv,
-            )
-            x = x + dt * velocity
-
-        return x

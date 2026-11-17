@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 
@@ -15,7 +15,7 @@ class DQRISE(Policy):
     supported_action_keys = ("action",)
     arm_dim = 7
     hand_dim = 12
-    flow_action_dim = 8
+    decoder_action_dim = 8
 
     def __init__(
         self,
@@ -46,6 +46,7 @@ class DQRISE(Policy):
     ) -> None:
         if action_dim != 19:
             raise ValueError("DQ-RISE requires joint action=7+12")
+
         obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -57,9 +58,10 @@ class DQRISE(Policy):
             rgb_backbone_name=rgb_backbone_name,
             rgb_semantic_sampling=rgb_semantic_sampling,
         )
+
         backbone = DiTX(
             horizon=horizon,
-            action_dim=self.flow_action_dim,
+            action_dim=self.decoder_action_dim,
             n_obs_steps=n_obs_steps,
             obs_token_dim=obs_encoder.out_dim,
             timestep_embed_dim=timestep_embed_dim,
@@ -71,11 +73,13 @@ class DQRISE(Policy):
             qk_norm=qk_norm,
             p_drop_attn=p_drop_attn,
         )
+
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
             time_shift_alpha=time_shift_alpha,
         )
+
         super().__init__(
             obs_encoder=obs_encoder,
             action_decoder=action_decoder,
@@ -89,48 +93,21 @@ class DQRISE(Policy):
             num_codes=num_codes,
         )
 
-    def compute_loss(
-        self, batch: dict[str, Any], *, log_metrics: bool = True,
-    ) -> tuple[torch.Tensor, dict]:
-        condition = self._encode_obs(batch["obs"])
+    def _encode_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        normalized = self.normalizer["action"].normalize(actions)
+        arm = normalized[..., : self.arm_dim]
+        index = self.hand_codebook.encode(normalized[..., self.arm_dim :])
+        return torch.cat((arm, index), dim=-1)
 
-        normed = self.normalizer["action"].normalize(batch["action"])
-        arm_part = normed[..., : self.arm_dim]
-        hand_part = normed[..., self.arm_dim :]
-        index = self.hand_codebook.encode(hand_part)
-
-        flow_target = torch.cat([arm_part, index], dim=-1)
-        return self.action_decoder.compute_loss(
-            condition, flow_target, log_metrics=log_metrics,
-        )
-
-    @torch.no_grad()
-    def _predict_from_condition(
-        self, condition: torch.Tensor, inference_steps: int | None = None,
-        *, generator: torch.Generator | None = None,
-        rtc_prefix: torch.Tensor | None = None,
-        delay_steps: int = 0,
-        rtc_guidance_cap: float = 0.0,
-    ) -> dict[str, torch.Tensor]:
-        if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
-            raise NotImplementedError("DQ-RISE does not support RTC")
-        reduced_action = self.action_decoder.predict_action(
-            condition, (condition.shape[0], self.horizon, self.flow_action_dim),
-            inference_steps=inference_steps, generator=generator,
-        )
-
-        arm_pred = reduced_action[..., : self.arm_dim]
-        idx_pred = reduced_action[..., -1]
-        hand_pred = self.hand_codebook.decode(idx_pred)
-
-        normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
-        prediction = self.normalizer["action"].unnormalize(normalized_full_action)
-        return self._action_output(prediction)
+    def _decode_actions(self, prediction: torch.Tensor) -> torch.Tensor:
+        arm = prediction[..., : self.arm_dim]
+        hand = self.hand_codebook.decode(prediction[..., -1])
+        return self.normalizer["action"].unnormalize(torch.cat((arm, hand), dim=-1))
 
     def extra_repr(self) -> str:
         return (
             f"action_dim={self.action_dim}, arm_dim={self.arm_dim}, "
             f"hand_dim={self.hand_dim}, "
-            f"flow_action_dim={self.flow_action_dim}, "
+            f"decoder_action_dim={self.decoder_action_dim}, "
             f"codes={self.hand_codebook.num_codes}"
         )

@@ -87,6 +87,7 @@ class ManiFlow(Policy):
         dt_sample_mode_for_consistency: str = "uniform",
         target_t_sample_mode: str = "relative",
     ) -> None:
+
         obs_encoder = ManiFlowEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -113,6 +114,7 @@ class ManiFlow(Policy):
             qk_norm=qk_norm,
             pre_norm_modality=pre_norm_modality,
         )
+
         action_decoder = ConsistencyFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,

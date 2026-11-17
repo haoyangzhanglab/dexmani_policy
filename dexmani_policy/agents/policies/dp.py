@@ -16,7 +16,6 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DPEncoder(nn.Module):
-
     def __init__(
         self,
         rgb_backbone_name: Literal["resnet", "dino", "dinov3", "siglip"],
@@ -80,6 +79,7 @@ class DP(Policy):
         clip_sample: bool = True,
     ) -> None:
         validate_unet_horizon(horizon, down_dims)
+
         obs_encoder = DPEncoder(
             rgb_backbone_name,
             state_dim,
@@ -88,6 +88,7 @@ class DP(Policy):
             state_out_dim,
             rgb_backbone_config=rgb_backbone_config,
         )
+
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
             context_dim=obs_encoder.out_dim,
@@ -97,6 +98,7 @@ class DP(Policy):
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,
         )
+
         action_decoder = Diffusion(
             backbone,
             num_training_steps,
@@ -104,6 +106,7 @@ class DP(Policy):
             prediction_type,
             clip_sample=clip_sample,
         )
+
         super().__init__(
             obs_encoder,
             action_decoder,

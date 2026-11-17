@@ -43,7 +43,7 @@ class PolicyRuntime:
         if rtc_prefix is None:
             if delay_steps:
                 raise ValueError("No prefix requires delay_steps=0")
-            return {}
+            return {"rtc_guidance_cap": rtc_guidance_cap}
         prefix = np.asarray(rtc_prefix)
         if (
             prefix.ndim != 2

@@ -5,15 +5,14 @@ import math
 import torch
 from torch import nn
 
+from dexmani_policy.agents.action_decoders.backbones.force_transformer import ForceTransformer
 from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     ConditionalUNet1D,
     validate_unet_horizon,
 )
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
-    ForceDiffusion,
     ForceGuidedFusion,
-    ForceTransformer,
     VisuoTactileAttention,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
@@ -110,6 +109,7 @@ class AdapTac(Policy):
         if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
             raise ValueError("force_loss_weight must be finite and nonnegative")
         validate_unet_horizon(horizon, down_dims)
+
         obs_encoder = AdapTacEncoder(
             tactile_encoder=tactile_encoder,
             pc_dim=pc_dim,
@@ -119,6 +119,7 @@ class AdapTac(Policy):
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
         )
+
         backbone = ConditionalUNet1D(
             input_dim=action_dim,
             context_dim=feature_dim + n_obs_steps * state_out_dim,
@@ -128,6 +129,7 @@ class AdapTac(Policy):
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,
         )
+
         action_decoder = Diffusion(
             backbone,
             num_training_steps,
@@ -135,6 +137,7 @@ class AdapTac(Policy):
             prediction_type="epsilon",
             clip_sample=clip_sample,
         )
+
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
         self.force_key = tactile_encoder.input_key
         self.force_dim = math.prod(TACTILE_FEATURE_SHAPES[self.force_key])
@@ -185,7 +188,7 @@ class AdapTac(Policy):
         return torch.cat((fused, state), dim=-1)
 
     def compute_loss(
-        self, batch: dict, *, log_metrics: bool = True,
+        self, batch: dict, *, log_metrics: bool = True, **kwargs,
     ) -> tuple[torch.Tensor, dict]:
         features, current_force, force_condition = self._encode_force_inputs(batch["obs"])
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
@@ -197,8 +200,8 @@ class AdapTac(Policy):
         condition = self._action_condition(features, current_force, predicted_force)
         action_loss, metrics = self.action_decoder.compute_loss(
             condition,
-            self.normalizer["action"].normalize(batch["action"]),
-            log_metrics=log_metrics,
+            self._encode_actions(batch["action"]),
+            log_metrics=log_metrics, **kwargs,
         )
         weighted_force_loss = self.force_loss_weight * force_loss
         loss = action_loss + weighted_force_loss

@@ -27,7 +27,6 @@ class ODEEncoder(nn.Module):
 
 class ODEPolicy(Policy):
     supported_action_keys = ("action",)
-    supports_rtc = False
     requires_prev_action = True
 
     def __init__(
@@ -39,14 +38,18 @@ class ODEPolicy(Policy):
     ):
         if horizon - n_obs_steps + 1 != n_action_steps:
             raise ValueError("ODE requires horizon - n_obs_steps + 1 == n_action_steps")
+
         obs_encoder = ODEEncoder(pc_dim, pc_out_dim, num_points, n_obs_steps, fps_random_config)
+
         decoder = ODE(
             obs_encoder.out_dim, action_dim, state_dim, n_action_steps,
             cond_dim=cond_dim, hidden_dim=hidden_dim, num_layers=num_layers,
             solver=solver, vel_scale=vel_scale, perturb_prob=perturb_prob,
             perturb_decay=perturb_decay, side_head=side_head, eps_center=eps_center,
         )
+
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
+
         std = torch.as_tensor(perturb_std, dtype=torch.float32).expand(action_dim).clone()
         if not torch.isfinite(std).all() or (std < 0).any():
             raise ValueError("perturb_std must be finite and nonnegative")
@@ -58,14 +61,16 @@ class ODEPolicy(Policy):
         state = normalized["joint_state"].unflatten(0, (-1, self.n_obs_steps))[:, -1]
         return condition, state
 
-    def compute_loss(self, batch, *, log_metrics=True):
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True, **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
         condition, state = self._condition_state(batch["obs"])
         field = self.normalizer["action"]
-        a0 = field.normalize(batch["prev_action"])
+        initial_action = field.normalize(batch["prev_action"])
         target = field.normalize(batch["action"][:, self.action_start_index:])
         return self.action_decoder.compute_loss(
-            condition, a0, state, target, perturb_std=self.perturb_std * field.scale,
-            log_metrics=log_metrics,
+            condition, initial_action, state, target, perturb_std=self.perturb_std * field.scale,
+            log_metrics=log_metrics, **kwargs,
         )
 
     @torch.no_grad()
@@ -74,7 +79,7 @@ class ODEPolicy(Policy):
         generator: torch.Generator | None = None, prev_action: torch.Tensor | None = None,
         rtc_prefix: torch.Tensor | None = None, delay_steps: int = 0, rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        if rtc_prefix is not None:
+        if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("ODEPolicy does not support RTC")
         condition, state = self._condition_state(obs_dict)
         if prev_action is None:

@@ -2,8 +2,7 @@
 
 Source: bcea95a299dc3fa8b2a571603a5e8b50e1c449e9,
 ode_policy/policies/ode/ode_image_policy.py.
-Changes: normalized decoder boundary, FP32 accumulation, explicit generator,
-shared FiLM projections, and removal of image/gripper/ablation branches.
+Integration accumulates normalized joint actions in FP32.
 """
 
 import math
@@ -15,34 +14,36 @@ from torch.nn import functional as F
 from dexmani_policy.common.config import positive_int
 
 
-class _FiLMLayer(nn.Module):
+class FiLMResidualBlock(nn.Module):
     def __init__(self, dim, cond_dim):
         super().__init__()
-        self.lin = nn.Linear(dim, dim)
-        self.film = nn.Linear(cond_dim, 2 * dim)
+        self.linear = nn.Linear(dim, dim)
+        self.conditioning = nn.Linear(cond_dim, 2 * dim)
 
-    def forward(self, h, gb):
-        g, b = gb
-        return h + F.silu(self.lin(h) * (1 + g) + b)
+    def forward(self, hidden, scale_bias):
+        scale, bias = scale_bias
+        return hidden + F.silu(self.linear(hidden) * (1 + scale) + bias)
 
 
 class VectorField(nn.Module):
     def __init__(self, cond_dim, state_dim, hidden_dim, num_layers, action_dim):
         super().__init__()
-        self.inp = nn.Linear(action_dim + state_dim, hidden_dim)
-        self.layers = nn.ModuleList([_FiLMLayer(hidden_dim, cond_dim) for _ in range(num_layers)])
-        self.out = nn.Linear(hidden_dim, action_dim)
-        nn.init.zeros_(self.out.weight)
-        nn.init.zeros_(self.out.bias)
+        self.input_projection = nn.Linear(action_dim + state_dim, hidden_dim)
+        self.layers = nn.ModuleList(
+            FiLMResidualBlock(hidden_dim, cond_dim) for _ in range(num_layers)
+        )
+        self.output_projection = nn.Linear(hidden_dim, action_dim)
+        nn.init.zeros_(self.output_projection.weight)
+        nn.init.zeros_(self.output_projection.bias)
 
-    def precompute(self, c):
-        return [layer.film(c).chunk(2, dim=-1) for layer in self.layers]
+    def prepare_conditioning(self, condition):
+        return [layer.conditioning(condition).chunk(2, dim=-1) for layer in self.layers]
 
-    def forward(self, a, s, film, *, return_features=False):
-        h = self.inp(torch.cat([a, s], dim=-1))
-        for layer, gb in zip(self.layers, film):
-            h = layer(h, gb)
-        return h if return_features else self.out(h)
+    def forward(self, action, state, conditioning, *, return_features=False):
+        hidden = self.input_projection(torch.cat((action, state), dim=-1))
+        for layer, scale_bias in zip(self.layers, conditioning):
+            hidden = layer(hidden, scale_bias)
+        return hidden if return_features else self.output_projection(hidden)
 
 
 class ODE(nn.Module):
@@ -61,8 +62,9 @@ class ODE(nn.Module):
             raise ValueError("perturb_prob and perturb_decay must be in [0, 1]")
         if type(side_head) is not int or side_head < 0:
             raise ValueError("side_head must be a nonnegative integer")
+
         self.model = VectorField(cond_dim, state_dim, hidden_dim, num_layers, action_dim)
-        self.cond_net = nn.Sequential(
+        self.condition_encoder = nn.Sequential(
             nn.Linear(obs_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim),
         )
         self.action_dim = action_dim
@@ -71,97 +73,122 @@ class ODE(nn.Module):
         self.vel_scale = vel_scale
         self.perturb_prob = perturb_prob
         self.perturb_decay = perturb_decay
-        self.side_k = side_head
+        self.num_components = side_head
         self.eps_center = eps_center
-        self.spread_min, self.mix_min = 0.02, 0.05
+        self.min_spread, self.min_mixture_width = 0.02, 0.05
+
         if side_head:
-            n_amp = n_action_steps * action_dim
+            trajectory_dim = n_action_steps * action_dim
             self.side_head = nn.Sequential(
                 nn.Linear(hidden_dim, 256), nn.SiLU(),
-                nn.Linear(256, n_amp + side_head * (1 + 2 * action_dim)),
+                nn.Linear(256, trajectory_dim + side_head * (1 + 2 * action_dim)),
             )
             nn.init.zeros_(self.side_head[-1].weight)
             nn.init.zeros_(self.side_head[-1].bias)
-            nn.init.normal_(self.side_head[-1].bias[n_amp + side_head:
-                                                 n_amp + side_head * (1 + action_dim)])
+            mean_start = trajectory_dim + side_head
+            mean_end = mean_start + side_head * action_dim
+            nn.init.normal_(self.side_head[-1].bias[mean_start:mean_end])
 
-    def integrate(self, a0, state, film, *, substeps=1, step_offset=None):
-        a, out = a0.float(), []
-        h = 1.0 / substeps
-        for i in range(self.n_action_steps):
-            def f(x):
-                velocity = self.vel_scale * self.model(x, state, film).float()
-                return velocity if step_offset is None else velocity + step_offset[:, i]
+    def integrate(self, initial_action, state, conditioning, *, substeps=1, step_offset=None):
+        action = initial_action.float()
+        trajectory = []
+        step_size = 1.0 / substeps
+
+        for index in range(self.n_action_steps):
+            offset = None if step_offset is None else step_offset[:, index]
+
+            def velocity(current_action):
+                update = self.vel_scale * self.model(current_action, state, conditioning).float()
+                return update if offset is None else update + offset
 
             for _ in range(substeps):
                 if self.solver == "euler":
-                    a = a + h * f(a)
+                    action = action + step_size * velocity(action)
                 else:
-                    k1 = f(a)
-                    k2 = f(a + 0.5 * h * k1)
-                    k3 = f(a + 0.5 * h * k2)
-                    k4 = f(a + h * k3)
-                    a = a + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-            out.append(a)
-        return torch.stack(out, dim=1)
+                    k1 = velocity(action)
+                    k2 = velocity(action + 0.5 * step_size * k1)
+                    k3 = velocity(action + 0.5 * step_size * k2)
+                    k4 = velocity(action + step_size * k3)
+                    action = action + step_size / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+            trajectory.append(action)
 
-    def _side(self, a0, state, film):
-        features = self.model(a0, state, film, return_features=True).detach()
-        out = self.side_head(features).float()
-        k, p, n = self.side_k, self.action_dim, self.n_action_steps
-        rate = self.vel_scale * F.softplus(out[:, :n * p]).view(-1, n, p)
-        mean, raw = out[:, n * p + k:].view(-1, 2, k, p).unbind(dim=1)
-        return (rate, F.log_softmax(out[:, n * p:n * p + k], dim=-1), mean,
-                self.mix_min + F.softplus(raw + 0.54))
+        return torch.stack(trajectory, dim=1)
+
+    def _predict_diversity(self, initial_action, state, conditioning):
+        features = self.model(initial_action, state, conditioning, return_features=True).detach()
+        output = self.side_head(features).float()
+        trajectory_dim = self.n_action_steps * self.action_dim
+        mixture_start = trajectory_dim + self.num_components
+
+        rate = self.vel_scale * F.softplus(output[:, :trajectory_dim]).view(
+            -1, self.n_action_steps, self.action_dim,
+        )
+        log_weights = F.log_softmax(output[:, trajectory_dim:mixture_start], dim=-1)
+        means, raw_widths = output[:, mixture_start:].view(
+            -1, 2, self.num_components, self.action_dim,
+        ).unbind(dim=1)
+        widths = self.min_mixture_width + F.softplus(raw_widths + 0.54)
+        return rate, log_weights, means, widths
 
     @staticmethod
-    def _draw_eps(logw, mean, width, *, center, generator):
-        k = torch.multinomial(logw.exp(), 1, generator=generator)[:, 0]
-        i = torch.arange(len(k), device=k.device)
+    def _sample_noise(log_weights, means, widths, *, center, generator):
+        components = torch.multinomial(log_weights.exp(), 1, generator=generator)[:, 0]
+        batch_indices = torch.arange(len(components), device=components.device)
+        selected_means = means[batch_indices, components]
         if center:
-            return mean[i, k]
-        noise = torch.randn(mean[:, 0].shape, device=mean.device, dtype=mean.dtype, generator=generator)
-        return mean[i, k] + width[i, k] * noise
+            return selected_means
+        noise = torch.randn(
+            means[:, 0].shape, device=means.device, dtype=means.dtype, generator=generator,
+        )
+        return selected_means + widths[batch_indices, components] * noise
 
-    def compute_loss(self, condition, a0, state, target, *, perturb_std, log_metrics=True):
-        c = self.cond_net(condition)
-        film = self.model.precompute(c)
-        a0, target = a0.float(), target.float()
+    def compute_loss(self, condition, initial_action, state, target, *, perturb_std, log_metrics=True):
+        conditioning = self.model.prepare_conditioning(self.condition_encoder(condition))
+        initial_action, target = initial_action.float(), target.float()
+
         if self.training and self.perturb_prob > 0:
-            on = (torch.rand(a0.shape[0], 1, device=a0.device) < self.perturb_prob).to(a0.dtype)
-            delta = torch.randn_like(a0) * perturb_std * on
+            perturb_mask = (
+                torch.rand(initial_action.shape[0], 1, device=initial_action.device) < self.perturb_prob
+            ).to(initial_action.dtype)
+            delta = torch.randn_like(initial_action) * perturb_std * perturb_mask
             decay = self.perturb_decay ** torch.arange(
-                1, self.n_action_steps + 1, device=a0.device, dtype=a0.dtype,
+                1, self.n_action_steps + 1, device=initial_action.device, dtype=initial_action.dtype,
             )
-            a0 = a0 + delta
+            initial_action = initial_action + delta
             target = target + delta[:, None, :] * decay[None, :, None]
-        prediction = self.integrate(a0, state, film)
+
+        prediction = self.integrate(initial_action, state, conditioning)
         path_loss = F.mse_loss(prediction, target) / self.vel_scale ** 2
         loss = path_loss
         metrics = {"loss_path": path_loss.detach()} if log_metrics else {}
-        if self.side_k:
-            rate, logw, mean, width = self._side(a0, state, film)
-            sig = rate.cumsum(dim=1) / self.vel_scale + self.spread_min
-            err = ((prediction - target) / self.vel_scale).detach()
-            eps1 = -(sig.detach() * err).sum(dim=1) / (sig.detach() ** 2).sum(dim=1)
-            logp = (-0.5 * ((eps1[:, None] - mean) / width) ** 2 - width.log()).sum(dim=-1)
-            side_loss = ((0.5 * (err / sig) ** 2 + sig.log()).mean()
-                         - torch.logsumexp(logw + logp, dim=1).mean())
+
+        if self.num_components:
+            rate, log_weights, means, widths = self._predict_diversity(initial_action, state, conditioning)
+            spread = rate.cumsum(dim=1) / self.vel_scale + self.min_spread
+            error = ((prediction - target) / self.vel_scale).detach()
+            target_noise = -(spread.detach() * error).sum(dim=1) / (spread.detach() ** 2).sum(dim=1)
+            log_density = (
+                -0.5 * ((target_noise[:, None] - means) / widths) ** 2 - widths.log()
+            ).sum(dim=-1)
+            side_loss = (
+                (0.5 * (error / spread) ** 2 + spread.log()).mean()
+                - torch.logsumexp(log_weights + log_density, dim=1).mean()
+            )
             loss = loss + side_loss
             if log_metrics:
                 metrics["loss_diversity"] = side_loss.detach()
+
         if log_metrics:
             metrics["loss"] = loss.detach()
         return loss, metrics
 
     @torch.no_grad()
-    def predict_action(self, condition, a0, state, inference_steps=None, *, generator=None):
+    def predict_action(self, condition, initial_action, state, inference_steps=None, *, generator=None):
         substeps = 1 if inference_steps is None else positive_int(inference_steps, "inference_steps")
-        c = self.cond_net(condition)
-        film = self.model.precompute(c)
+        conditioning = self.model.prepare_conditioning(self.condition_encoder(condition))
         step_offset = None
-        if self.side_k:
-            rate, logw, mean, width = self._side(a0, state, film)
-            eps = self._draw_eps(logw, mean, width, center=self.eps_center, generator=generator)
-            step_offset = rate * eps[:, None]
-        return self.integrate(a0, state, film, substeps=substeps, step_offset=step_offset)
+        if self.num_components:
+            rate, log_weights, means, widths = self._predict_diversity(initial_action, state, conditioning)
+            noise = self._sample_noise(log_weights, means, widths, center=self.eps_center, generator=generator)
+            step_offset = rate * noise[:, None]
+        return self.integrate(initial_action, state, conditioning, substeps=substeps, step_offset=step_offset)

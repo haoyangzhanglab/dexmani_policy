@@ -41,28 +41,23 @@ class Diffusion(nn.Module):
         )
         self.num_inference_steps = num_inference_steps
 
-    def compute_loss(
-        self,
-        cond: torch.Tensor,
-        actions: torch.Tensor,
-        dim_groups: dict[str, tuple[int, int, float]] | None = None,
-        *,
-        log_metrics: bool = True,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        noise = torch.randn_like(actions)
+    def _training_prediction(
+        self, cond: torch.Tensor, samples: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        noise = torch.randn_like(samples)
         timestep = torch.randint(
             self.noise_scheduler.config.num_train_timesteps,
-            (actions.shape[0],),
-            device=actions.device,
+            (samples.shape[0],),
+            device=samples.device,
         )
 
-        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(actions.device)
+        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(samples.device)
         # BF16 can round alpha_bar to one and erase low-noise training steps.
         alpha_bar = self.noise_scheduler.alphas_cumprod[timestep].float().view(-1, 1, 1)
         alpha, sigma = alpha_bar.sqrt(), (1 - alpha_bar).sqrt()
-        noisy_actions = (alpha * actions + sigma * noise).to(actions.dtype)
+        noisy_samples = (alpha * samples + sigma * noise).to(samples.dtype)
         pred = self.model(
-            x=noisy_actions,
+            x=noisy_samples,
             timestep=timestep,
             context=cond,
         )
@@ -71,10 +66,20 @@ class Diffusion(nn.Module):
         if pred_type == "epsilon":
             target = noise
         elif pred_type == "sample":
-            target = actions
+            target = samples
         else:
-            target = (alpha * noise - sigma * actions).to(actions.dtype)
+            target = (alpha * noise - sigma * samples).to(samples.dtype)
+        return pred, target
 
+    def compute_loss(
+        self,
+        cond: torch.Tensor,
+        actions: torch.Tensor,
+        dim_groups: dict[str, tuple[int, int, float]] | None = None,
+        *,
+        log_metrics: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        pred, target = self._training_prediction(cond, actions)
         loss_dict = {}
         # Each group retains its own mean before applying its explicit weight.
         if dim_groups is not None:
@@ -138,3 +143,30 @@ class Diffusion(nn.Module):
             sample = self.noise_scheduler.step(output, timestep, sample, generator=generator).prev_sample
 
         return sample
+
+
+class ForceDiffusion(Diffusion):
+    """Standard Gaussian diffusion in dataset force coordinates and units."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        num_training_steps: int = 100,
+        num_inference_steps: int = 20,
+    ) -> None:
+        super().__init__(
+            model,
+            num_training_steps,
+            num_inference_steps,
+            prediction_type="sample",
+            clip_sample=False,
+        )
+
+    def compute_loss_and_prediction(
+        self, condition: torch.Tensor, force: torch.Tensor, valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prediction, target = self._training_prediction(condition, force.float())
+        prediction = prediction.float()
+        error = (prediction - target).square() * valid[..., None]
+        loss = error.sum() / (force.shape[-1] * valid.float().sum())
+        return loss, prediction

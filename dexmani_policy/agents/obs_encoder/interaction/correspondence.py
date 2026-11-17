@@ -48,8 +48,7 @@ class SampleLayerNorm(nn.Module):
 
     def forward(self, x):
         # Sample std and eps outside the square root are part of the original model.
-        mean = x.mean(-1, keepdim=True)
-        std = x.std(-1, keepdim=True)
+        std, mean = torch.std_mean(x, dim=-1, correction=1, keepdim=True)
         return self.weight * (x - mean) / (std + self.eps) + self.bias
 
 
