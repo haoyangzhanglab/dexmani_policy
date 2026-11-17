@@ -106,20 +106,13 @@ def build_train_loader(cfg, dataset):
     return loader
 
 
-def record_data_processing(cfg, dataset, *, resuming=False):
-    """保存完整处理记录；恢复时仅比较实际 Dataset 消费的模态。"""
-    from omegaconf import OmegaConf, open_dict
+def record_data_processing(cfg, dataset):
+    """记录实际读取字段的处理参数；可选研究记录不参与模型恢复准入。"""
+    from omegaconf import open_dict
 
-    attrs = dataset.episode_store.attrs
-    # 真机导出必须带有处理记录；仿真允许无记录。
-    metadata = (
-        attrs["data_processing"] if attrs.get("format") == "dexmani.real.canonical"
-        else attrs.get("data_processing", {})
-    )
-    if resuming:
-        previous = OmegaConf.to_container(cfg.data_processing, resolve=True)
-        for name in dataset.sensor_modalities:
-            if metadata.get(name) != previous.get(name):
-                raise ValueError(f"Resume data_processing mismatch: {name}")
+    processing = dataset.episode_store.attrs.get("data_processing")
+    metadata = None if processing is None else {
+        key: processing[key] for key in dataset.episode_store.keys() if key in processing
+    }
     with open_dict(cfg):
-        cfg.data_processing = metadata
+        cfg.data_processing = metadata or None

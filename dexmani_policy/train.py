@@ -140,7 +140,7 @@ def build_trainer(cfg, *, checkpoint=None):
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
-    record_data_processing(cfg, dataset, resuming=checkpoint is not None)
+    record_data_processing(cfg, dataset)
     if checkpoint is not None:
         data_dt = data_description["control_dt_s"]
         policy_dt = cfg.control_dt_s
