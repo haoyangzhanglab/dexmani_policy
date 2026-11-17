@@ -61,8 +61,6 @@ def generate(zarr_path, output, num_workers=1):
         shape = buffer[key].shape
         if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
             raise ValueError(f"Contact geometry requires {key}[T,N>0,C>=3]")
-    if "action" in keys and buffer["action"].shape[1:] != (19,):
-        raise ValueError("CordViP policy requires action[T,19]")
     rows = int(buffer.episode_ends[-1])
     attrs = dict(buffer.attrs)
     output.parent.mkdir(parents=True, exist_ok=True)
