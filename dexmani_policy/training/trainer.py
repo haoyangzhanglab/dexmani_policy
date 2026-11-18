@@ -1,6 +1,6 @@
 import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import hydra
 import numpy as np
@@ -120,9 +120,7 @@ class PolicyTrainer:
         if checkpoint is not None and ema_model is not None:
             if checkpoint.ema_model_state is None:
                 raise ValueError("Resume checkpoint is missing EMA state")
-            ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
-            ema_model.to(device=device, dtype=torch.float32)
-            ema_model.normalizer.validate()
+            ema_model.load_weights(checkpoint.ema_model_state, device)
         if ema_model is not None:
             # Bind current Parameters only after assignment and device migration.
             ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
@@ -221,7 +219,7 @@ class PolicyTrainer:
             ),
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
-            effective_config=OmegaConf.to_container(self.cfg, resolve=True),
+            effective_config=cast(dict, OmegaConf.to_container(self.cfg, resolve=True)),
         )
         checkpoint_path = save_checkpoint(self.checkpoint_dir / f"step_{global_step:08d}.pt", checkpoint)
         with atomic_path(self.checkpoint_dir / "latest.pt") as temporary:

@@ -86,6 +86,12 @@ class Policy(nn.Module):
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
 
+    def load_weights(self, state_dict: dict, device: str | torch.device) -> None:
+        """Assign checkpoint parameters before constructing the optimizer."""
+        self.load_state_dict(state_dict, strict=True, assign=True)
+        self.to(device=device, dtype=torch.float32)
+        self.normalizer.validate()
+
     @property
     def requires_ema_for_loss(self) -> bool:
         return bool(getattr(self.action_decoder, "requires_ema_for_loss", False))

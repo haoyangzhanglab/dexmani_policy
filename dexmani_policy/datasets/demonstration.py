@@ -64,18 +64,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.pad_after = pad_after
 
         self.sensor_modalities = sensor_modalities
-        self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys)
-
-        if "rgb" in sensor_modalities:
-            rgb = self.episode_store["rgb"]
-            if len(rgb.shape) != 4 or rgb.shape[-1] != 3 or rgb.dtype != np.uint8:
-                raise ValueError("Stored RGB must have shape (T, H, W, 3) and dtype uint8")
-        for key in POINT_CLOUD_FIELDS.intersection(sensor_modalities):
-            shape = self.episode_store[key].shape
-            if len(shape) != 3 or shape[1] == 0:
-                raise ValueError(f"Stored {key} must have shape [T,N>0,C]")
-            if pc_dim is not None and shape[-1] < pc_dim:
-                raise ValueError(f"Stored {key} does not satisfy configured pc_dim")
+        self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys, pc_dim=pc_dim)
         self.build_augmentors(augmentation_cfg)
         if {"point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"} <= set(sensor_modalities):
             if rgb_preprocess_size is not None:

@@ -12,7 +12,7 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DQRISE(Policy):
-    required_identity_fields = frozenset({"rgb", "point_cloud", "camera_intrinsic", "camera_extrinsic"})
+    required_identity_fields = frozenset({"point_cloud", "camera_intrinsic", "camera_extrinsic"})
     supported_action_keys = ("action",)
     arm_dim = 7
     hand_dim = 12

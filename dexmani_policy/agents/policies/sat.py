@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from dexmani_policy.agents.action_decoders.backbones.action_io import SATActionIO
+from dexmani_policy.agents.action_decoders.backbones.sat_action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
@@ -11,7 +11,7 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class SAT(Policy):
-    required_identity_fields = frozenset({"rgb", "point_cloud", "camera_intrinsic", "camera_extrinsic"})
+    required_identity_fields = frozenset({"point_cloud", "camera_intrinsic", "camera_extrinsic"})
     supports_rtc = True
     supported_action_keys = ("action",)
 

@@ -12,7 +12,7 @@ from dexmani_policy.agents.policies.base import Policy
 
 
 class DexLatent(Policy):
-    required_identity_fields = frozenset({"rgb", "point_cloud", "camera_intrinsic", "camera_extrinsic"})
+    required_identity_fields = frozenset({"point_cloud", "camera_intrinsic", "camera_extrinsic"})
     supported_action_keys = ("action",)
     arm_dim = 7
     decoder_action_dim = 39

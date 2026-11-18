@@ -5,27 +5,26 @@ import torch
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES,
+    FIXED_OBSERVATION_SHAPES,
     POINT_CLOUD_FIELDS,
-    TACTILE_FEATURE_SHAPES,
 )
 from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer
 
 
 def fit_observation_normalizer(
-    dataset, normalizer: LinearNormalizer, fields, *, initial_state=None, inherited_fields=(),
+    dataset, normalizer: LinearNormalizer, modes, *, initial_state=None, inherited_fields=(),
 ) -> None:
-    """Fit observation limits, retaining affine inherited from encoder pretraining."""
+    """Fit observation scales, retaining affine inherited from encoder pretraining."""
     if initial_state is not None:
         inherited = LinearNormalizer()
         for key in inherited_fields:
             inherited.fields[key] = normalizer[key]
         inherited.load_state_dict(initial_state, strict=True)
         inherited.validate()
-    for key in tuple(fields):
-        if key in inherited_fields:
+    for key in dataset.sensor_modalities:
+        if key not in normalizer.fields or key in inherited_fields:
             continue
-        normalizer.fit_field(key, dataset.iter_normalization_data(key))
+        normalizer.fit_field(key, dataset.iter_normalization_data(key), mode=modes[key])
 
 
 def fit_action_normalizer(dataset, normalizer: LinearNormalizer, *, hand_affine=None) -> None:
@@ -60,12 +59,14 @@ def build_dataset(cfg):
     dt = float(buffer.attrs["dt"])
     if not isfinite(dt) or dt <= 0:
         raise ValueError(f"Invalid dataset dt: {dt}")
-    dims = {key: int(buffer[key].shape[-1]) for key in dataset.sensor_modalities}
-    for key in (FIELD_FEATURE_SHAPES.keys() | TACTILE_FEATURE_SHAPES.keys()) & dims.keys():
-        dims[key] = prod(buffer[key].shape[1:])
-    if dataset.pc_dim is not None:
-        for key in POINT_CLOUD_FIELDS.intersection(dims):
+    dims = {}
+    for key in dataset.sensor_modalities:
+        if key in FIXED_OBSERVATION_SHAPES:
+            dims[key] = prod(FIXED_OBSERVATION_SHAPES[key])
+        elif key in POINT_CLOUD_FIELDS and dataset.pc_dim is not None:
             dims[key] = dataset.pc_dim
+        else:
+            dims[key] = buffer[key].shape[-1]
     dims["action"] = dataset.action_dim
     if cfg.agent.action_dim is None:
         cfg.agent.action_dim = dims["action"]

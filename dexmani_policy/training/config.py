@@ -1,10 +1,14 @@
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import hydra
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.config import PROJECT_ROOT, positive_int
+
+if TYPE_CHECKING:
+    from dexmani_policy.agents.policies.base import Policy
 
 CONFIG_ROOT = PROJECT_ROOT / "dexmani_policy" / "configs"
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -65,12 +69,6 @@ def check_fresh_output(output_dir, *extra_files):
             raise FileExistsError(f"Training output already exists: {path}")
 
 
-def validate_normalization(policy, spec, field_dims):
-    for key in policy.required_identity_fields.intersection(field_dims):
-        if key in spec and spec[key] != "identity":
-            raise ValueError(f"{key} must use identity for image preprocessing or physical geometry")
-
-
 def validate_config(cfg):
     if not 0 <= cfg.training.max_grad_norm < float("inf"):
         raise ValueError("training.max_grad_norm must be finite and nonnegative")
@@ -82,6 +80,6 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")
 
-    cls = hydra.utils.get_class(cfg.agent._target_)
+    cls = cast("type[Policy]", hydra.utils.get_class(cfg.agent._target_))
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")

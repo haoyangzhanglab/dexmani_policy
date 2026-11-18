@@ -5,10 +5,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from dexmani_policy.common.config import (
-    FIELD_FEATURE_SHAPES,
     POINT_CLOUD_FIELDS,
-    TACTILE_FEATURE_SHAPES,
     positive_int,
+    validate_observation_shape,
 )
 
 if TYPE_CHECKING:
@@ -60,16 +59,12 @@ def prepare_observations(observation, *, normalization_dims, n_obs_steps, rgb_pr
         if len(value) < n_obs_steps:
             raise ValueError(f"Policy history {name} requires at least {n_obs_steps} frames")
         value = value[-n_obs_steps:]
-        shape = FIELD_FEATURE_SHAPES.get(name, TACTILE_FEATURE_SHAPES.get(name))
-        if shape is not None and value.shape[1:] != shape:
-            raise ValueError(f"Policy history {name} requires trailing shape {shape}")
+        validate_observation_shape(name, value.shape[1:], width=width)
         if name in POINT_CLOUD_FIELDS:
-            if value.ndim != 3 or value.shape[1] == 0 or value.shape[-1] < width:
-                raise ValueError(f"{name} requires shape (T, N>0, C>={width})")
             value = value[..., :width]
         if name == "rgb":
-            if value.ndim != 4 or value.shape[-1] != 3 or min(value.shape[1:3]) == 0 or value.dtype != np.uint8:
-                raise ValueError("RGB input requires shape (T, H, W, 3) and dtype uint8")
+            if value.dtype != np.uint8:
+                raise ValueError("RGB input requires dtype uint8")
             tensor = preprocess_rgb_eval(contiguous_numpy(value), **rgb_preprocessing)
             tensors[name] = tensor.unsqueeze(0).to(device)
         else:
@@ -101,7 +96,6 @@ def restore_policy(
     device: "str | torch.device",
 ) -> "Policy":
     import hydra
-    import torch
 
     from dexmani_policy.common.normalizer import normalization_feature_shapes
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
@@ -110,17 +104,17 @@ def restore_policy(
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
 
     feature_dims = effective_config["normalization_dims"]
-    feature_shapes = normalization_feature_shapes(feature_dims, effective_config["normalization"])
     rng_state = get_rng_state()
     try:
         agent = hydra.utils.instantiate(effective_config["agent"], _convert_="all")
     finally:
         set_rng_state(rng_state)
 
+    feature_shapes = normalization_feature_shapes(
+        feature_dims, effective_config["normalization"], required_identity_fields=agent.required_identity_fields,
+    )
     agent.configure_normalizer(feature_dims, feature_shapes)
-    agent.load_state_dict(state_dict, strict=True, assign=True)
-    agent.to(device=device, dtype=torch.float32)
-    agent.normalizer.validate()
+    agent.load_weights(state_dict, device)
     agent.eval()
     rgb_encoder = getattr(agent.obs_encoder, "rgb_encoder", None)
     if rgb_encoder is not None and rgb_encoder.tune_mode == "lora":

@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from typing import cast
 
 import hydra
 import torch
@@ -180,7 +181,7 @@ def train(method, model_class, argv=None):
     else:
         model = model_class(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
     if not resuming:
-        fit_observation_normalizer(dataset, model.normalizer, model.normalizer.fields)
+        fit_observation_normalizer(dataset, model.normalizer, cfg.normalization)
     device = torch.device(cfg.training.device)
     model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
@@ -264,7 +265,7 @@ def train(method, model_class, argv=None):
                             model_state=model.state_dict(),
                             optimizer_state=optimizer.state_dict(),
                             scheduler_state=scheduler.state_dict(),
-                            effective_config=OmegaConf.to_container(cfg, resolve=True),
+                            effective_config=cast(dict, OmegaConf.to_container(cfg, resolve=True)),
                         )
                         save_checkpoint(logger.output_dir / "checkpoints/latest.pt", saved)
                     if should_stop:

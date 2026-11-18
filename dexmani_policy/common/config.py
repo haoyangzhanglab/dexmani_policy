@@ -7,7 +7,8 @@ TACTILE_FEATURE_SHAPES = {
     "finger_tactile_force": (5, 3),
     "taxel_tactile_force": (5, 120, 3),
 }
-FIELD_FEATURE_SHAPES = {
+FIXED_OBSERVATION_SHAPES: dict[str, tuple[int, ...]] = {
+    **TACTILE_FEATURE_SHAPES,
     "joint_state": (19,),
     "eef_pose": (9,),
     "fingertip_xyz": (5, 3),
@@ -15,6 +16,25 @@ FIELD_FEATURE_SHAPES = {
     "camera_extrinsic": (12,),
 }
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
+
+
+def validate_observation_shape(name: str, shape: tuple[int, ...], *, width: int | None = None) -> None:
+    """Validate one frame before point-cloud channel selection."""
+    if name in FIXED_OBSERVATION_SHAPES:
+        expected = FIXED_OBSERVATION_SHAPES[name]
+        if shape != expected:
+            raise ValueError(f"{name} requires frame shape {expected}, got {shape}")
+    elif name in POINT_CLOUD_FIELDS:
+        channels = 1 if width is None else width
+        if len(shape) != 2 or not shape[0] or shape[1] < channels:
+            raise ValueError(f"{name} requires frame shape (N>0, C>={channels}), got {shape}")
+    elif name == "rgb":
+        if len(shape) != 3 or shape[2] != 3 or min(shape[:2]) <= 0:
+            raise ValueError(f"RGB requires frame shape (H, W, 3), got {shape}")
+    elif name == "proprio" and (len(shape) != 1 or not shape[0]):
+        raise ValueError(f"proprio requires one vector per frame, got {shape}")
+    elif width is not None and (not shape or shape[-1] != width):
+        raise ValueError(f"{name} requires feature width {width}, got frame shape {shape}")
 
 
 def set_project_root() -> None:

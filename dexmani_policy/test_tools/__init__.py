@@ -1,1 +1,0 @@
-"""Standalone policy lifecycle checks."""

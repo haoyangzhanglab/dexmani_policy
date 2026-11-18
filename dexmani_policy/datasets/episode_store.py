@@ -3,13 +3,17 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, TACTILE_FEATURE_SHAPES
+from dexmani_policy.common.config import (
+    FIXED_OBSERVATION_SHAPES,
+    POINT_CLOUD_FIELDS,
+    validate_observation_shape,
+)
 
 
 class EpisodeStore:
     """Read-only arrays from a local Zarr 2 directory."""
 
-    def __init__(self, zarr_path, *, keys=None):
+    def __init__(self, zarr_path, *, keys=None, pc_dim=None):
         self.path = str(Path(zarr_path).expanduser().resolve())
         group = zarr.open_group(zarr.DirectoryStore(self.path), mode="r")
         fields = group["data"]
@@ -34,12 +38,11 @@ class EpisodeStore:
                 raise ValueError(
                     f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
                 )
-            feature_shape = FIELD_FEATURE_SHAPES.get(key, TACTILE_FEATURE_SHAPES.get(key))
-            if feature_shape is not None:
-                if shape[1:] != feature_shape:
-                    raise ValueError(f"{key} requires trailing shape {feature_shape} after its T axis")
-                if values.dtype.kind != "f":
-                    raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
+            validate_observation_shape(key, shape[1:], width=pc_dim if key in POINT_CLOUD_FIELDS else None)
+            if key == "rgb" and values.dtype != np.uint8:
+                raise ValueError("Stored RGB must have dtype uint8")
+            if key in FIXED_OBSERVATION_SHAPES and values.dtype.kind != "f":
+                raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
         self.episode_ends = ends.astype(np.int64, copy=False)
         if self.attrs.get("format") == "dexmani.real.canonical":
             sources = self.attrs.get("source_episodes")

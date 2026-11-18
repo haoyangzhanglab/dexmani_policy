@@ -5,7 +5,6 @@ import torch
 from omegaconf import open_dict
 
 from dexmani_policy.common.normalizer import normalization_feature_shapes
-from dexmani_policy.training.config import validate_normalization
 from dexmani_policy.training.data import fit_action_normalizer, fit_observation_normalizer
 
 
@@ -84,7 +83,7 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
             with open_dict(cfg.normalization):
                 for key in fields:
                     cfg.normalization[key] = payload["normalization"][key]
-            inherited_fields = tuple(key for key in fields if cfg.normalization[key] == "limits")
+            inherited_fields = tuple(key for key in fields if cfg.normalization[key] != "identity")
             pretrained_state = payload["normalizer_state"]
             del payload
         if method == "dqrise":
@@ -92,24 +91,22 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
         elif method == "dexlatent":
             hand_affine = model.hand_prior.initialize_weights(initialization.dexlatent)
 
-    validate_normalization(model, cfg.normalization, field_dims)
-    feature_shapes = normalization_feature_shapes(field_dims, cfg.normalization)
+    feature_shapes = normalization_feature_shapes(
+        field_dims, cfg.normalization, required_identity_fields=model.required_identity_fields,
+    )
     model.configure_normalizer(field_dims, feature_shapes)
     if checkpoint is not None:
-        # Assignment replaces Parameters; construct the optimizer afterwards.
-        model.load_state_dict(checkpoint.model_state, strict=True, assign=True)
-    else:
-        fit_observation_normalizer(
-            dataset, model.normalizer, [key for key in feature_shapes if key != "action"],
-            initial_state=pretrained_state, inherited_fields=inherited_fields,
-        )
-        fit_action_normalizer(dataset, model.normalizer, hand_affine=hand_affine)
-        if method == "dexlatent":
-            # Latent limits depend on the hand affine inherited from its prior.
-            latents = (model._encode_action_parts(chunk)[1] for chunk in dataset.iter_normalization_data("action"))
-            model.normalizer.fit_field("hand_latent", latents)
-        print(f"[Normalizer] train source frames; inherited fields={list(inherited_fields)}")
+        model.load_weights(checkpoint.model_state, cfg.training.device)
+        return model
+
+    fit_observation_normalizer(
+        dataset, model.normalizer, cfg.normalization,
+        initial_state=pretrained_state, inherited_fields=inherited_fields,
+    )
+    fit_action_normalizer(dataset, model.normalizer, hand_affine=hand_affine)
+    if method == "dexlatent":
+        # Latent limits depend on the hand affine inherited from its prior.
+        latents = (model._encode_action_parts(chunk)[1] for chunk in dataset.iter_normalization_data("action"))
+        model.normalizer.fit_field("hand_latent", latents)
     model.to(device=cfg.training.device, dtype=torch.float32)
-    if checkpoint is not None:
-        model.normalizer.validate()
     return model

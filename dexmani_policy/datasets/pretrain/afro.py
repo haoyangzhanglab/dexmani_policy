@@ -14,10 +14,7 @@ class AFROPretrainDataset(ObservationPretrainDataset):
         self.frame_stride = positive_int(frame_stride, "frame_stride")
         if len(range(0, horizon, self.frame_stride)) < 2:
             raise ValueError("AFRO frame_stride must leave at least two sampled frames")
-        buffer = EpisodeStore(zarr_path, keys=self.sensor_modalities)
-        shape = buffer["point_cloud"].shape
-        if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
-            raise ValueError("AFRO requires point_cloud[T,N>0,C>=3]")
+        buffer = EpisodeStore(zarr_path, keys=self.sensor_modalities, pc_dim=3)
         self.horizon, self.pad_before, self.pad_after = horizon, pad_before, pad_after
         super().__init__(
             buffer, normalization_fields={"point_cloud": slice(0, 3)},

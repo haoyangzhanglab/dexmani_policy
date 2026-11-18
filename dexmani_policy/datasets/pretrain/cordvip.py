@@ -17,14 +17,10 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
         keys = list(self.sensor_modalities)
         if contact_loss_weight > 0:
             keys.append("contact_map")
-        buffer = EpisodeStore(zarr_path, keys=keys)
+        buffer = EpisodeStore(zarr_path, keys=keys, pc_dim=3)
         self.horizon, self.obs_horizon = horizon, obs_horizon
         self.pad_before = obs_horizon - 1 if pad_before is None else pad_before
         self.pad_after = pad_after
-        for key in self.sensor_modalities[:2]:
-            shape = buffer[key].shape
-            if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
-                raise ValueError(f"CordViP requires {key}[T,N>0,C>=3]")
         if contact_loss_weight > 0:
             if buffer["object_pointcloud"].shape[1] != 1024:
                 raise ValueError("CordViP contact head predicts 1024 object point labels")
@@ -51,7 +47,7 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
 
     def __getitem__(self, index):
         sample = self.sampler.sample_sequence(index)
-        batch = {
+        batch: dict[str, dict[str, torch.Tensor] | torch.Tensor] = {
             "obs": {key: torch.as_tensor(sample[key]) for key in self.sensor_modalities},
         }
         if self.contact_loss_weight > 0:

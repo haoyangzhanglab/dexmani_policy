@@ -56,11 +56,7 @@ def generate(zarr_path, output, num_workers=1):
     keys = ["hand_pointcloud", "object_pointcloud", "joint_state"]
     if "action" in source["data"]:
         keys.append("action")
-    buffer = EpisodeStore(zarr_path, keys=keys)
-    for key in keys[:2]:
-        shape = buffer[key].shape
-        if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
-            raise ValueError(f"Contact geometry requires {key}[T,N>0,C>=3]")
+    buffer = EpisodeStore(zarr_path, keys=keys, pc_dim=3)
     rows = int(buffer.episode_ends[-1])
     attrs = dict(buffer.attrs)
     output.parent.mkdir(parents=True, exist_ok=True)
