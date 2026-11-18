@@ -18,7 +18,7 @@ from dexmani_policy.training import initialization
 from dexmani_policy.training.config import check_fresh_output, normalize_output_dir, validate_config
 from dexmani_policy.training.data import (
     build_dataset, build_train_loader, close_data_loader, record_data_processing,
-    record_prior_data, record_training_data,
+    record_prior_data, record_training_data, restore_data_records,
 )
 from dexmani_policy.training.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
@@ -29,7 +29,7 @@ from dexmani_policy.training.optimization import (
 from dexmani_policy.training.runtime import training_signals
 
 
-def build_trainer(cfg, *, checkpoint=None):
+def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTrainer":
     cfg = copy.deepcopy(cfg)
     normalize_output_dir(cfg)
     with open_dict(cfg):
@@ -41,7 +41,8 @@ def build_trainer(cfg, *, checkpoint=None):
     validate_config(cfg)
     model_checkpoint = checkpoint
     if source is not None:
-        model_checkpoint = load_checkpoint(Path(source).expanduser())
+        source = Path(source).expanduser().resolve()
+        model_checkpoint = load_checkpoint(source)
         saved = model_checkpoint.effective_config
         if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
             raise ValueError("Policy initialization requires the same policy and action semantics")
@@ -58,30 +59,33 @@ def build_trainer(cfg, *, checkpoint=None):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
-    if checkpoint is None:
-        record_training_data(cfg, dataset.episode_store, dataset.train_mask)
-        if source is not None:
-            record_prior_data(cfg, dataset, source, saved.get("training_data"))
+    store = dataset.episode_store
+    data_dt = data_description["control_dt_s"]
     record_data_processing(cfg, dataset)
-    if checkpoint is not None:
+    if checkpoint is None:
+        record_training_data(cfg, store, dataset.train_mask)
+        policy_dt = data_dt
+        if source is not None:
+            record_prior_data(cfg, dataset, source, saved["training_data"], from_policy=True)
+    else:
+        saved = checkpoint.effective_config
+        restore_data_records(cfg, store, dataset.train_mask, saved=saved)
         if cfg.policy_name == "ode":
             current = (cfg.data_processing or {}).get("action_ode")
-            previous = (checkpoint.effective_config["data_processing"] or {}).get("action_ode")
+            previous = (saved["data_processing"] or {}).get("action_ode")
             if (current or {}).get("semantics") != (previous or {}).get("semantics"):
                 raise ValueError("Resume ODE action target semantics mismatch; use a fresh or warm-start run")
-        data_dt = data_description["control_dt_s"]
-        policy_dt = cfg.control_dt_s
+        policy_dt = saved["control_dt_s"]
         if not np.isclose(data_dt, policy_dt, rtol=1e-6, atol=1e-9):
             raise ValueError(
                 f"Resume control_dt_s mismatch: dataset dt={data_dt} s, "
                 f"checkpoint control_dt_s={policy_dt} s"
             )
     with open_dict(cfg):
-        cfg.zarr_path = dataset.episode_store.path
-        cfg.dataset.zarr_path = cfg.zarr_path
-        if checkpoint is None:
-            cfg.control_dt_s = data_description["control_dt_s"]
-    model = initialization.build_policy(cfg, dataset, data_description["field_dims"], checkpoint=model_checkpoint)
+        cfg.control_dt_s = policy_dt
+    model = initialization.build_policy(
+        cfg, dataset, data_description["field_dims"], checkpoint=model_checkpoint, resuming=checkpoint is not None,
+    )
     if checkpoint is None:
         with open_dict(cfg):
             cfg.pop("max_updates", None)

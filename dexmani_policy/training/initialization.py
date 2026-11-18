@@ -4,6 +4,7 @@ import hydra
 import torch
 from omegaconf import open_dict
 
+from dexmani_policy.common.checkpoint import Checkpoint
 from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.datasets.episode_store import check_finite
 from dexmani_policy.training.data import (
@@ -49,7 +50,7 @@ def prepare_warm_start(method, agent, saved_agent):
         raise ValueError("Tactile encoder differs from initialization policy")
 
 
-def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
+def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = None, resuming: bool = False):
     method, initialization = cfg.policy_name, cfg.initialization
     pretrained_state, hand_affine = None, None
     inherited_fields: tuple[str, ...] = ()
@@ -107,14 +108,16 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
     )
     model.configure_normalizer(field_dims, feature_shapes)
     if checkpoint is not None:
-        if method in {"dqrise", "dexlatent"}:
-            for _ in iter_validated_actions(dataset):
-                pass
-        elif method == "r3d":
-            store, key = dataset.episode_store, "point_cloud"
-            columns = dataset.consumed_fields[key]
-            for start, values in store.iter_chunks(key, columns=columns, episode_mask=dataset.train_mask):
-                check_finite(store, key, start, values, columns)
+        # Full resume has already matched the fixed training store.
+        if not resuming:
+            if method in {"dqrise", "dexlatent"}:
+                for _ in iter_validated_actions(dataset):
+                    pass
+            elif method == "r3d":
+                store, key = dataset.episode_store, "point_cloud"
+                columns = dataset.consumed_fields[key]
+                for start, values in store.iter_chunks(key, columns=columns, episode_mask=dataset.train_mask):
+                    check_finite(store, key, start, values, columns)
         model.load_weights(checkpoint.model_state, cfg.training.device)
         return model
 

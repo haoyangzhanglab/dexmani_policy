@@ -48,7 +48,6 @@ def prepare_hand_data(cfg):
         "hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)),
         check_values=False,
     )
-    cfg.dataset.zarr_path = buffer.path
     logger.info(
         "VQ %s; train frames=%d", format_split_summary(buffer, train, val), len(train_hand),
     )

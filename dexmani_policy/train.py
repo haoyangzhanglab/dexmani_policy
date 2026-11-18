@@ -1,4 +1,4 @@
-"""Train a policy on one device, optionally restoring the full training state."""
+"""Start a new policy run on one device with optional weight initialization."""
 
 import os
 

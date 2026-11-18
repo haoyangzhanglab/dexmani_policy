@@ -23,6 +23,7 @@ from dexmani_policy.training.data import (
     fit_observation_normalizer,
     record_data_processing,
     record_training_data,
+    restore_data_records,
     use_policy_split,
 )
 from dexmani_policy.training.logging import (
@@ -153,16 +154,13 @@ def train(method, model_class, argv=None):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    if not resuming:
+    if checkpoint is None:
         record_training_data(cfg, dataset.episode_store, dataset.train_mask, dataset.val_mask)
         record_data_processing(cfg, dataset)
-        cfg.zarr_path = dataset.episode_store.path
-        cfg.dataset.zarr_path = cfg.zarr_path
-    elif method == "cordvip" and cfg.model.contact_loss_weight > 0:
-        previous = checkpoint.effective_config["data_processing"]
-        current = dataset.episode_store.attrs["data_processing"]
-        if current["object_pointcloud"]["geometry_sha256"] != previous["object_pointcloud"]["geometry_sha256"]:
-            raise ValueError("Contact supervision resume requires the same object geometry_sha256")
+    else:
+        restore_data_records(
+            cfg, dataset.episode_store, dataset.train_mask, dataset.val_mask, saved=checkpoint.effective_config,
+        )
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:

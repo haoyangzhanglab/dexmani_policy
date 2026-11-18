@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import importlib
 import json
 import math
@@ -73,7 +72,7 @@ def small_cpu_workloads():
 
 @pytest.fixture
 def make_demo(tmp_path):
-    def create(name="demo", *, auxiliary=True, action_dim=19):
+    def create(name="demo", *, auxiliary=True, action_dim=19, episode_ends=(12,)):
         path = tmp_path / f"{name}.zarr"
         store = zarr.open_group(str(path), mode="w")
         store.attrs.update(task_name="test", action_space="joint", dt=0.05)
@@ -87,7 +86,7 @@ def make_demo(tmp_path):
             fields["action_ee"] = rng.normal(size=(12, 21)).astype(np.float32)
         for key, value in fields.items():
             store.create_dataset(f"data/{key}", data=value, chunks=(4, *value.shape[1:]))
-        store.create_dataset("meta/episode_ends", data=np.array([12], dtype=np.int64))
+        store.create_dataset("meta/episode_ends", data=np.array(episode_ends, dtype=np.int64))
         return path
     return create
 
@@ -341,28 +340,33 @@ def test_r3d_limits_config_and_restoration(tmp_path, make_demo, monkeypatch, pc_
     latest = directory / "checkpoints/latest.pt"
     checkpoint = load_checkpoint(latest)
     assert checkpoint.effective_config["normalization"]["point_cloud"] == "limits"
-    with closing(prepare_resume(directory)) as trainer:
-        assert trainer.global_step == 1
-        torch.testing.assert_close(trainer.model.normalizer["point_cloud"].scale,
-                                   checkpoint.model_state["normalizer.fields.point_cloud.scale"])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("resume must not rescan training arrays")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(EpisodeStore, "iter_chunks", forbidden)
+        with closing(prepare_resume(directory)) as trainer:
+            assert trainer.global_step == 1
+            torch.testing.assert_close(trainer.model.normalizer["point_cloud"].scale,
+                                       checkpoint.model_state["normalizer.fields.point_cloud.scale"])
     cfg.workspace.output_dir = str(tmp_path / "warm")
     cfg.initialization.policy = str(latest)
+    warm_data = make_demo("warm")
+    cfg.zarr_path = cfg.dataset.zarr_path = str(warm_data)
+    cloud = zarr.open_group(str(warm_data), mode="r+")["data/point_cloud"]
+    if pc_dim == 3:
+        cloud[6, 2, 5] = np.inf
     with closing(build_trainer(cfg)) as trainer:
         assert trainer.global_step == 0
     for weights in ("raw", "ema"):
         assert load_policy(latest, weights=weights, device="cpu").agent.normalization_dims["point_cloud"] == pc_dim
     cfg.workspace.output_dir = str(tmp_path / "warm_bad")
-    cloud = zarr.open_group(str(data), mode="r+")["data/point_cloud"]
-    if pc_dim == 3:
-        cloud[6, 2, 5] = np.inf
-        with closing(prepare_resume(directory)) as trainer:
-            assert trainer.global_step == 1
     column = pc_dim - 1
     value = cloud[6, 2, column]
     cloud[6, 2, column] = np.inf
-    for restore in (lambda: prepare_resume(directory), lambda: build_trainer(cfg)):
-        with pytest.raises(ValueError, match=rf"field=point_cloud,.*row=6, channel=\(2, {column}\)"):
-            restore()
+    with pytest.raises(ValueError, match=rf"field=point_cloud,.*row=6, channel=\(2, {column}\)"):
+        build_trainer(cfg)
     assert load_checkpoint(latest).global_step == 1
     assert not Path(cfg.workspace.output_dir).exists()
     cloud[6, 2, column] = value
@@ -1012,16 +1016,18 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         trainer.train(max_updates=1)
     latest = directory / "checkpoints/latest.pt"
     saved = load_checkpoint(latest)
+    assert saved.effective_config["prior_data"] == OmegaConf.to_container(cfg.prior_data)
     cfg.initialization.policy = str(latest)
     cfg.workspace.output_dir = str(tmp_path / "warm")
     for restore in (lambda: prepare_resume(directory), lambda: build_trainer(cfg)):
         with closing(restore()) as trainer:
             torch.testing.assert_close(trainer.model.state_dict(), saved.model_state)
     cfg.workspace.output_dir = str(tmp_path / "warm_bad")
-    zarr.open_group(str(data_path), mode="r+")["data/action"][6, 8] = np.inf
-    for restore in (lambda: prepare_resume(directory), lambda: build_trainer(cfg)):
-        with pytest.raises(ValueError, match=r"field=action,.*row=6, channel=\(8,\)"):
-            restore()
+    warm_data = make_demo("warm_bad")
+    cfg.zarr_path = cfg.dataset.zarr_path = str(warm_data)
+    zarr.open_group(str(warm_data), mode="r+")["data/action"][6, 8] = np.inf
+    with pytest.raises(ValueError, match=r"field=action,.*row=6, channel=\(8,\)"):
+        build_trainer(cfg)
     assert load_checkpoint(latest).global_step == 1
     assert not Path(cfg.workspace.output_dir).exists()
 
@@ -1048,13 +1054,13 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
         field.scale.fill_(2.5)
         field.offset.fill_(0.75)
     source = tmp_path / "encoder.pt"
+    data_source = str(make_demo("independent")) if mode == "identity" else dataset.episode_store.source_path
     payload = {
         "encoder_state": encoder.state_dict(),
         "normalizer_state": inherited.state_dict(),
         "normalization": dict.fromkeys(fields, mode),
+        "training_data": {"source": data_source, "train_source_episodes": [0]},
     }
-    if mode != "identity":
-        payload["training_data"] = {"source": dataset.episode_store.source_path, "train_source_episodes": [0]}
     torch.save(payload, source)
     cfg.initialization.encoder = str(source)
     model = build_policy(cfg, dataset, dims)
@@ -1077,9 +1083,10 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
 
 def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, make_demo, monkeypatch):
     directory = tmp_path / "source"
+    data = make_demo("source", episode_ends=(4, 8, 12))
     first_source, resumed_source = "gpu:/snapshots/first", "gpu:/snapshots/resumed"
     monkeypatch.setenv("DEXMANI_POLICY_REMOTE_SOURCE", first_source)
-    with closing(build_trainer(small_dp3_config(directory))) as trainer:
+    with closing(build_trainer(small_dp3_config(directory, f"zarr_path={data}"))) as trainer:
         trainer.train(max_updates=1)
     latest = directory / "checkpoints/latest.pt"
     first_checkpoint = latest.resolve()
@@ -1117,10 +1124,15 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, make
     assert "prior_data" not in continued.effective_config
     assert OmegaConf.load(directory / "config.yaml").remote_source == first_source
 
-    new_data = make_demo("warm")
+    new_data = tmp_path / "copied.zarr"
+    shutil.copytree(data, new_data)
     warm_cfg = small_dp3_config(
-        tmp_path / "warm", f"initialization.policy={first_checkpoint}", f"zarr_path={new_data}",
+        tmp_path / "warm", f"initialization.policy={first_checkpoint}",
+        f"zarr_path={data}", "dataset.max_train_episodes=1",
     )
+    with pytest.raises(ValueError, match="same-source prior exceeds"):
+        build_trainer(warm_cfg)
+    warm_cfg.zarr_path = warm_cfg.dataset.zarr_path = str(new_data)
     with closing(build_trainer(warm_cfg)) as warm:
         torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
         assert warm.global_step == 0
@@ -1128,10 +1140,39 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, make
         assert warm.optimizer.state_dict()["state"] == {}
         assert warm.logger.output_dir == tmp_path / "warm"
         assert warm.cfg.training_data.source == str(new_data)
+        assert len(warm.cfg.training_data.train_source_episodes) == 1
         prior, = warm.cfg.prior_data
         assert prior.source == saved.effective_config["training_data"]["source"]
+        assert prior.train_source_episodes == [0, 1, 2]
         assert not prior.budget_verified
         torch.testing.assert_close(warm.ema_model.state_dict(), warm.model.state_dict())
+        warm.train(max_updates=1)
+
+    warm_checkpoint = tmp_path / "warm/checkpoints/latest.pt"
+    warm_saved = load_checkpoint(warm_checkpoint)
+    repeated_cfg = OmegaConf.create(warm_saved.effective_config)
+    repeated_cfg.workspace.output_dir = str(tmp_path / "warm_again")
+    repeated_cfg.initialization.policy = str(warm_checkpoint)
+    with closing(build_trainer(repeated_cfg)) as repeated:
+        assert repeated.cfg.training_data == warm_saved.effective_config["training_data"]
+        prior, = repeated.cfg.prior_data
+        assert prior == {
+            **warm_saved.effective_config["training_data"],
+            "artifact": str(warm_checkpoint.resolve()), "budget_verified": False,
+        }
+
+    resume_cfg = OmegaConf.create(warm_saved.effective_config)
+    alias = tmp_path / "alias.zarr"
+    alias.symlink_to(new_data)
+    resume_cfg.dataset.zarr_path = str(alias)
+    del resume_cfg.training_data
+    resume_cfg.prior_data[0].budget_verified = True
+    resume_cfg.control_dt_s = 0.1
+    with closing(build_trainer(resume_cfg, checkpoint=warm_saved)) as resumed:
+        assert resumed.cfg.zarr_path == resumed.cfg.dataset.zarr_path == str(new_data)
+        assert resumed.cfg.control_dt_s == warm_saved.effective_config["control_dt_s"]
+        assert resumed.cfg.training_data == warm_saved.effective_config["training_data"]
+        assert resumed.cfg.prior_data == warm_saved.effective_config["prior_data"]
 
 
 @pytest.mark.parametrize("kind", ["dino", "siglip"])
@@ -1581,7 +1622,7 @@ def test_vq_artifact_paths(output_path, make_demo):
     value, expected = output_path
     data = make_demo()
     cfg = load_config("pretrain/hand_prior/vqvae", [
-        f"zarr_path={data}", f"workspace.output_dir='{value}'",
+        f"zarr_path={data.name}", f"workspace.output_dir='{value}'",
         "vq_vae.device=cpu", "vq_vae.num_epochs=1", "vq_vae.save_epochs=1",
         "vq_vae.batch_size=12", "vq_vae.warmup_steps=0", "vq_vae.hidden_dim=16",
         "vq_vae.latent_dim=8", "vq_vae.num_layers=1",
@@ -1600,7 +1641,9 @@ def test_vq_artifact_paths(output_path, make_demo):
     assert not torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark
     assert torch.get_float32_matmul_precision() == "medium"
     assert cfg.workspace.output_dir == str(expected)
-    assert OmegaConf.load(expected / "config.yaml").workspace.output_dir == str(expected)
+    saved_cfg = OmegaConf.load(expected / "config.yaml")
+    assert saved_cfg.workspace.output_dir == str(expected)
+    assert saved_cfg.zarr_path == saved_cfg.dataset.zarr_path == str(data)
     for name in ("metrics.jsonl", "codebook.npz", "checkpoints/last.pt"):
         assert (expected / name).exists()
     with pytest.raises(FileExistsError):
@@ -1609,7 +1652,7 @@ def test_vq_artifact_paths(output_path, make_demo):
 
 @pytest.fixture
 def contact_data(make_demo):
-    path = make_demo(auxiliary=False)
+    path = make_demo(auxiliary=False, episode_ends=(4, 8, 12))
     store = zarr.open_group(str(path), mode="a")
     points = store["data/point_cloud"][:, :, :3]
     store.create_dataset("data/hand_pointcloud", data=points)
@@ -1617,24 +1660,22 @@ def contact_data(make_demo):
     world_points = template[None] + np.arange(12, dtype=np.float32)[:, None, None] * 0.1
     store.create_dataset("data/object_pointcloud", data=world_points)
     store.create_dataset("data/contact_map", data=np.zeros((12, 1024), dtype=np.float32))
-    offsets = np.array([0, len(template)], dtype="<i8")
-    payload = b"".join(
-        np.array(values.shape, dtype="<i8").tobytes() + values.tobytes()
-        for values in (template, offsets)
-    )
-    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": hashlib.sha256(payload).hexdigest()}}
+    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "a" * 64}}
     return path
 
 
 def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch):
     value, directory = output_path
+    store = zarr.open_group(str(contact_data), mode="a")
+    groups = ["a", "b", "c"]
+    store.attrs.update(format="dexmani.real.canonical", source_episodes=groups)
     source = tmp_path / "source.zarr"
     shutil.copytree(contact_data, source)
-    zarr.open_group(str(contact_data), mode="a").attrs["source_zarr_path"] = str(source)
+    store.attrs["source_zarr_path"] = str(source)
     policy = tmp_path / "policy.yaml"
     OmegaConf.save(OmegaConf.create(dict(
         task_name="test", zarr_path=str(source),
-        dataset=dict(seed=42, val_episodes=0, max_train_episodes=1),
+        dataset=dict(seed=42, val_episodes=1, max_train_episodes=1),
     )), policy)
     args = [
         "--output-dir", value, "--policy-config", str(policy), "--zarr-path", str(contact_data),
@@ -1660,7 +1701,9 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     payload = torch.load(directory / "encoder.pt", weights_only=True)
     assert payload["training_data"] == saved.effective_config["training_data"]
     assert payload["training_data"]["source"] == str(source)
-    states = zarr.open_group(str(contact_data), mode="r")["data/joint_state"][:]
+    train_group, = payload["training_data"]["train_source_episodes"]
+    start = 4 * groups.index(train_group)
+    states = store["data/joint_state"][start:start + 4]
     np.testing.assert_allclose(payload["normalizer_state"]["fields.joint_state.scale"],
                                1 / states.std(axis=0, dtype=np.float64), rtol=1e-6)
     for name in ("encoder", "normalizer"):
@@ -1673,7 +1716,8 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
 
     monkeypatch.setattr(obs_training, "fit_observation_normalizer", forbidden)
     monkeypatch.setattr(obs_training, "check_fresh_output", forbidden)
-    obs_training.train("cordvip", CordViP, ["--resume-from", value, "--max-updates", "1"])
+    resume_args = ["--resume-from", value, "--max-updates", "1"]
+    obs_training.train("cordvip", CordViP, resume_args)
     resumed = load_checkpoint(directory / "checkpoints/latest.pt")
     assert resumed.global_step == 2
     assert resumed.scheduler_state["last_epoch"] == 2
@@ -1685,19 +1729,18 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     before = [path.read_bytes() for path in artifacts]
     with pytest.raises(OSError):
         obs_training.train("cordvip", CordViP, ["--resume-from", str(artifacts[-1]), "--max-updates", "1"])
-    other_data = tmp_path / "other.zarr"
-    shutil.copytree(contact_data, other_data)
-    del zarr.open_group(str(other_data), mode="a").attrs["source_zarr_path"]
     with pytest.raises(SystemExit) as rejected:
-        obs_training.train("cordvip", CordViP, [
-            "--resume-from", value, "--max-updates", "1", "--zarr-path", str(other_data),
-        ])
+        obs_training.train("cordvip", CordViP, [*resume_args, "--zarr-path", str(source)])
     assert rejected.value.code == 2
-    assert [path.read_bytes() for path in artifacts] == before
-    store = zarr.open_group(str(contact_data), mode="a")
-    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "f" * 64}}
-    with pytest.raises(ValueError, match="same object geometry"):
-        obs_training.train("cordvip", CordViP, ["--resume-from", value, "--max-updates", "1"])
+
+    val_group, = payload["training_data"]["val_source_episodes"]
+    store.attrs["source_episodes"] = ["changed" if group == val_group else group for group in groups]
+    with pytest.raises(ValueError, match="Resume validation source groups mismatch"):
+        obs_training.train("cordvip", CordViP, resume_args)
+    store.attrs["source_episodes"] = groups
+    store.attrs["source_zarr_path"] = str(contact_data)
+    with pytest.raises(ValueError, match="Resume data source mismatch"):
+        obs_training.train("cordvip", CordViP, resume_args)
     assert [path.read_bytes() for path in artifacts] == before
 
 
@@ -1783,11 +1826,30 @@ def test_training_failure_closes_trainer():
 # Resume paths
 
 
-def test_resume_cli_uses_saved_zarr(tmp_path, small_dp3_checkpoint, monkeypatch):
+def test_resume_uses_saved_zarr_and_groups(tmp_path, small_dp3_checkpoint, make_demo, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    saved = load_checkpoint(small_dp3_checkpoint)
     with pytest.raises(SystemExit) as rejected:
         resume.main(["--run", "dp3_run", "--zarr-path", "other.zarr"])
     assert rejected.value.code == 2
+
+    cfg = OmegaConf.create(saved.effective_config)
+    other_data = make_demo("other")
+    cfg.dataset.zarr_path = str(other_data)
+    with pytest.raises(ValueError, match="Resume Zarr path mismatch"):
+        build_trainer(cfg, checkpoint=saved)
+    other_store = zarr.open_group(str(other_data), mode="a")
+    other_store.attrs["source_zarr_path"] = saved.effective_config["training_data"]["source"]
+    with pytest.raises(ValueError, match="Resume Zarr path mismatch"):
+        build_trainer(cfg, checkpoint=saved)
+
+    ends = zarr.open_group(saved.effective_config["dataset"]["zarr_path"], mode="a")["meta/episode_ends"]
+    ends.resize(2)
+    ends[:] = [6, 12]
+    with pytest.raises(ValueError, match="Resume train source groups mismatch"):
+        resume.main(["--run", "dp3_run", "--max-updates", "1"])
+    ends.resize(1)
+    ends[:] = [12]
     assert load_checkpoint(small_dp3_checkpoint).global_step == 1
 
     resume.main(["--run", "dp3_run", "--max-updates", "1"])
@@ -1796,6 +1858,7 @@ def test_resume_cli_uses_saved_zarr(tmp_path, small_dp3_checkpoint, monkeypatch)
     assert checkpoint.global_step == 2
     assert checkpoint.effective_config["workspace"]["output_dir"] == str(tmp_path / "dp3_run")
     assert checkpoint.effective_config["dataset"]["zarr_path"] == str(tmp_path / "demo.zarr")
+    assert checkpoint.effective_config["training_data"] == saved.effective_config["training_data"]
 
 
 # Policy inference

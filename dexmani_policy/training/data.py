@@ -50,10 +50,39 @@ def record_training_data(cfg, store, train, val=None):
                 raise ValueError(f"{store.path}: pretraining data must share the policy source and episode split")
     with open_dict(cfg):
         cfg.pop("policy_zarr_path", None)
+        cfg.pop("prior_data", None)
+        cfg.zarr_path = cfg.dataset.zarr_path = store.path
         cfg.training_data = record
 
 
-def record_prior_data(cfg, dataset, asset, record: dict | None = None):
+def restore_data_records(cfg, store, train, val=None, *, saved: dict):
+    saved_path = saved["dataset"]["zarr_path"]
+    if store.path != saved_path:
+        raise ValueError(f"Resume Zarr path mismatch (dataset={store.path!r}, checkpoint={saved_path!r})")
+    record = saved["training_data"]
+    if store.source_path != record["source"]:
+        raise ValueError(
+            f"Resume data source mismatch (dataset={store.source_path!r}, checkpoint={record['source']!r})"
+        )
+    splits = [("train", train, record["train_source_episodes"])]
+    if val is not None:
+        splits.append(("validation", val, record.get("val_source_episodes", [])))
+    for split, mask, expected in splits:
+        groups = store.source_groups(mask)
+        if groups != set(expected):
+            raise ValueError(
+                f"Resume {split} source groups mismatch (dataset={sorted(groups)}, checkpoint={expected})"
+            )
+    with open_dict(cfg):
+        cfg.zarr_path = cfg.dataset.zarr_path = saved_path
+        cfg.training_data = record
+        if "prior_data" in saved:
+            cfg.prior_data = saved["prior_data"]
+        else:
+            cfg.pop("prior_data", None)
+
+
+def record_prior_data(cfg, dataset, asset, record: dict | None = None, *, from_policy=False):
     store = dataset.episode_store
     if record is None:
         record = {"source": None}
@@ -67,12 +96,13 @@ def record_prior_data(cfg, dataset, asset, record: dict | None = None):
                 f"{asset}: same-source prior exceeds the policy episode split: "
                 f"train={sorted(excess_train)}, validation={sorted(excess_val)}"
             )
-    else:
-        print(f"[Dataset] Prior {asset} has no verified same-source budget")
+    budget_verified = same_source and not from_policy
+    if not budget_verified:
+        print(f"[Dataset] Prior {asset} has an unverified training budget")
     with open_dict(cfg):
         if "prior_data" not in cfg:
             cfg.prior_data = []
-        cfg.prior_data.append({**record, "artifact": str(asset), "budget_verified": same_source})
+        cfg.prior_data.append({**record, "artifact": str(asset), "budget_verified": budget_verified})
 
 
 def fit_observation_normalizer(
