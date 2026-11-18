@@ -1,4 +1,5 @@
 import argparse
+from math import isfinite
 from pathlib import Path
 from typing import Any, cast
 
@@ -122,7 +123,11 @@ def evaluate(model, dataset, batch_size, device, *, stop):
             accumulate_metrics(totals, metrics, weight=count)
             if stop.requested:
                 return None
-        return {f"val/{key}": value / len(dataset) for key, value in totals.items()}
+        metrics = to_log_scalars({f"val/{key}": value / len(dataset) for key, value in totals.items()})
+        invalid = {key: value for key, value in metrics.items() if not isfinite(value)}
+        if invalid:
+            raise ValueError(f"Non-finite observation pretraining validation metrics: {invalid}")
+        return metrics
     finally:
         model.train(training)
         set_rng_state(rng_state, device)
@@ -254,7 +259,7 @@ def train(method, model_class, argv=None):
                     if validation is not None and epoch_end and epoch % cfg.training.val_every_epochs == 0:
                         metrics = evaluate(model, validation, cfg.dataloader.batch_size, device, stop=stop)
                         if metrics is not None:
-                            logger.log(to_log_scalars(metrics), step)
+                            logger.log(metrics, step)
                     periodic = (
                         epoch_end and epoch % cfg.training.save_every_epochs == 0
                         if is_afro else step % cfg.training.save_every_updates == 0

@@ -11,6 +11,20 @@ from dexmani_policy.agents.obs_encoder.interaction.correspondence import Contact
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 
 
+class PointContactHead(nn.Module):
+    def __init__(self, context_dim: int):
+        super().__init__()
+        self.point_projection = nn.Linear(3, 128)
+        self.context_projection = nn.Linear(context_dim, 128)
+        self.score = build_mlp(
+            [128, 64, 1], activation=nn.ReLU, normalize=False,
+        )
+
+    def forward(self, object_points: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        features = self.point_projection(object_points) + self.context_projection(context).unsqueeze(-2)
+        return self.score(F.relu(features)).squeeze(-1)
+
+
 class CordViP(nn.Module):
     def __init__(
         self, normalization, n_obs_steps=4,
@@ -37,9 +51,7 @@ class CordViP(nn.Module):
                 [n_obs_steps * (visual_dim + arm_dim), 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
             )
         if contact_loss_weight > 0:
-            self.contact_head = build_mlp(
-                [visual_dim, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
-            )
+            self.contact_head = PointContactHead(visual_dim)
         self.contact_loss_weight = contact_loss_weight
         self.arm_loss_weight = arm_loss_weight
         self.hand_loss_weight = hand_loss_weight
@@ -63,7 +75,9 @@ class CordViP(nn.Module):
             loss = loss + self.hand_loss_weight * hand_loss
             metrics["hand"] = hand_loss.detach()
         if self.contact_loss_weight > 0:
-            contact = self.contact_head(torch.cat((robot_pc, object_pc), dim=-1))
+            contact = self.contact_head(
+                obs["object_pointcloud"], torch.cat((robot_pc, object_pc), dim=-1),
+            )
             contact_loss = F.mse_loss(contact, batch["contact_map"])
             loss = loss + self.contact_loss_weight * contact_loss
             metrics["contact"] = contact_loss.detach()

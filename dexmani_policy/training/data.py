@@ -12,7 +12,6 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
-from dexmani_policy.datasets.split import split_episodes
 
 
 def use_policy_split(cfg, policy_config, *, zarr_path=None):
@@ -27,7 +26,19 @@ def use_policy_split(cfg, policy_config, *, zarr_path=None):
         cfg.policy_zarr_path = source
 
 
+def _episode_layout(store):
+    layout = {"episode_ends": store.episode_ends.tolist(), "episode_groups": store.episode_groups}
+    seeds = store.meta.get("episode_seeds")
+    if seeds is not None:
+        layout["episode_seeds"] = seeds[...].tolist()
+    ranges = store.attrs.get("source_row_ranges")
+    if ranges is not None:
+        layout["source_row_ranges"] = ranges
+    return layout
+
+
 def record_training_data(cfg, store, train, val=None):
+    layout = _episode_layout(store)
     train_groups = store.source_groups(train)
     val_groups = store.source_groups(val) if val is not None else set()
     record = {"source": store.source_path, "train_source_episodes": sorted(train_groups)}
@@ -41,21 +52,19 @@ def record_training_data(cfg, store, train, val=None):
             raise ValueError(f"{store.path}: pretraining data must share the original policy Zarr")
         if reference_path != store.path:
             reference = EpisodeStore(reference_path, keys=())
-            expected_train, expected_val = split_episodes(
-                reference.episode_groups, seed=cfg.dataset.seed,
-                max_train_episodes=cfg.dataset.max_train_episodes, val_episodes=cfg.dataset.val_episodes,
-            )
-            if (train_groups != reference.source_groups(expected_train)
-                    or val_groups != reference.source_groups(expected_val)):
-                raise ValueError(f"{store.path}: pretraining data must share the policy source and episode split")
+            if layout != _episode_layout(reference):
+                raise ValueError(f"{store.path}: pretraining data must share the policy episode layout")
     with open_dict(cfg):
         cfg.pop("policy_zarr_path", None)
         cfg.pop("prior_data", None)
         cfg.zarr_path = cfg.dataset.zarr_path = store.path
         cfg.training_data = record
+        cfg.episode_layout = layout
 
 
 def restore_data_records(cfg, store, train, val=None, *, saved: dict):
+    if "episode_layout" not in saved:
+        raise ValueError("Resume checkpoint is missing episode_layout. Start a new training run.")
     saved_path = saved["dataset"]["zarr_path"]
     if store.path != saved_path:
         raise ValueError(f"Resume Zarr path mismatch (dataset={store.path!r}, checkpoint={saved_path!r})")
@@ -73,9 +82,13 @@ def restore_data_records(cfg, store, train, val=None, *, saved: dict):
             raise ValueError(
                 f"Resume {split} source groups mismatch (dataset={sorted(groups)}, checkpoint={expected})"
             )
+    layout = saved["episode_layout"]
+    if _episode_layout(store) != layout:
+        raise ValueError(f"Resume episode layout mismatch for {store.path}")
     with open_dict(cfg):
         cfg.zarr_path = cfg.dataset.zarr_path = saved_path
         cfg.training_data = record
+        cfg.episode_layout = layout
         if "prior_data" in saved:
             cfg.prior_data = saved["prior_data"]
         else:

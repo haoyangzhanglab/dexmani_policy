@@ -37,6 +37,7 @@ from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.afro import AFROPretrainDataset
 from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
+from dexmani_policy.datasets.preprocess.contact_map import compute_contact_map
 from dexmani_policy.datasets.preprocess.contact_map import generate as generate_contacts
 from dexmani_policy.datasets.sampler import SequenceSampler
 from dexmani_policy.datasets.variants.ode import ODEDataset
@@ -48,7 +49,8 @@ from dexmani_policy.evaluation import rollout, selection
 from dexmani_policy.training import resume, trainer as policy_training
 from dexmani_policy.training.config import load_config, validate_config
 from dexmani_policy.training.data import (
-    build_dataset, build_train_loader, fit_action_normalizer, record_prior_data, use_policy_split,
+    build_dataset, build_train_loader, fit_action_normalizer,
+    record_prior_data, record_training_data, restore_data_records, use_policy_split,
 )
 from dexmani_policy.training.initialization import build_policy
 from dexmani_policy.training.optimization import clip_gradients
@@ -470,6 +472,45 @@ def test_same_source_pretraining_carries_real_group_budget(tmp_path, make_demo):
     record_prior_data(policy, dataset, "unknown.pt")
     assert not policy.prior_data[-2].budget_verified
     assert policy.prior_data[-1] == {"source": None, "artifact": "unknown.pt", "budget_verified": False}
+
+
+@pytest.mark.parametrize("changed", ["episode_ends", "episode_groups", "episode_seeds", "source_row_ranges"])
+def test_pretraining_checks_episode_layout(tmp_path, make_demo, changed):
+    source = make_demo(episode_ends=(4, 8, 12))
+    raw = zarr.open_group(str(source), mode="a")
+    if changed in ("episode_groups", "source_row_ranges"):
+        raw.attrs.update(
+            format="dexmani.real.canonical", source_episodes=["a", "b", "c"],
+            source_row_ranges=[[0, 4], [0, 4], [0, 4]],
+        )
+    else:
+        raw.create_dataset("meta/episode_seeds", data=[32, 33, 34])
+    derived = tmp_path / "derived.zarr"
+    shutil.copytree(source, derived)
+    pretraining = zarr.open_group(str(derived), mode="a")
+    pretraining.attrs["source_zarr_path"] = str(source)
+
+    train = np.ones(3, dtype=bool)
+
+    def record_source():
+        cfg = OmegaConf.create({"policy_zarr_path": str(source), "task_name": "test", "dataset": {}})
+        record_training_data(cfg, EpisodeStore(derived, keys=()), train)
+        return cfg
+
+    recorded = record_source()
+    saved = OmegaConf.to_container(recorded, resolve=True)
+    if changed == "episode_ends":
+        pretraining["meta/episode_ends"][:] = [3, 8, 12]
+    elif changed == "episode_groups":
+        pretraining.attrs["source_episodes"] = ["b", "a", "c"]
+    elif changed == "episode_seeds":
+        pretraining["meta/episode_seeds"][:] = [33, 32, 34]
+    else:
+        pretraining.attrs["source_row_ranges"] = [[1, 5], [0, 4], [0, 4]]
+    with pytest.raises(ValueError, match="share the policy episode layout"):
+        record_source()
+    with pytest.raises(ValueError, match="Resume episode layout mismatch"):
+        restore_data_records(recorded, EpisodeStore(derived, keys=()), train, saved=saved)
 
 
 class ConstantVelocity(nn.Module):
@@ -1660,8 +1701,18 @@ def contact_data(make_demo):
     world_points = template[None] + np.arange(12, dtype=np.float32)[:, None, None] * 0.1
     store.create_dataset("data/object_pointcloud", data=world_points)
     store.create_dataset("data/contact_map", data=np.zeros((12, 1024), dtype=np.float32))
-    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "a" * 64}}
     return path
+
+
+def test_observation_validation_reports_nonfinite_contact_metric(contact_data):
+    dataset = CordViPPretrainDataset(contact_data, contact_loss_weight=1, val_episodes=1, obs_horizon=1)
+    validation = dataset.get_validation_dataset()
+    row = validation.sampler.sample_source_rows(0)[0]
+    zarr.open_group(str(contact_data), mode="a")["data/contact_map"][row, 0] = np.nan
+    model = CordViP(dict.fromkeys(dataset.sensor_modalities, "identity"), n_obs_steps=1)
+
+    with pytest.raises(ValueError, match="Non-finite observation pretraining validation metrics: .*val/contact"):
+        obs_training.evaluate(model, validation, 2, torch.device("cpu"), stop=SimpleNamespace(requested=False))
 
 
 def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch):
@@ -1700,6 +1751,8 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     assert any(key.startswith("contact_head.") for key in saved.model_state)
     payload = torch.load(directory / "encoder.pt", weights_only=True)
     assert payload["training_data"] == saved.effective_config["training_data"]
+    assert "episode_layout" not in payload
+    assert saved.effective_config["episode_layout"]["episode_groups"] == groups
     assert payload["training_data"]["source"] == str(source)
     train_group, = payload["training_data"]["train_source_episodes"]
     start = 4 * groups.index(train_group)
@@ -1744,27 +1797,79 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     assert [path.read_bytes() for path in artifacts] == before
 
 
-def test_contact_requires_geometry_identity(contact_data, tmp_path):
+def test_contact_requires_1024_aligned_points(contact_data, tmp_path):
     store = zarr.open_group(str(contact_data), mode="a")
+    del store["data/contact_map"]
+    store.create_dataset("data/contact_map", data=np.zeros((12, 1024), dtype=np.int64))
+    with pytest.raises(ValueError, match="contact_map must be floating point"):
+        CordViPPretrainDataset(contact_data, contact_loss_weight=1)
+
     del store["data/contact_map"]
     store.create_dataset("data/contact_map", data=np.zeros((12, 1023), dtype=np.float32))
     with pytest.raises(ValueError, match="Contact labels must match the 1024 object point slots"):
         CordViPPretrainDataset(contact_data, contact_loss_weight=1)
-    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": None}}
-    with pytest.raises(ValueError, match="geometry_sha256"):
+
+    points = store["data/object_pointcloud"][:, :-1]
+    del store["data/object_pointcloud"]
+    store.create_dataset("data/object_pointcloud", data=points)
+    with pytest.raises(ValueError, match="requires 1024 object point slots"):
         CordViPPretrainDataset(contact_data, contact_loss_weight=1)
-    output = tmp_path / "missing.zarr"
-    with pytest.raises(ValueError, match="geometry_sha256"):
+    output = tmp_path / "invalid.zarr"
+    with pytest.raises(ValueError, match="requires 1024 object point slots"):
         generate_contacts(contact_data, output)
     assert not output.exists()
 
 
-def test_disabled_contact_does_not_require_labels_or_geometry(contact_data):
+def test_contact_matches_dense_formula():
+    rng = np.random.default_rng(32)
+    objects = rng.normal(size=(23, 3))
+    objects[-1] = [20, 0, 0]
+    normals = rng.normal(size=objects.shape)
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    hand = rng.normal(size=(19, 3))
+    hand[0] = objects[0]
+    differences = hand[None] - objects[:, None]
+    distance = np.linalg.norm(differences, axis=-1)
+    alignment = np.abs(np.einsum("ijk,ik->ij", differences, normals)) / (distance + 1e-8)
+    minimum = (distance * np.exp(1 - alignment)).min(axis=1)
+    expected = 2 / (1 + np.exp(10 * minimum))
+    contacts = compute_contact_map(objects, normals, hand, point_chunk_size=7)
+    np.testing.assert_allclose(contacts, expected, atol=1e-15)
+    np.testing.assert_allclose(contacts[-1], expected[-1], rtol=1e-12, atol=0)
+
+
+def test_contact_reads_metadata_and_points_from_same_resolved_source(contact_data, tmp_path, monkeypatch):
+    source = zarr.open_group(str(contact_data), mode="a")
+    source.create_dataset("meta/episode_seeds", data=[32, 33, 34])
+    alternate = tmp_path / "alternate.zarr"
+    shutil.copytree(contact_data, alternate)
+    other = zarr.open_group(str(alternate), mode="a")
+    other["meta/episode_seeds"][:] = [42, 43, 44]
+    other["meta/episode_ends"][:] = [3, 8, 12]
+    alias = tmp_path / "latest.zarr"
+    alias.symlink_to(contact_data, target_is_directory=True)
+    init = EpisodeStore.__init__
+
+    def move_alias(store, *args, **kwargs):
+        init(store, *args, **kwargs)
+        alias.unlink()
+        alias.symlink_to(alternate, target_is_directory=True)
+
+    monkeypatch.setattr(EpisodeStore, "__init__", move_alias)
+    output = tmp_path / "prepared.zarr"
+    generate_contacts(alias, output)
+    labelled = zarr.open_group(str(output), mode="r")
+    assert labelled.attrs["source_zarr_path"] == str(contact_data)
+    np.testing.assert_array_equal(labelled["meta/episode_seeds"][:], [32, 33, 34])
+    np.testing.assert_array_equal(labelled["meta/episode_ends"][:], [4, 8, 12])
+    np.testing.assert_array_equal(labelled["data/object_pointcloud"][:], source["data/object_pointcloud"][:])
+
+
+def test_disabled_contact_allows_other_point_counts(contact_data):
     store = zarr.open_group(str(contact_data), mode="a")
     del store["data/contact_map"]
     del store["data/object_pointcloud"]
     store.create_dataset("data/object_pointcloud", data=store["data/hand_pointcloud"][:])
-    del store.attrs["data_processing"]
     dataset = CordViPPretrainDataset(contact_data, contact_loss_weight=0)
     assert "contact_map" not in dataset.episode_store.keys()
     model = CordViP(
@@ -1852,6 +1957,14 @@ def test_resume_uses_saved_zarr_and_groups(tmp_path, small_dp3_checkpoint, make_
     ends[:] = [12]
     assert load_checkpoint(small_dp3_checkpoint).global_step == 1
 
+    layout = saved.effective_config.pop("episode_layout")
+    save_checkpoint(small_dp3_checkpoint, saved)
+    with pytest.raises(ValueError, match="Resume checkpoint is missing episode_layout"):
+        resume.main(["--run", "dp3_run", "--max-updates", "1"])
+    assert load_checkpoint(small_dp3_checkpoint).global_step == 1
+
+    saved.effective_config["episode_layout"] = layout
+    save_checkpoint(small_dp3_checkpoint, saved)
     resume.main(["--run", "dp3_run", "--max-updates", "1"])
     assert Path.cwd() == tmp_path
     checkpoint = load_checkpoint(small_dp3_checkpoint)
@@ -1859,6 +1972,7 @@ def test_resume_uses_saved_zarr_and_groups(tmp_path, small_dp3_checkpoint, make_
     assert checkpoint.effective_config["workspace"]["output_dir"] == str(tmp_path / "dp3_run")
     assert checkpoint.effective_config["dataset"]["zarr_path"] == str(tmp_path / "demo.zarr")
     assert checkpoint.effective_config["training_data"] == saved.effective_config["training_data"]
+    assert checkpoint.effective_config["episode_layout"] == layout
 
 
 # Policy inference
@@ -1999,7 +2113,6 @@ class SmallPolicy(torch.nn.Module):
 
 class SmallEnv:
     dt = 0.05
-    video_fps = 20
 
     def __init__(self):
         self.state = np.zeros(19, dtype=np.float32)
@@ -2102,6 +2215,7 @@ def test_control_period_mismatch_closes_env(monkeypatch):
 
     class WrongPeriodEnv(SmallEnv):
         def __init__(self, **kwargs):
+            assert kwargs["observation_keys"] == ("joint_state",)
             super().__init__()
             created.append(self)
             self.dt = 0.1
@@ -2171,6 +2285,7 @@ def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints,
     output = tmp_path / "failed_eval"
     if failure == "video":
         def fail_video(frames, fps, path):
+            assert fps == 1 / SmallEnv.dt
             if path.stem == "episode_8":
                 raise OSError("video failed")
             return str(path)

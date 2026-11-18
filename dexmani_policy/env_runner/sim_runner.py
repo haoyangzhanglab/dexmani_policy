@@ -141,7 +141,7 @@ class SimRunner:
                     from dexmani_policy.env_runner.video import save_episode_video
 
                     result["video"] = save_episode_video(
-                        env.get_video(), env.video_fps, Path(video_save_dir) / f"episode_{seed}.mp4",
+                        env.get_video(), 1 / env.dt, Path(video_save_dir) / f"episode_{seed}.mp4",
                     )
                 yield result
         finally:
@@ -155,7 +155,10 @@ class SimRunner:
 
     def make_env(self, *, record_video: bool):
         env_class = self._environment_class()
-        kwargs = {"render_mode": "rgb_array", **self.env_kwargs}
+        kwargs = {
+            "render_mode": "rgb_array", **self.env_kwargs,
+            "observation_keys": tuple(self.sensor_modalities),
+        }
         env = env_class(record_video=record_video, **kwargs)
         dt = env.dt
         if not np.isclose(dt, self.control_dt_s, rtol=1e-6, atol=1e-9):

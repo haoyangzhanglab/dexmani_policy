@@ -34,14 +34,14 @@ def test_native_cuda_point_ops_and_bfloat16():
 def test_sim_recording_to_contact_pretraining(tmp_path):
     pytest.importorskip("dexmani_sim", reason="native SAPIEN integration requires dexmani_sim")
     pytest.importorskip("open3d", reason="contact labels require Open3D")
+    import h5py
+    from dexmani_sim import OBSERVATION_KEYS
     from dexmani_sim.data_process.hdf5_to_zarr import HDF5ToZarrConverter
     from dexmani_sim.mimic_gen.utils.env_recorder import EnvRecorder
-    real_geometry = pytest.importorskip(
-        "dexmani_real.geometry.hoi", reason="geometry parity check requires the Real producer",
-    )
-    import h5py
 
-    runner = SimRunner("pick_apple_messy", 2, [], {}, 0.0625, env_kwargs={"control_mode": "joint"})
+    runner = SimRunner(
+        "pick_apple_messy", 2, list(OBSERVATION_KEYS), {}, 0.0625, env_kwargs={"control_mode": "joint"},
+    )
     env = runner.make_env(record_video=False)
     try:
         obs, _ = env.reset(seed=32)
@@ -60,48 +60,25 @@ def test_sim_recording_to_contact_pretraining(tmp_path):
     finally:
         env.close()
 
-    with h5py.File(episode, "r") as file:
-        points = file["object_geometry/points_local"][:]
-        offsets = file["object_geometry/offsets"][:]
-        expected = real_geometry.geometry_digest(points, offsets)
+    reordered = episode.with_name("episode_0033.h5")
+    shutil.copyfile(episode, reordered)
+    with h5py.File(reordered, "r+") as file:
+        file.attrs["seed"] = 33
+        world = file["object_pointcloud"]
+        world[:] = world[:][:, ::-1]
+
     source = HDF5ToZarrConverter(episode.parent, tmp_path / "source.zarr").convert()
     labelled = tmp_path / "contact.zarr"
     generate(source, labelled)
     prepared = zarr.open_group(str(labelled), mode="r")
-    assert prepared.attrs["data_processing"]["object_pointcloud"]["geometry_sha256"] == expected
     assert prepared.attrs["source_zarr_path"] == str(source)
-    np.testing.assert_array_equal(prepared["meta/episode_seeds"][:], [32])
+    np.testing.assert_array_equal(prepared["meta/episode_seeds"][:], [32, 33])
     assert "action" not in prepared["data"]
+    points = prepared["data/object_pointcloud"][:]
+    contacts = prepared["data/contact_map"][:]
+    np.testing.assert_array_equal(points[3:], points[:3, ::-1])
+    np.testing.assert_allclose(contacts[3:], contacts[:3, ::-1], rtol=1e-4, atol=1e-6)
+
     dataset = CordViPPretrainDataset(labelled, contact_loss_weight=1, obs_horizon=2)
     labels = dataset[0]["contact_map"]
     assert labels.shape == (2, 1024) and labels.isfinite().all() and labels.std() > 0
-
-    reordered_dir = tmp_path / "reordered"
-    reordered_dir.mkdir()
-    reordered = reordered_dir / "episode_0033.h5"
-    shutil.copyfile(episode, reordered)
-    points[:2] = points[:2][::-1]
-    with h5py.File(reordered, "r+") as file:
-        file.attrs["seed"] = 33
-        file["object_geometry/points_local"][:2] = points[:2]
-        world = file["object_pointcloud"]
-        world[:, :2] = world[:, :2][:, ::-1]
-    other = HDF5ToZarrConverter(reordered_dir, tmp_path / "reordered.zarr").convert()
-    processed = zarr.open_group(str(other), mode="r").attrs["data_processing"]
-    other_digest = processed["object_pointcloud"]["geometry_sha256"]
-    assert other_digest == real_geometry.geometry_digest(points, offsets) != expected
-
-    shutil.copyfile(episode, reordered_dir / episode.name)
-    mixed = HDF5ToZarrConverter(reordered_dir, tmp_path / "mixed.zarr").convert()
-    with pytest.raises(ValueError, match="shared object geometry_sha256"):
-        generate(mixed, tmp_path / "invalid.zarr")
-    assert len(CordViPPretrainDataset(mixed, contact_loss_weight=0, obs_horizon=2))
-
-    missing_dir = tmp_path / "missing_geometry"
-    missing_dir.mkdir()
-    missing = missing_dir / episode.name
-    shutil.copyfile(episode, missing)
-    with h5py.File(missing, "r+") as file:
-        del file["object_geometry"]
-    with pytest.raises(KeyError, match="object_geometry"):
-        HDF5ToZarrConverter(missing_dir, tmp_path / "missing.zarr").convert()

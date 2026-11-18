@@ -164,7 +164,7 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 
 `metrics.jsonl` 追加指标。`config.yaml` 保留初始配置，续训使用 checkpoint 的 `effective_config`。配置与 checkpoint 都记录 `remote_source`，格式为 `host:source_path`，随实验目录一起取回。
 
-需要前台续训时，在 `--` 前加入 `--fg`。续训核对实际 Zarr 的解析路径、原始来源和训练组，重新导出的数据使用新路径和新实验目录。
+需要前台续训时，在 `--` 前加入 `--fg`。当前代码的续训使用包含 `episode_layout` 的 checkpoint，核对 Zarr 的解析路径、原始来源、训练组和回合布局。重新导出的数据使用新路径和新实验目录。
 
 ## 7. 取回实验结果
 

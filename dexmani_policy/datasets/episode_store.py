@@ -19,7 +19,8 @@ class EpisodeStore:
         fields = group["data"]
         self.data = {key: fields[key] for key in keys}
         self.attrs = dict(group.attrs)
-        ends = np.asarray(group["meta"]["episode_ends"])
+        self.meta = group["meta"]
+        ends = np.asarray(self.meta["episode_ends"])
         if (
             ends.ndim != 1
             or ends.size == 0

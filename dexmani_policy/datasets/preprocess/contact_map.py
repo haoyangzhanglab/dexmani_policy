@@ -1,7 +1,6 @@
 """Build a self-contained CordViP Zarr with offline contact labels."""
 
 import argparse
-import re
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
@@ -16,17 +15,13 @@ from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 
 
 CHUNK_ROWS = 16
+CONTACT_POINT_COUNT = 1024
 
 
-def require_contact_geometry(buffer):
-    if buffer["object_pointcloud"].shape[1] != 1024:
-        raise ValueError(f"{buffer.path}: CordViP contact supervision requires 1024 object point slots")
-    processing = buffer.attrs.get("data_processing") or {}
-    geometry = processing.get("object_pointcloud", {}).get("geometry_sha256")
-    if not isinstance(geometry, str) or re.fullmatch("[0-9a-f]{64}", geometry) is None:
+def require_contact_point_count(buffer):
+    if buffer["object_pointcloud"].shape[1] != CONTACT_POINT_COUNT:
         raise ValueError(
-            f"{buffer.path}: missing shared object geometry_sha256. "
-            "Export episodes with the same ordered local template and part offsets"
+            f"{buffer.path}: CordViP contact supervision requires {CONTACT_POINT_COUNT} object point slots"
         )
 
 
@@ -46,13 +41,19 @@ def compute_contact_map(object_points, object_normals, hand_points, *, point_chu
     contacts = np.empty(len(objects), dtype=np.float64)
     for start in range(0, len(objects), point_chunk_size):
         stop = start + point_chunk_size
-        difference = hand[None] - objects[start:stop, None]
-        distance = np.linalg.norm(difference, axis=-1)
-        alignment = np.abs(
-            np.einsum("ijk,ik->ij", difference, normals[start:stop])
-        ) / (distance + 1e-8)
+        block = objects[start:stop]
+        block_normals = normals[start:stop]
+        distance_squared = np.zeros((len(block), len(hand)), dtype=np.float64)
+        projection = np.zeros_like(distance_squared)
+        for axis in range(3):
+            difference = hand[None, :, axis] - block[:, None, axis]
+            distance_squared += difference ** 2
+            projection += difference * block_normals[:, None, axis]
+        distance = np.sqrt(distance_squared, out=distance_squared)
+        alignment = np.abs(projection, out=projection) / (distance + 1e-8)
         minimum = (distance * np.exp(1 - alignment)).min(axis=1)
-        contacts[start:stop] = 1 - 2 * (1 / (1 + np.exp(-10 * minimum)) - 0.5)
+        decay = np.exp(-10 * minimum)
+        contacts[start:stop] = 2 * decay / (1 + decay)
     return contacts
 
 
@@ -65,10 +66,9 @@ def generate(zarr_path, output, num_workers=1):
     output = Path(output).expanduser()
     if output.exists():
         raise FileExistsError(f"Contact output already exists: {output}")
-    source = zarr.open_group(zarr.DirectoryStore(Path(zarr_path).expanduser()), mode="r")
     fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None}
     buffer = EpisodeStore(zarr_path, keys=fields, pc_dim=3)
-    require_contact_geometry(buffer)
+    require_contact_point_count(buffer)
     rows = int(buffer.episode_ends[-1])
     attrs = dict(buffer.attrs)
     attrs["source_zarr_path"] = buffer.source_path
@@ -77,7 +77,7 @@ def generate(zarr_path, output, num_workers=1):
         temporary = Path(directory) / "data.zarr"
         group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
         group.attrs.update(attrs)
-        zarr.copy(source["meta"], group)
+        zarr.copy(buffer.meta, group)
         data = group.create_group("data")
         for key, columns in fields.items():
             array = buffer[key]
@@ -86,8 +86,8 @@ def generate(zarr_path, output, num_workers=1):
                 key, shape=shape, chunks=(CHUNK_ROWS, *shape[1:]), dtype="float32",
             )
         labels = data.create_dataset(
-            "contact_map", shape=(rows, buffer["object_pointcloud"].shape[1]),
-            chunks=(CHUNK_ROWS, buffer["object_pointcloud"].shape[1]), dtype="float32",
+            "contact_map", shape=(rows, CONTACT_POINT_COUNT),
+            chunks=(CHUNK_ROWS, CONTACT_POINT_COUNT), dtype="float32",
         )
         # Open3D's OpenMP runtime cannot safely be inherited by forked workers.
         workers = (

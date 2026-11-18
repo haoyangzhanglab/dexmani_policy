@@ -64,7 +64,7 @@ OMP_NUM_THREADS=1 python -B -m pytest -q dexmani_policy/test_tools/native_integr
 
 仿真数据的每个 episode 独立划分；Real 数据按原始采集分组划分，连续段仍独立采样。同一采集的段不会跨 train/val；`val_episodes` 和 `max_train_episodes` 均按采集组计数，日志同时显示组数与段数。核心模块及其数据流见[项目架构](docs/项目架构.md)。
 
-同源 VQ、观测预训练和策略训练通过 `--policy-config` 共享分组和训练预算。Real 数据要求逐段 `source_episodes`，Real ODE 还需要由逐行命令接受状态导出的 `action_ode`。接触预训练启用时需要 1024 个固定物体点槽及共享 `geometry_sha256`。 [预训练与数据划分](docs/观测预训练.md) · [Real ODE 数据协议](docs/手部动作表示.md#ode从上一条指令积分生成轨迹)
+同源 VQ、观测预训练和策略训练通过 `--policy-config` 共享分组和训练预算。Real 数据要求逐段 `source_episodes`，Real ODE 还需要由逐行命令接受状态导出的 `action_ode`。启用接触预训练时，每帧的 1024 个接触标签按该帧物体点云顺序对应。 [预训练与数据划分](docs/观测预训练.md) · [Real ODE 数据协议](docs/手部动作表示.md#ode从上一条指令积分生成轨迹)
 
 ## 策略方向
 
