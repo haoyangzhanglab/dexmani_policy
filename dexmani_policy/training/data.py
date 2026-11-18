@@ -33,53 +33,46 @@ def record_training_data(cfg, store, train, val=None):
     record = {"source": store.source_path, "train_source_episodes": sorted(train_groups)}
     if val_groups:
         record["val_source_episodes"] = sorted(val_groups)
-    records = list(cfg.get("training_data", ()))
-
     reference_path = cfg.get("policy_zarr_path")
     if reference_path is not None:
         if store.attrs.get("task_name") != cfg.task_name:
             raise ValueError(f"{store.path}: pretraining task must match {cfg.task_name}")
+        if store.source_path != reference_path:
+            raise ValueError(f"{store.path}: pretraining data must share the original policy Zarr")
         if reference_path != store.path:
             reference = EpisodeStore(reference_path, keys=())
             expected_train, expected_val = split_episodes(
                 reference.episode_groups, seed=cfg.dataset.seed,
                 max_train_episodes=cfg.dataset.max_train_episodes, val_episodes=cfg.dataset.val_episodes,
             )
-            if (store.source_path != reference.source_path
-                    or train_groups != reference.source_groups(expected_train)
+            if (train_groups != reference.source_groups(expected_train)
                     or val_groups != reference.source_groups(expected_val)):
                 raise ValueError(f"{store.path}: pretraining data must share the policy source and episode split")
-        if records and record not in records:
-            raise ValueError(f"{store.path}: pretraining resume must use the saved policy episode split")
-
-    if record not in records:
-        records.append(record)
     with open_dict(cfg):
-        cfg.training_data = records
+        cfg.pop("policy_zarr_path", None)
+        cfg.training_data = record
 
 
-def inherit_training_data(cfg, dataset, records, asset):
+def record_prior_data(cfg, dataset, asset, record: dict | None = None):
     store = dataset.episode_store
-    source = store.source_path
-    allowed_train = store.source_groups(dataset.train_mask)
-    allowed_val = store.source_groups(dataset.val_mask)
-    lineage = list(cfg.get("training_data", ()))
-    records = records or [{"source": None, "artifact": str(asset)}]
-    for record in records:
-        if record["source"] != source:
-            print(f"[Dataset] Prior {record.get('artifact', asset)} has no verified same-source budget")
-        else:
-            excess_train = set(record["train_source_episodes"]) - allowed_train
-            excess_val = set(record.get("val_source_episodes", ())) - allowed_val
-            if excess_train or excess_val:
-                raise ValueError(
-                    f"{asset}: same-source prior exceeds the policy episode split: "
-                    f"train={sorted(excess_train)}, validation={sorted(excess_val)}"
-                )
-        if record not in lineage:
-            lineage.append(record)
+    if record is None:
+        record = {"source": None}
+    source = record["source"]
+    same_source = source is not None and source == store.source_path
+    if same_source:
+        excess_train = set(record["train_source_episodes"]) - store.source_groups(dataset.train_mask)
+        excess_val = set(record.get("val_source_episodes", ())) - store.source_groups(dataset.val_mask)
+        if excess_train or excess_val:
+            raise ValueError(
+                f"{asset}: same-source prior exceeds the policy episode split: "
+                f"train={sorted(excess_train)}, validation={sorted(excess_val)}"
+            )
+    else:
+        print(f"[Dataset] Prior {asset} has no verified same-source budget")
     with open_dict(cfg):
-        cfg.training_data = lineage
+        if "prior_data" not in cfg:
+            cfg.prior_data = []
+        cfg.prior_data.append({**record, "artifact": str(asset), "budget_verified": same_source})
 
 
 def fit_observation_normalizer(
@@ -150,12 +143,8 @@ def build_dataset(cfg):
     dims["action"] = dataset.action_dim
     if cfg.agent.action_dim is None:
         cfg.agent.action_dim = dims["action"]
-    if "state_key" in cfg.agent:
-        state_dim = dims[cfg.agent.state_key]
-        if cfg.agent.state_dim is None:
-            cfg.agent.state_dim = state_dim
-        elif cfg.agent.state_dim != state_dim:
-            raise ValueError("Dataset state width must match agent.state_dim")
+    if "state_key" in cfg.agent and cfg.agent.state_dim is None:
+        cfg.agent.state_dim = dims[cfg.agent.state_key]
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     print(f"[Dataset] {dataset.training_summary()}")

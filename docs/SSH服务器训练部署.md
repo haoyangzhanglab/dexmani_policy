@@ -145,11 +145,11 @@ ssh "$HOST" 'tail -F -- "/absolute/path/to/<session>.log"'
 ssh "$HOST" 'tmux -L dexmani_policy send-keys -t "=<session>:" C-c'
 ```
 
-等待训练在更新边界保存退出；若信号晚于本次更新的结束判断到达，可能再完成一次更新。重复中断或强杀可能丢失最近更新；续训或下载前，确认进程已退出，并检查日志与 checkpoint。
+等待训练在更新边界保存退出。若信号晚于本次更新的结束判断到达，可能再完成一次更新。强杀可能丢失最近更新。续训或下载前确认进程退出，并检查日志与 checkpoint。
 
 ## 6. 原目录续训
 
-保持原来的 `RUN`，确认已有 `RUN/checkpoints/latest.pt`，且没有训练进程继续写入该目录。
+沿用原来的 `RUN`，确认已有 `RUN/checkpoints/latest.pt`，且训练进程已退出。脚本读取 `RUN/config.yaml` 的 `remote_source`，使用首次训练保留的源码快照。预览会显示来源记录位置。
 
 先预览续训命令，再启动：
 
@@ -162,11 +162,9 @@ bash scripts/remote/train_remote.sh "${REMOTE[@]}" --resume -- \
 
 续训恢复 checkpoint 保存的训练配方与状态，不再次传入方法名或模型配置。`--` 后传续训入口的运行参数，例如 `--num-workers`；可追加 `--max-updates 100` 限制本次执行步数，不改变实验总预算。延长预算使用 `--total-steps 150000`，已完成的实验也可继续。续训从新一轮数据遍历开始，并按当前步数重新设置随机种子。
 
-`metrics.jsonl` 追加指标。`config.yaml` 保留初始配置快照，续训使用 checkpoint 的 `effective_config`。远程启动的 `remote_source` 记录 `host:source_path`。初次启动写入 `config.yaml`，续训生成的 checkpoint 保存该次启动的快照位置，随实验目录一起取回。
+`metrics.jsonl` 追加指标。`config.yaml` 保留初始配置，续训使用 checkpoint 的 `effective_config`。配置与 checkpoint 都记录 `remote_source`，格式为 `host:source_path`，随实验目录一起取回。
 
-续训源码须与 checkpoint 的模型结构一致，模型参数按键名和形状严格恢复。
-
-需要前台续训时，在 `--` 前加入 `--fg`。源码仍由启动脚本同步，数据沿用已准备的远端目录。
+需要前台续训时，在 `--` 前加入 `--fg`。数据使用 checkpoint 保存的路径。
 
 ## 7. 取回实验结果
 

@@ -1,4 +1,3 @@
-import os
 import signal
 from contextlib import contextmanager
 
@@ -8,12 +7,10 @@ class StopRequest:
         self.requested = False
 
     def __call__(self, signum, frame):
-        name = signal.Signals(signum).name
-        if self.requested:
-            print(f"\nSecond {name} — forcing exit.", flush=True)
-            os._exit(1)
-        print(f"\n{name} — stopping and saving at the next update boundary.", flush=True)
-        self.requested = True
+        if not self.requested:
+            name = signal.Signals(signum).name
+            print(f"\n{name} — stopping and saving at the next update boundary.", flush=True)
+            self.requested = True
 
 
 @contextmanager

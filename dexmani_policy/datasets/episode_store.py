@@ -13,11 +13,11 @@ from dexmani_policy.common.config import (
 class EpisodeStore:
     """Read-only arrays from a local Zarr 2 directory."""
 
-    def __init__(self, zarr_path, *, keys=None, pc_dim=None):
+    def __init__(self, zarr_path, *, keys, pc_dim=None):
         self.path = str(Path(zarr_path).expanduser().resolve())
         group = zarr.open_group(zarr.DirectoryStore(self.path), mode="r")
         fields = group["data"]
-        self.data = {key: fields[key] for key in (fields.keys() if keys is None else keys)}
+        self.data = {key: fields[key] for key in keys}
         self.attrs = dict(group.attrs)
         ends = np.asarray(group["meta"]["episode_ends"])
         if (
@@ -51,15 +51,6 @@ class EpisodeStore:
                 or any(not isinstance(source, str) or not source for source in sources)
             ):
                 raise ValueError(f"{self.path}: source_episodes must identify every Real segment")
-            ranges = np.asarray(self.attrs.get("source_row_ranges"))
-            lengths = np.diff(np.r_[0, self.episode_ends])
-            if (
-                ranges.shape != (self.n_episodes, 2) or ranges.dtype.kind not in "iu"
-                or np.any(ranges[:, 0] < 0)
-                or np.any(ranges[:, 1] <= ranges[:, 0])
-                or np.any(ranges[:, 1] - ranges[:, 0] != lengths)
-            ):
-                raise ValueError(f"{self.path}: source_row_ranges must match every Real segment length")
             self.episode_groups = sources
         else:
             # Current simulation stores contain independent episodes.

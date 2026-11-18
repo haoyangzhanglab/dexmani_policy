@@ -14,14 +14,6 @@ def sample_range(bounds):
     return bounds[0] if bounds[0] == bounds[1] else np.random.uniform(*bounds)
 
 
-def random_sample_points(pointcloud: np.ndarray, keep_points: int) -> np.ndarray:
-    """Sample each frame without replacement, using shared indices for all channels."""
-    t, n, _ = pointcloud.shape
-    scores = np.random.random((t, n))
-    indices = np.argpartition(scores, kth=keep_points - 1, axis=1)[:, :keep_points]
-    return np.ascontiguousarray(np.take_along_axis(pointcloud, indices[..., None], axis=1))
-
-
 class Augmentation:
     """In-place transform; the dataset applies probability gating to owned sample arrays."""
 
@@ -35,14 +27,13 @@ class Augmentation:
 
 
 class PointColorJitter(Augmentation):
-    """Additive brightness and shared contrast, saturation and hue on the last RGB channels."""
+    """Additive brightness and shared contrast and saturation on the last RGB channels."""
 
-    def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.08, prob=1.0):
+    def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, prob=1.0):
         super().__init__(prob=prob)
         self.brightness = self.make_range(brightness, center=0.0, symmetric=True)
         self.contrast = self.make_range(contrast, center=1.0)
         self.saturation = self.make_range(saturation, center=1.0)
-        self.hue = self.make_range(hue, center=0.0, symmetric=True)
 
     @staticmethod
     def make_range(value, center, symmetric=False):
@@ -57,9 +48,6 @@ class PointColorJitter(Augmentation):
         self.apply_contrast(rgb)
         self.apply_saturation(rgb)
 
-        # Additive brightness can leave the [0, 1] domain required by HSV.
-        np.clip(rgb, 0.0, 1.0, out=rgb)
-        self.apply_hue(rgb)
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
     def apply_brightness(self, rgb):
@@ -87,67 +75,6 @@ class PointColorJitter(Augmentation):
         rgb[:, 0] += gray * inv_factor
         rgb[:, 1] += gray * inv_factor
         rgb[:, 2] += gray * inv_factor
-
-    def apply_hue(self, rgb):
-        shift = sample_range(self.hue)
-        if abs(shift) < 1e-6:
-            return
-        hsv = self.rgb_to_hsv(rgb)
-        hsv[:, 0] = (hsv[:, 0] + shift) % 1.0
-        rgb[...] = self.hsv_to_rgb(hsv)
-
-    @staticmethod
-    def rgb_to_hsv(rgb):
-        r, g, b = rgb[:, 0], rgb[:, 1], rgb[:, 2]
-        max_v, min_v = np.max(rgb, axis=-1), np.min(rgb, axis=-1)
-        diff = max_v - min_v
-        max_idx = np.argmax(rgb, axis=-1)
-
-        h = np.zeros_like(max_v)
-        mask = diff != 0
-
-        rm = mask & (max_idx == 0)
-        h[rm] = ((g[rm] - b[rm]) / diff[rm]) / 6.0
-        gm = mask & (max_idx == 1)
-        h[gm] = ((b[gm] - r[gm]) / diff[gm] + 2.0) / 6.0
-        bm = mask & (max_idx == 2)
-        h[bm] = ((r[bm] - g[bm]) / diff[bm] + 4.0) / 6.0
-
-        h %= 1.0
-        # np.where evaluates both branches, so it does not prevent 0 / 0.
-        s = np.zeros_like(diff)
-        np.divide(diff, max_v, out=s, where=max_v != 0)
-        return np.stack([h, s, max_v], axis=-1)
-
-    @staticmethod
-    def hsv_to_rgb(hsv):
-        h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
-        h6 = h * 6.0
-        h_floor = np.floor(h6)
-        i = h_floor.astype(np.int32) % 6
-        f = h6 - h_floor
-
-        p = v * (1.0 - s)
-        q = v * (1.0 - s * f)
-        t = v * (1.0 - s * (1.0 - f))
-
-        rgb = np.zeros_like(hsv)
-        for idx, (r_src, g_src, b_src) in enumerate(
-            [
-                (v, t, p),
-                (q, v, p),
-                (p, v, t),
-                (p, q, v),
-                (t, p, v),
-                (v, p, q),
-            ]
-        ):
-            mask = i == idx
-            rgb[mask, 0] = r_src[mask]
-            rgb[mask, 1] = g_src[mask]
-            rgb[mask, 2] = b_src[mask]
-        return rgb
-
 
 class PointDropout(Augmentation):
     """Replace dropped rows with the first point, sampling a dropout ratio per frame."""
@@ -240,7 +167,7 @@ class ImageAugmentation:
         return self.transform(x).clamp(0, 1)
 
 
-# NumPy transforms run in this order before point subsampling and RGB processing.
+# NumPy transforms run in this order before RGB processing.
 AUGMENTATION_SPECS = (
     ("pc", PointCoordinateNoise, "coord_noise", "point_cloud"),
     ("pc", PointColorJitter, "color", "point_cloud"),

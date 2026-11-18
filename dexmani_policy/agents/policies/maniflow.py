@@ -78,7 +78,6 @@ class ManiFlow(Policy):
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        pre_norm_modality: bool = False,
         num_inference_steps: int = 10,
         denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,
@@ -112,7 +111,6 @@ class ManiFlow(Policy):
             p_drop_attn=p_drop_attn,
             qkv_bias=qkv_bias,
             qk_norm=qk_norm,
-            pre_norm_modality=pre_norm_modality,
         )
 
         action_decoder = ConsistencyFlow(

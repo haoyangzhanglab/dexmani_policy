@@ -1,28 +1,28 @@
 import json
 import os
 import uuid
-from collections.abc import Mapping
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.io_util import atomic_path
 
 
 class ExperimentLogger:
-    def __init__(self, output_dir: str, wandb_cfg: Mapping | None = None, *,
-                 resuming: bool = False, wandb_enabled=True):
-        self.output_dir = Path(output_dir)
+    def __init__(self, cfg, *, resuming: bool = False):
+        workspace = cfg.workspace
+        self.output_dir = Path(workspace.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.resuming = resuming
-        self.metrics_file = (self.output_dir / "metrics.jsonl").open(
-            "a", buffering=1, encoding="utf-8"
-        )
-        self.wandb_run = None
-        if wandb_enabled and wandb_cfg is not None:
-            try:
+        with ExitStack() as resources:
+            self.metrics_file = resources.enter_context(
+                (self.output_dir / "metrics.jsonl").open("a", buffering=1, encoding="utf-8")
+            )
+            self.wandb_run = None
+            wandb_cfg = workspace.get("wandb_cfg")
+            if workspace.get("wandb_enabled", True) and wandb_cfg is not None:
                 os.environ.setdefault("WANDB_SILENT", "true")
                 import wandb
 
@@ -30,17 +30,13 @@ class ExperimentLogger:
                 self.wandb_run = wandb.init(
                     dir=str(self.output_dir), id=uuid.uuid4().hex, resume="never", **wandb_cfg
                 )
-            except BaseException:
-                close_resources(self.close)
-                raise
-
-    def save_config(self, hydra_config):
-        if not self.resuming:
-            with atomic_path(self.output_dir / "config.yaml") as temporary:
-                OmegaConf.save(hydra_config, temporary, resolve=True)
-        if self.wandb_run is not None:
-            cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
-            self.wandb_run.config.update(cfg_dict)
+                resources.callback(self.wandb_run.finish)
+            if not resuming:
+                with atomic_path(self.output_dir / "config.yaml") as temporary:
+                    OmegaConf.save(cfg, temporary, resolve=True)
+            if self.wandb_run is not None:
+                self.wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
+            self._resources = resources.pop_all()
 
     def log(self, data: dict[str, Any], step: int):
         record = {"step": step, **data}
@@ -49,10 +45,7 @@ class ExperimentLogger:
             self.wandb_run.log(data, step=step)
 
     def close(self):
-        closers = [self.metrics_file.close]
-        if self.wandb_run is not None:
-            closers.append(self.wandb_run.finish)
-        close_resources(*closers)
+        self._resources.close()
 
 
 def accumulate_metrics(totals, metrics, *, weight: int) -> None:

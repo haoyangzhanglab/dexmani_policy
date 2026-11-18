@@ -16,28 +16,6 @@ from .modules import (
 )
 
 
-class ContextAdaLN(nn.Module):
-    """ManiFlow applies SiLU before identity-initialized affine conditioning."""
-
-    def __init__(self, dim, cond_dim):
-        super().__init__()
-
-        self.dim = dim
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
-        self.cond_linear = nn.Linear(cond_dim, dim * 2)
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        nn.init.zeros_(self.cond_linear.weight)
-        nn.init.constant_(self.cond_linear.bias[: self.dim], 1.0)
-        nn.init.zeros_(self.cond_linear.bias[self.dim :])
-
-    def forward(self, x, cond):
-        x = self.norm(x)
-        gamma, beta = self.cond_linear(F.silu(cond).unsqueeze(1)).chunk(2, dim=-1)
-        return x * gamma + beta
-
-
 class CrossAttention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_norm=False):
         super().__init__()
@@ -277,20 +255,14 @@ class ConsistencyDiTX(nn.Module):
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        pre_norm_modality: bool = False,
     ):
         super().__init__()
-
-        self.pre_norm_modality = pre_norm_modality
 
         self.input_embedder = nn.Linear(action_dim, hidden_dim)
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
 
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
-        if self.pre_norm_modality:
-            self.context_norm = ContextAdaLN(dim=hidden_dim, cond_dim=hidden_dim)
-
         self.timestep_embedder = TimestepMLP(pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
         self.target_t_embedder = TimestepMLP(pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
 
@@ -328,9 +300,6 @@ class ConsistencyDiTX(nn.Module):
             nn.init.zeros_(block.adaln_modulation[-1].weight)
             nn.init.zeros_(block.adaln_modulation[-1].bias)
 
-        if self.pre_norm_modality:
-            self.context_norm.initialize_weights()
-
         nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
 
@@ -360,7 +329,7 @@ class ConsistencyDiTX(nn.Module):
 
     def prepare_context_kv(self, context):
         # The caller owns this cache for one eval sample with time-independent context.
-        if self.training or self.pre_norm_modality:
+        if self.training:
             return None
         context_c = self.embed_context(context)
         return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
@@ -380,9 +349,6 @@ class ConsistencyDiTX(nn.Module):
         )
 
         context_c = self.embed_context(context) if context_kv is None else None
-        if self.pre_norm_modality:
-            context_c = self.context_norm(context_c, time_c)
-
         for index, block in enumerate(self.ditx_blocks):
             x = block(
                 x,

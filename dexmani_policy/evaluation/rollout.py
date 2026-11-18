@@ -1,5 +1,6 @@
 import os
 import tempfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,7 +12,7 @@ from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.inference import resolve_inference_settings, restore_policy
-from dexmani_policy.common.io_util import close_resources, write_json
+from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.evaluation.metrics import summarize_episodes
 from dexmani_policy.evaluation.seeds import (
@@ -80,16 +81,13 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     if hasattr(agent, "force_predictor"):
         record["force_inference_steps"] = agent.force_predictor.num_inference_steps
     write_json(path, record)
-    results = runner.run(agent, seeds=seeds, inference_steps=inference_steps,
-                         action_steps=action_steps,
-                         video_save_dir=directory / "videos" / runner.task_name if video else None)
-    try:
+    video_directory = directory / "videos" / runner.task_name if video else None
+    with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
+                            action_steps=action_steps, video_save_dir=video_directory)) as results:
         for episode in results:
             record["episodes"].append(episode)
             record["statistics"] = summarize_episodes(record["episodes"])
             write_json(path, record)
-    finally:
-        close_resources(results.close)
     record["completed"] = True
     write_json(path, record)
     print(f"{record['statistics']}; {path}")

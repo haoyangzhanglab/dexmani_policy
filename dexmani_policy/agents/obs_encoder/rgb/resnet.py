@@ -94,10 +94,4 @@ class ResNetEncoder(nn.Module):
         feature_map = self.backbone(flat_rgb)
         feature_map = self.proj(feature_map)
 
-        patch_tokens = feature_map.flatten(2).transpose(1, 2).contiguous()
-        global_token = feature_map.mean(dim=(-2, -1))
-
-        return {
-            "patch_tokens": patch_tokens,
-            "global_token": global_token,
-        }
+        return {"global_token": feature_map.mean(dim=(-2, -1))}

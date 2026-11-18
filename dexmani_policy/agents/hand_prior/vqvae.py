@@ -29,20 +29,6 @@ def sample_vectors(samples: Tensor, count: int) -> Tensor:
     return samples[indices]
 
 
-@torch.no_grad()
-def kmeans(samples: Tensor, num_clusters: int, num_iters: int) -> tuple[Tensor, Tensor]:
-    means = sample_vectors(samples, num_clusters)
-    for _ in range(num_iters):
-        indices = codebook_distances(samples, means).argmin(-1)
-        counts = samples.new_zeros(num_clusters).scatter_add_(
-            0, indices, samples.new_ones(len(samples)),
-        )
-        sums = torch.zeros_like(means).index_add_(0, indices, samples)
-        centers = sums / counts.clamp_min(1)[:, None]
-        means = torch.where(counts[:, None] == 0, means, centers)
-    return means, counts
-
-
 class EMAVectorQuantizer(nn.Module):
     """Euclidean nearest-neighbor quantization with EMA codebook updates."""
 
@@ -52,42 +38,20 @@ class EMAVectorQuantizer(nn.Module):
         codebook_size: int,
         decay: float = 0.8,
         eps: float = 1e-5,
-        kmeans_init: bool = False,
-        kmeans_iters: int = 10,
         threshold_ema_dead_code: float = 0,
     ) -> None:
         super().__init__()
         self.codebook_size = positive_int(codebook_size, "codebook_size")
-        self.kmeans_iters = positive_int(kmeans_iters, "kmeans_iters")
         self.decay = decay
         self.eps = eps
         self.threshold_ema_dead_code = threshold_ema_dead_code
-        self.is_initialized = not kmeans_init
 
-        embed = torch.zeros(codebook_size, dim)
-        if not kmeans_init:
-            # Preserve DQ-RISE's fan-in for its original (1, K, D) embedding.
-            nn.init.kaiming_uniform_(embed.unsqueeze(0))
-        self.register_buffer("initialized", torch.tensor(not kmeans_init))
+        # Preserve DQ-RISE's fan-in for its original (1, K, D) embedding.
+        embed = nn.init.kaiming_uniform_(torch.empty(1, codebook_size, dim)).squeeze(0)
         self.register_buffer("embed", embed)
         # Random centers and their accumulated sums use the same unit pseudocount.
-        counts = torch.zeros(codebook_size) if kmeans_init else torch.ones(codebook_size)
-        self.register_buffer("embed_avg", embed * counts[:, None])
-        self.register_buffer("cluster_size", counts)
-        self.register_load_state_dict_post_hook(self.restore_initialization)
-
-    def restore_initialization(self, module: nn.Module, incompatible_keys) -> None:
-        # Cache the checkpoint flag on the host to avoid per-forward CUDA synchronization.
-        self.is_initialized = bool(self.initialized)
-
-    @torch.no_grad()
-    def initialize(self, samples: Tensor) -> None:
-        embed, counts = kmeans(samples, self.codebook_size, self.kmeans_iters)
-        self.embed.copy_(embed)
-        self.embed_avg.copy_(embed * counts[:, None])
-        self.cluster_size.copy_(counts)
-        self.initialized.fill_(True)
-        self.is_initialized = True
+        self.register_buffer("embed_avg", embed.clone())
+        self.register_buffer("cluster_size", torch.ones(codebook_size))
 
     @torch.no_grad()
     def update_codebook(self, samples: Tensor, indices: Tensor) -> None:
@@ -113,11 +77,6 @@ class EMAVectorQuantizer(nn.Module):
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         with torch.autocast(device_type=x.device.type, enabled=False):
             samples = x.detach().reshape(-1, x.shape[-1]).float()
-            if not self.is_initialized:
-                if not self.training:
-                    raise RuntimeError("Initialize the codebook in training before evaluation")
-                self.initialize(samples)
-
             distances = codebook_distances(samples, self.embed)
             indices = distances.argmin(-1)
             quantized = F.embedding(indices, self.embed).reshape_as(x)
@@ -170,8 +129,6 @@ class HandVQVAE(nn.Module):
         num_layers: int = 6,
         vq_decay: float = 0.8,
         threshold_ema_dead_code: float = 0,
-        kmeans_init: bool = False,
-        kmeans_iters: int = 10,
     ) -> None:
         super().__init__()
         if len(loss_weight) != hand_dim:
@@ -184,7 +141,6 @@ class HandVQVAE(nn.Module):
         self.num_groups = num_groups
         self.codebook_size = codebook_size
         self.num_layers = num_layers
-        self.kmeans_init = kmeans_init
         self.register_buffer("loss_weight", torch.tensor(loss_weight, dtype=torch.float32))
         self.encoder = build_mlp(
             [hand_dim] + [hidden_dim] * num_layers + [latent_dim],
@@ -202,8 +158,6 @@ class HandVQVAE(nn.Module):
             codebook_size,
             decay=vq_decay,
             threshold_ema_dead_code=threshold_ema_dead_code,
-            kmeans_init=kmeans_init,
-            kmeans_iters=kmeans_iters,
         )
 
     @property
@@ -216,7 +170,6 @@ class HandVQVAE(nn.Module):
             "loss_weight": self.loss_weight.detach().cpu().tolist(),
             "vq_decay": layer.decay,
             "threshold_ema_dead_code": layer.threshold_ema_dead_code,
-            "kmeans_iters": layer.kmeans_iters, "kmeans_init": self.kmeans_init,
         }
 
     def forward(self, hand: Tensor) -> tuple[Tensor, Tensor, Tensor]:

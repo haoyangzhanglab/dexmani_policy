@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import (
     dict_apply,
     get_rng_state,
@@ -40,7 +40,7 @@ def load_run(method, argv=None):
     parser = argparse.ArgumentParser(description=f"Pretrain the {method} observation encoder")
     parser.add_argument("--config", help="Config name or relative path under dexmani_policy/configs")
     parser.add_argument("--output-dir")
-    parser.add_argument("--resume-from")
+    parser.add_argument("--resume-from", metavar="RUN_DIR", help="Resume the run's checkpoints/latest.pt")
     parser.add_argument("--device")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--log-interval", type=int)
@@ -53,18 +53,12 @@ def load_run(method, argv=None):
     args = parser.parse_args(argv)
     checkpoint = None
     if args.resume_from is not None:
-        if args.config is not None or args.output_dir is not None or args.policy_config is not None or args.overrides:
-            parser.error("Resume uses the saved recipe; config, output directory and overrides are fresh-only")
-        source = Path(args.resume_from).expanduser().resolve(strict=True)
-        if source.is_dir():
-            directory = source
-            source = directory / "checkpoints/latest.pt"
-        else:
-            directory = source.parent.parent
-        checkpoint = load_checkpoint(source)
+        if (args.config is not None or args.output_dir is not None or args.policy_config is not None
+                or args.zarr_path is not None or args.overrides):
+            parser.error("Resume uses the saved recipe and Zarr. Data and recipe options are fresh-only")
+        directory = Path(args.resume_from).expanduser().resolve()
+        checkpoint = load_checkpoint(directory / "checkpoints/latest.pt")
         cfg = OmegaConf.create(checkpoint.effective_config)
-        if "training_data" not in cfg:
-            raise ValueError("Observation pretraining resume requires a checkpoint with training_data")
         cfg.workspace.output_dir = str(directory)
     else:
         cfg = load_config(args.config or f"pretrain/obs/{method}", args.overrides)
@@ -80,8 +74,6 @@ def load_run(method, argv=None):
     if args.device is not None:
         cfg.training.device = args.device
     if args.num_workers is not None:
-        if args.num_workers < 0:
-            parser.error("--num-workers must be nonnegative")
         cfg.dataloader.num_workers = args.num_workers
     if args.log_interval is not None:
         cfg.training.loop.log_interval_steps = args.log_interval
@@ -131,18 +123,18 @@ def evaluate(model, dataset, batch_size, device, *, stop):
                 return None
         return {f"val/{key}": value / len(dataset) for key, value in totals.items()}
     finally:
-        close_resources(lambda: model.train(training), lambda: set_rng_state(rng_state, device))
+        model.train(training)
+        set_rng_state(rng_state, device)
 
 
 def train(method, model_class, argv=None):
     cfg, checkpoint, max_updates = load_run(method, argv)
-    normalize_output_dir(cfg)
     resuming = checkpoint is not None
     if resuming and checkpoint.global_step >= cfg.training.loop.total_train_steps:
         print(f"Pretraining already completed at step {checkpoint.global_step}")
         return
     if not resuming:
-        check_fresh_output(cfg.workspace.output_dir, "encoder.pt")
+        check_fresh_output(normalize_output_dir(cfg), "encoder.pt")
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
     positive_int(cfg.training.loop.log_interval_steps, "training.loop.log_interval_steps")
@@ -161,15 +153,16 @@ def train(method, model_class, argv=None):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    record_training_data(cfg, dataset.episode_store, dataset.train_mask, dataset.val_mask)
-    if method == "cordvip" and cfg.model.contact_loss_weight > 0 and resuming:
+    if not resuming:
+        record_training_data(cfg, dataset.episode_store, dataset.train_mask, dataset.val_mask)
+        record_data_processing(cfg, dataset)
+        cfg.zarr_path = dataset.episode_store.path
+        cfg.dataset.zarr_path = cfg.zarr_path
+    elif method == "cordvip" and cfg.model.contact_loss_weight > 0:
         previous = checkpoint.effective_config["data_processing"]
         current = dataset.episode_store.attrs["data_processing"]
         if current["object_pointcloud"]["geometry_sha256"] != previous["object_pointcloud"]["geometry_sha256"]:
             raise ValueError("Contact supervision resume requires the same object geometry_sha256")
-    record_data_processing(cfg, dataset)
-    cfg.zarr_path = dataset.episode_store.path
-    cfg.dataset.zarr_path = cfg.zarr_path
     print(f"[Dataset] {dataset.training_summary()}")
     validation = dataset.get_validation_dataset()
     if validation is not None:
@@ -191,7 +184,12 @@ def train(method, model_class, argv=None):
     device = torch.device(cfg.training.device)
     model.to(device=device, dtype=torch.float32)
     names, parameters = zip(*((name, p) for name, p in model.named_parameters() if p.requires_grad))
-    optimizer = torch.optim.AdamW([{"params": parameters, "param_names": list(names)}], **cfg.optimizer)
+    optimizer_options = dict(cfg.optimizer)
+    if "betas" in optimizer_options:
+        optimizer_options["betas"] = tuple(optimizer_options["betas"])
+    optimizer = torch.optim.AdamW(
+        [{"params": parameters, "param_names": list(names)}], **optimizer_options,
+    )
     total = cfg.training.loop.total_train_steps
     step = 0
     if resuming:
@@ -207,12 +205,11 @@ def train(method, model_class, argv=None):
     del checkpoint
     updates_per_epoch = (batches_per_epoch + accumulation - 1) // accumulation
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(**cfg.workspace, resuming=resuming)
+    logger = ExperimentLogger(cfg, resuming=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
     iterator = None
     try:
-        logger.save_config(cfg)
         with training_signals() as stop:
             initial_step = step
             while step < stop_step:
@@ -282,7 +279,10 @@ def train(method, model_class, argv=None):
             print(f"[{type(model).__name__}] Saved encoder.pt and checkpoints/latest.pt "
                   f"at epoch={epoch}, step={step}/{total}")
     finally:
-        close_resources(lambda: close_data_loader(loader, iterator), logger.close)
+        try:
+            close_data_loader(loader, iterator)
+        finally:
+            logger.close()
 
 
 def main():

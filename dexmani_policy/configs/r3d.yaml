@@ -31,7 +31,7 @@ dataset:
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 

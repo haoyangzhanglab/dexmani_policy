@@ -1,8 +1,5 @@
 import math
-import os
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TACTILE_FEATURE_SHAPES = {
     "finger_tactile_force": (5, 3),
     "taxel_tactile_force": (5, 120, 3),
@@ -40,10 +37,6 @@ def validate_observation_shape(name: str, shape: tuple[int, ...], *, width: int 
         raise ValueError(f"proprio requires one vector per frame, got {shape}")
     elif width is not None and (not shape or shape[-1] != width):
         raise ValueError(f"{name} requires feature width {width}, got frame shape {shape}")
-
-
-def set_project_root() -> None:
-    os.chdir(PROJECT_ROOT)
 
 
 def positive_float(value: float, name: str) -> float:

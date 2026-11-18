@@ -5,8 +5,9 @@ import torch
 from omegaconf import open_dict
 
 from dexmani_policy.common.normalizer import normalization_feature_shapes
+from dexmani_policy.datasets.episode_store import check_finite
 from dexmani_policy.training.data import (
-    fit_action_normalizer, fit_observation_normalizer, inherit_training_data, iter_validated_actions,
+    fit_action_normalizer, fit_observation_normalizer, iter_validated_actions, record_prior_data,
 )
 
 
@@ -59,8 +60,8 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
 
         if initialization.codebook is None:
             raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
-        codebook, hand_affine, records = load_codebook(initialization.codebook)
-        inherit_training_data(cfg, dataset, records, initialization.codebook)
+        codebook, hand_affine, record = load_codebook(initialization.codebook)
+        record_prior_data(cfg, dataset, initialization.codebook, record)
         with open_dict(cfg.agent):
             cfg.agent.num_codes = codebook.num_codes
 
@@ -70,13 +71,17 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
     if checkpoint is None:
         if method in {"dp", "sat", "dqrise", "dexlatent"}:
             model.obs_encoder.rgb_encoder.initialize_weights(initialization.rgb)
+            if initialization.rgb is not None:
+                record_prior_data(cfg, dataset, initialization.rgb)
         elif method == "r3d":
             model.obs_encoder.pc_encoder.initialize_weights(initialization.uni3d)
+            if initialization.uni3d is not None:
+                record_prior_data(cfg, dataset, initialization.uni3d)
         elif method in {"afro", "cordvip"} and initialization.encoder is not None:
             payload = torch.load(
                 Path(initialization.encoder).expanduser(), map_location="cpu", weights_only=True,
             )
-            inherit_training_data(cfg, dataset, payload["training_data"], initialization.encoder)
+            record_prior_data(cfg, dataset, initialization.encoder, payload.get("training_data"))
             fields: tuple[str, ...]
             if method == "afro":
                 encoder, fields = model.obs_encoder.pc_encoder, ("point_cloud",)
@@ -94,6 +99,7 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
             model.hand_codebook = codebook
         elif method == "dexlatent":
             hand_affine = model.hand_prior.initialize_weights(initialization.dexlatent)
+            record_prior_data(cfg, dataset, initialization.dexlatent)
 
     feature_shapes = normalization_feature_shapes(
         field_dims, cfg.normalization, required_identity_fields=model.required_identity_fields,
@@ -101,9 +107,14 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
     )
     model.configure_normalizer(field_dims, feature_shapes)
     if checkpoint is not None:
-        if method == "dqrise":
+        if method in {"dqrise", "dexlatent"}:
             for _ in iter_validated_actions(dataset):
                 pass
+        elif method == "r3d":
+            store, key = dataset.episode_store, "point_cloud"
+            columns = dataset.consumed_fields[key]
+            for start, values in store.iter_chunks(key, columns=columns, episode_mask=dataset.train_mask):
+                check_finite(store, key, start, values, columns)
         model.load_weights(checkpoint.model_state, cfg.training.device)
         return model
 

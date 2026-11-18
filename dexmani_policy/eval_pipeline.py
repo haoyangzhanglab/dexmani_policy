@@ -1,4 +1,4 @@
-"""Select explicit checkpoint candidates, then test the winner on independent seeds."""
+"""Evaluate a fixed checkpoint or select among candidates before independent testing."""
 
 import argparse
 

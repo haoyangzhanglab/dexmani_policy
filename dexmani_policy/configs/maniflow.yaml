@@ -28,7 +28,7 @@ dataset:
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -59,7 +59,6 @@ agent:
   # qkv_bias 和 qk_norm 仅作用于交叉注意力。
   qkv_bias: false
   qk_norm: false
-  pre_norm_modality: false
 
   timestep_embed_dim: 128
   target_t_embed_dim: 128

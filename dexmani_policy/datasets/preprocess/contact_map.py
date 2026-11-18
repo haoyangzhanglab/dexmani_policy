@@ -67,8 +67,6 @@ def generate(zarr_path, output, num_workers=1):
         raise FileExistsError(f"Contact output already exists: {output}")
     source = zarr.open_group(zarr.DirectoryStore(Path(zarr_path).expanduser()), mode="r")
     fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None}
-    if "action" in source["data"]:
-        fields["action"] = None
     buffer = EpisodeStore(zarr_path, keys=fields, pc_dim=3)
     require_contact_geometry(buffer)
     rows = int(buffer.episode_ends[-1])
@@ -111,8 +109,6 @@ def generate(zarr_path, output, num_workers=1):
                     frame_contact_map, points["object_pointcloud"], points["hand_pointcloud"],
                 )))
                 print(f"Contact rows {stop}/{rows}", flush=True)
-        if output.exists():
-            raise FileExistsError(f"Contact output already exists: {output}")
         temporary.rename(output)
     print(f"Saved {output}")
 

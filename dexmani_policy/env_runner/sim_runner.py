@@ -9,7 +9,6 @@ import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
-from dexmani_policy.common.io_util import close_resources
 
 
 class SimRunner:
@@ -121,11 +120,10 @@ class SimRunner:
                     self.env_rebuild_interval > 0 and index % self.env_rebuild_interval == 0
                 ):
                     if env is not None:
-                        previous, env = env, None
                         try:
-                            previous.close()
+                            env.close()
                         finally:
-                            del previous
+                            env = None
                     env = self.make_env(record_video=video_save_dir is not None)
 
                 success, steps = self._run_episode(
@@ -140,20 +138,15 @@ class SimRunner:
                     "video": None,
                 }
                 if video_save_dir is not None:
-                    try:
-                        from dexmani_policy.env_runner.video import save_episode_video
+                    from dexmani_policy.env_runner.video import save_episode_video
 
-                        result["video"] = save_episode_video(
-                            env.get_video(), env.video_fps, Path(video_save_dir) / f"episode_{seed}.mp4",
-                        )
-                    except BaseException:
-                        # Let the consumer publish the completed episode before propagating the error.
-                        yield result
-                        raise
+                    result["video"] = save_episode_video(
+                        env.get_video(), env.video_fps, Path(video_save_dir) / f"episode_{seed}.mp4",
+                    )
                 yield result
         finally:
             if env is not None:
-                close_resources(env.close)
+                env.close()
 
     def _environment_class(self):
         from dexmani_sim import resolve_env_class
@@ -163,16 +156,9 @@ class SimRunner:
     def make_env(self, *, record_video: bool):
         env_class = self._environment_class()
         kwargs = {"render_mode": "rgb_array", **self.env_kwargs}
-        # Keep the partially constructed instance reachable for cleanup.
-        env = env_class.__new__(env_class)
-        try:
-            env_class.__init__(env, record_video=record_video, **kwargs)
-            if not np.isclose(env.dt, self.control_dt_s, rtol=1e-6, atol=1e-9):
-                raise ValueError(
-                    f"Control period mismatch: Sim dt={env.dt} s, "
-                    f"Policy control_dt_s={self.control_dt_s} s"
-                )
-        except BaseException:
-            close_resources(env.close)
-            raise
+        env = env_class(record_video=record_video, **kwargs)
+        dt = env.dt
+        if not np.isclose(dt, self.control_dt_s, rtol=1e-6, atol=1e-9):
+            env.close()
+            raise ValueError(f"Control period mismatch: Sim dt={dt} s, Policy control_dt_s={self.control_dt_s} s")
         return env

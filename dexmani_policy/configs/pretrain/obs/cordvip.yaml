@@ -14,7 +14,6 @@ dataset:
   _target_: dexmani_policy.datasets.pretrain.cordvip.CordViPPretrainDataset
   zarr_path: ${zarr_path}
   contact_loss_weight: ${model.contact_loss_weight}
-  horizon: ${n_obs_steps}
   obs_horizon: ${n_obs_steps}
   seed: 42
   val_episodes: 0

@@ -71,7 +71,8 @@ def test_sim_recording_to_contact_pretraining(tmp_path):
     assert prepared.attrs["data_processing"]["object_pointcloud"]["geometry_sha256"] == expected
     assert prepared.attrs["source_zarr_path"] == str(source)
     np.testing.assert_array_equal(prepared["meta/episode_seeds"][:], [32])
-    dataset = CordViPPretrainDataset(labelled, contact_loss_weight=1, horizon=2, obs_horizon=2)
+    assert "action" not in prepared["data"]
+    dataset = CordViPPretrainDataset(labelled, contact_loss_weight=1, obs_horizon=2)
     labels = dataset[0]["contact_map"]
     assert labels.shape == (2, 1024) and labels.isfinite().all() and labels.std() > 0
 
@@ -93,9 +94,23 @@ def test_sim_recording_to_contact_pretraining(tmp_path):
     mixed = HDF5ToZarrConverter(reordered_dir, tmp_path / "mixed.zarr").convert()
     with pytest.raises(ValueError, match="shared object geometry_sha256"):
         generate(mixed, tmp_path / "invalid.zarr")
-    assert len(CordViPPretrainDataset(mixed, contact_loss_weight=0, horizon=2, obs_horizon=2))
+    assert len(CordViPPretrainDataset(mixed, contact_loss_weight=0, obs_horizon=2))
 
-    with h5py.File(reordered, "r+") as file:
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    legacy = legacy_dir / episode.name
+    shutil.copyfile(episode, legacy)
+    with h5py.File(legacy, "r+") as file:
         del file["object_geometry"]
-    with pytest.raises(ValueError, match="episode_0033.h5: missing object_geometry"):
-        HDF5ToZarrConverter(reordered_dir, tmp_path / "missing.zarr").convert()
+    missing = HDF5ToZarrConverter(legacy_dir, tmp_path / "missing.zarr").convert()
+    plain = zarr.open_group(str(missing), mode="r")
+    original = zarr.open_group(str(source), mode="r")
+    np.testing.assert_array_equal(plain["data/action"][:], original["data/action"][:])
+    assert len(CordViPPretrainDataset(missing, contact_loss_weight=0, obs_horizon=2))
+    with pytest.raises(ValueError, match="shared object geometry_sha256"):
+        generate(missing, tmp_path / "legacy_contact.zarr")
+
+    shutil.copyfile(legacy, reordered_dir / episode.name)
+    partial = HDF5ToZarrConverter(reordered_dir, tmp_path / "partial.zarr").convert()
+    processing = zarr.open_group(str(partial), mode="r").attrs["data_processing"]
+    assert processing["object_pointcloud"]["geometry_sha256"] is None

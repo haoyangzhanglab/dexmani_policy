@@ -53,27 +53,25 @@ class HandStateCodebook(nn.Module):
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}"
 
 
-def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor], list[dict]]:
+def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor], dict | None]:
     with np.load(Path(path).expanduser(), allow_pickle=False) as data:
         poses = torch.from_numpy(data["sorted_hand_poses"])
         affine = {
             key: torch.from_numpy(data[f"hand_normalizer_{key}"])
             for key in ("scale", "offset")
         }
-        training_data = json.loads(data["training_data"].item())
+        training_data = json.loads(data["training_data"].item()) if "training_data" in data else None
     if poses.ndim != 2 or poses.shape[1] != 12:
         raise ValueError("Hand codebook requires sorted_hand_poses shape [K,12]")
-    if poses.is_complex() or poses.dtype == torch.bool:
-        raise ValueError("Hand prototypes must contain real numeric values")
+    if any(value.is_complex() or value.dtype == torch.bool for value in (poses, *affine.values())):
+        raise ValueError("Hand codebook requires real numeric values")
     poses = poses.float()
     if not torch.isfinite(poses).all():
         raise ValueError("Hand prototypes must be finite in runtime dtype")
     codebook = HandStateCodebook(hand_dim=poses.shape[1], num_codes=poses.shape[0])
     for key, values in affine.items():
-        if values.shape != (codebook.hand_dim,) or values.is_complex() or values.dtype == torch.bool:
-            raise ValueError(f"Hand normalizer {key} requires {codebook.hand_dim} real values")
+        if values.shape != (codebook.hand_dim,):
+            raise ValueError(f"Hand normalizer {key} requires {codebook.hand_dim} values")
         affine[key] = values.float()
-    if any(not torch.isfinite(value).all() for value in affine.values()) or (affine["scale"] == 0).any():
-        raise ValueError("Hand normalizer must be finite and invertible in runtime dtype")
     codebook.sorted_hand_poses.copy_(poses)
     return codebook, affine, training_data

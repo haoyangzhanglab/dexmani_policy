@@ -44,7 +44,10 @@ def prepare_hand_data(cfg):
     train_hand = load_hand_array(buffer, train)
     val_hand = load_hand_array(buffer, val) if val.any() else None
     normalizer = LinearNormalizer()
-    normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)))
+    normalizer.fit_field(
+        "hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)),
+        check_values=False,
+    )
     cfg.dataset.zarr_path = buffer.path
     logger.info(
         "VQ %s; train frames=%d", format_split_summary(buffer, train, val), len(train_hand),
@@ -67,8 +70,6 @@ def evaluate_vq(vqvae, loader, device) -> float:
         count += batch.shape[0]
         distances = codebook_distances(batch, prototypes)
         lookup_sum += distances.amin(-1).double().square().sum()
-    if not count:
-        raise ValueError("VQ evaluation loader is empty")
     lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
     if not np.isfinite(lookup_mse):
         raise FloatingPointError("Non-finite lookup_mse during VQ evaluation")
@@ -84,15 +85,14 @@ def train(cfg):
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
     output_dir = normalize_output_dir(cfg)
     check_fresh_output(output_dir, "codebook.npz")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir = output_dir / "checkpoints"
-    checkpoint_dir.mkdir()
-    logger.info("VQ run: %s", output_dir)
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     train_norm, val_norm, normalizer = prepare_hand_data(cfg)
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    logger.info("VQ run: %s", output_dir)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     train_loader = DataLoader(
@@ -120,8 +120,6 @@ def train(cfg):
         loss_weight=recipe.loss_weight,
         vq_decay=recipe.vq_decay,
         threshold_ema_dead_code=recipe.threshold_ema_dead_code,
-        kmeans_init=recipe.kmeans_init,
-        kmeans_iters=recipe.kmeans_iters,
     ).to(device)
 
     optimizer = torch.optim.AdamW(

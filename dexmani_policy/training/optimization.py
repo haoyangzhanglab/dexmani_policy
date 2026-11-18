@@ -49,10 +49,11 @@ def build_optimizer(
 
     for group in groups:
         group["param_names"] = [names[id(p)] for p in group["params"]]
+    beta1, beta2 = betas
     return torch.optim.AdamW(
         groups,
         lr=lr,
-        betas=betas,
+        betas=(beta1, beta2),
         eps=eps,
         fused=next(model.parameters()).is_cuda,
     )

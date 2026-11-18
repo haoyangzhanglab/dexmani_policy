@@ -111,8 +111,10 @@ class Diffusion(nn.Module):
         history_offset=0,
         rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
-        num_steps = self.num_inference_steps if inference_steps is None else inference_steps
-        validate_ddim_steps(num_steps, "inference_steps")
+        num_steps = self.num_inference_steps
+        if inference_steps is not None:
+            validate_ddim_steps(inference_steps, "inference_steps")
+            num_steps = inference_steps
 
         # Scheduler tensors are not module buffers; restored and trained instances need the same device.
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Literal
 
 from dexmani_policy.agents.action_decoders.backbones.sat_action_io import SATActionIO
@@ -58,11 +59,8 @@ class SAT(Policy):
             rgb_semantic_sampling=rgb_semantic_sampling,
         )
 
-        backbone_cls = DiT if backbone_type == "dit" else DiTX
-
-        backbone = backbone_cls(
-            horizon=horizon,
-            action_dim=action_dim,
+        backbone_class = DiT if backbone_type == "dit" else partial(DiTX, horizon=horizon, action_dim=action_dim)
+        backbone = backbone_class(
             n_obs_steps=n_obs_steps,
             obs_token_dim=obs_encoder.out_dim,
             timestep_embed_dim=timestep_embed_dim,

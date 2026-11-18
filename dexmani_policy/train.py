@@ -4,7 +4,6 @@ import os
 
 import hydra
 
-from dexmani_policy.common.config import set_project_root
 from dexmani_policy.training.config import assemble_policy_config, register_resolvers
 from dexmani_policy.training.trainer import run_training
 
@@ -18,7 +17,6 @@ def _train(cfg):
 def main():
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     register_resolvers()
-    set_project_root()
     _train()
 
 

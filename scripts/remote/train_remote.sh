@@ -31,37 +31,47 @@ done
     echo "Usage: train_remote.sh --host HOST --repo ABS_DIR --data-root ABS_DIR --run ABS_DIR --python ABS_FILE --gpu ID [--fg] [--dry-run] [--resume] -- [CONFIG] [ARGS...]" >&2; exit 1;
 }
 SESSION="dex_$(date +%Y%m%d_%H%M%S)_${RANDOM}_${RANDOM}"
-SOURCE="${REPO%/}/outputs/remote_sources/$SESSION"
-REMOTE_SOURCE="$HOST:$SOURCE"
 if $RESUME; then
+    SOURCE=""
+    REMOTE_SOURCE=""
     COMMAND=(-u -m dexmani_policy.training.resume --run "$RUN" "$@" --device cuda:0)
 else
+    SOURCE="${REPO%/}/outputs/remote_sources/$SESSION"
+    REMOTE_SOURCE="$HOST:$SOURCE"
     CONFIG="${1:?Specify one fresh method config}"
     shift
     run_value="${RUN//\\/\\\\}"
     run_value="${run_value//\"/\\\"}"
-    COMMAND=(-u -m dexmani_policy.train "--config-name=$CONFIG" "$@" "hydra.run.dir=\"$run_value\"" "workspace.output_dir=\"$run_value\"" training.device=cuda:0)
+    COMMAND=(-u -m dexmani_policy.train "--config-name=$CONFIG" "$@" "hydra.run.dir=\"$run_value\"" training.device=cuda:0)
 fi
-printf 'Host: %s\nSource: %s\nRun: %s\nSession: %s\n' "$HOST" "$SOURCE" "$RUN" "$SESSION"
+printf 'Host: %s\nSource: %s\nRun: %s\nSession: %s\n' "$HOST" "${SOURCE:-saved in $RUN/config.yaml}" "$RUN" "$SESSION"
 if $DRY_RUN; then
-    printf 'Command: '; printf '%q ' env "CUDA_VISIBLE_DEVICES=$GPU" "DEXMANI_POLICY_REMOTE_SOURCE=$REMOTE_SOURCE" "$PYTHON" "${COMMAND[@]}"; printf '\n'
+    printf 'Command: '; printf '%q ' env "CUDA_VISIBLE_DEVICES=$GPU" "DEXMANI_POLICY_REMOTE_SOURCE=${REMOTE_SOURCE:-<saved remote_source>}" "$PYTHON" "${COMMAND[@]}"; printf '\n'
     exit 0
 fi
-printf -v setup_args '%q ' "$REPO" "$SOURCE"
-ssh "$HOST" "bash -s -- $setup_args" <<'BASH'
+if ! $RESUME; then
+    printf -v setup_args '%q ' "$REPO" "$SOURCE"
+    ssh "$HOST" "bash -s -- $setup_args" <<'BASH'
 set -euo pipefail
 mkdir -p "$1/outputs/remote_sources"
 mkdir "$2"
 BASH
-bash "$SCRIPT_DIR/sync_code.sh" --host "$HOST" --dest "$SOURCE"
-printf -v launch_args '%q ' "$SOURCE" "$DATA_ROOT" "$REPO" "$PYTHON" "$GPU" "$SESSION" "$FOREGROUND" "$REMOTE_SOURCE" "${COMMAND[@]}"
+    bash "$SCRIPT_DIR/sync_code.sh" --host "$HOST" --dest "$SOURCE"
+fi
+printf -v launch_args '%q ' "$SOURCE" "$DATA_ROOT" "$REPO" "$PYTHON" "$GPU" "$SESSION" "$FOREGROUND" "$REMOTE_SOURCE" "$RUN" "${COMMAND[@]}"
 ssh "$HOST" "bash -s -- $launch_args" <<'BASH'
 set -euo pipefail
 source_dir="$1"; data_root="$2"; repo="$3"; interpreter="$4"; gpu="$5"; session="$6"; foreground="$7"; remote_source="$8"
-shift 8
-for name in robot_data data; do
-    ln -s -- "$data_root/$name" "$source_dir/$name"
-done
+run="$9"
+shift 9
+if [[ -z "$source_dir" ]]; then
+    remote_source="$("$interpreter" -c 'import sys; from omegaconf import OmegaConf; print(OmegaConf.load(sys.argv[1]).remote_source)' "$run/config.yaml")"
+    source_dir="/${remote_source#*:/}"
+else
+    for name in robot_data data; do
+        ln -s -- "$data_root/$name" "$source_dir/$name"
+    done
+fi
 cd "$source_dir"
 command=(env "CUDA_VISIBLE_DEVICES=$gpu" "DEXMANI_POLICY_REMOTE_SOURCE=$remote_source" "$interpreter" "$@")
 if [[ "$foreground" == true ]]; then

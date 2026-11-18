@@ -12,14 +12,13 @@ from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy_state_dict, save_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path, close_resources
-from dexmani_policy.common.normalizer import validate_required_limits
+from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training import initialization
 from dexmani_policy.training.config import check_fresh_output, normalize_output_dir, validate_config
 from dexmani_policy.training.data import (
-    build_dataset, build_train_loader, close_data_loader, inherit_training_data,
-    record_data_processing, record_training_data,
+    build_dataset, build_train_loader, close_data_loader, record_data_processing,
+    record_prior_data, record_training_data,
 )
 from dexmani_policy.training.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
@@ -38,9 +37,7 @@ def build_trainer(cfg, *, checkpoint=None):
         cfg.pop("remote_source", None)
         if remote_source is not None:
             cfg.remote_source = remote_source
-    source = cfg.initialization.policy
-    if checkpoint is not None and source is not None:
-        raise ValueError("initialization.policy and resume are mutually exclusive")
+    source = cfg.initialization.policy if checkpoint is None else None
     validate_config(cfg)
     model_checkpoint = checkpoint
     if source is not None:
@@ -48,7 +45,6 @@ def build_trainer(cfg, *, checkpoint=None):
         saved = model_checkpoint.effective_config
         if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
             raise ValueError("Policy initialization requires the same policy and action semantics")
-        validate_required_limits(saved["normalization"], hydra.utils.get_class(cfg.agent._target_).required_limits_fields)
         with open_dict(cfg):
             cfg.normalization = saved["normalization"]
             cfg.normalization_dims = saved["normalization_dims"]
@@ -62,17 +58,16 @@ def build_trainer(cfg, *, checkpoint=None):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
-    if model_checkpoint is not None:
-        inherit_training_data(
-            cfg, dataset, model_checkpoint.effective_config["training_data"], source or "resume checkpoint",
-        )
-    record_training_data(cfg, dataset.episode_store, dataset.train_mask)
+    if checkpoint is None:
+        record_training_data(cfg, dataset.episode_store, dataset.train_mask)
+        if source is not None:
+            record_prior_data(cfg, dataset, source, saved.get("training_data"))
     record_data_processing(cfg, dataset)
     if checkpoint is not None:
         if cfg.policy_name == "ode":
             current = (cfg.data_processing or {}).get("action_ode")
             previous = (checkpoint.effective_config["data_processing"] or {}).get("action_ode")
-            if current != previous:
+            if (current or {}).get("semantics") != (previous or {}).get("semantics"):
                 raise ValueError("Resume ODE action target semantics mismatch; use a fresh or warm-start run")
         data_dt = data_description["control_dt_s"]
         policy_dt = cfg.control_dt_s
@@ -102,7 +97,7 @@ def run_trainer(trainer, *, max_updates=None):
         trainer.train(max_updates=max_updates)
         return trainer.global_step
     finally:
-        close_resources(trainer.close)
+        trainer.close()
 
 
 def run_training(cfg, *, max_updates=None):
@@ -162,8 +157,6 @@ class PolicyTrainer:
         if checkpoint is not None:
             restore_optimizer(self.optimizer, checkpoint.optimizer_state)
             self.global_step = checkpoint.global_step
-            if self.global_step > self.total_train_steps:
-                raise ValueError("Checkpoint global_step exceeds the training budget")
 
         self.scheduler = build_scheduler(
             self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
@@ -182,13 +175,8 @@ class PolicyTrainer:
 
         print_param_count(model)
         print_training_recipe(self.cfg, batches_per_epoch=self.batches_per_epoch)
-        self.logger = ExperimentLogger(**cfg.workspace, resuming=checkpoint is not None)
+        self.logger = ExperimentLogger(cfg, resuming=checkpoint is not None)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
-        try:
-            self.logger.save_config(self.cfg)
-        except BaseException:
-            close_resources(self.logger.close)
-            raise
 
     def compile_models(self):
         if self.cfg.training.use_compile:
@@ -199,7 +187,7 @@ class PolicyTrainer:
                 model.compile_backbone(mode=self.cfg.training.compile_mode)
 
     def close(self):
-        close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)
+        self.logger.close()
 
     def optimizer_step(self, finite_loss: torch.Tensor) -> None:
         self.last_grad_norm = clip_gradients(
@@ -349,6 +337,5 @@ class PolicyTrainer:
                         break
 
             finally:
-                close_resources(
-                    self.model.eval, lambda: close_data_loader(self.train_loader, iterator),
-                )
+                close_data_loader(self.train_loader, iterator)
+                self.model.eval()

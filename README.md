@@ -4,7 +4,7 @@
 
 ## 快速使用
 
-在仓库根目录执行以下命令。脚本默认使用名为 `policy` 的 Conda 环境：
+在仓库根目录创建并启用 Conda 环境。
 
 ```bash
 conda create -n policy python=3.10
@@ -20,15 +20,18 @@ python -m pip install -e . --no-deps
 
 点云 FPS/KNN 另需安装与 Torch/CUDA 匹配的 PyTorch3D，已验证版本为 0.7.8。仿真评测需安装 `dexmani_sim`；各策略需要的初始化权重见[预训练资源](data/README.md)。
 
-准备好 `robot_data/pick_apple_messy.zarr` 后，以 DP3 为例启动训练；新训练使用独立输出目录，续训复用同一目录：
+按配套仿真仓库的说明生成示教、转换 Zarr 并准备评测 seed 池。以下以 `robot_data/pick_apple_messy.zarr` 和 DP3 为例。新训练使用独立输出目录，续训沿用同一版本、目录与 Zarr。 [dexmani_sim 示教流程](https://github.com/haoyangzhanglab/dexmani_sim#生成回放与转换)
 
 ```bash
 RUN=experiments/train/dp3/pick_apple_messy/run01
-bash scripts/training/train.sh dp3 workspace.output_dir="$RUN" hydra.run.dir="$RUN"
-python -m dexmani_policy.training.resume --run "$RUN"
-bash scripts/eval/eval_pipeline.sh --checkpoints "$RUN/checkpoints/latest.pt" \
-  --seed 1024 --selection-episodes 25 --test-episodes 100
+python -m dexmani_policy.train --config-name dp3 hydra.run.dir="$RUN"
+python -m dexmani_policy.evaluate --checkpoint "$RUN/checkpoints/latest.pt" \
+  --seed 1024 --episodes 100
 ```
+
+训练中断后，用 `python -m dexmani_policy.training.resume --run "$RUN"` 继续原运行。
+
+多个候选使用 `python -m dexmani_policy.eval_pipeline --checkpoints ...`，默认用 25 个回合选模、100 个独立回合测试。 [仿真评测机制](docs/仿真评测机制.md)
 
 ## 开发验证
 
@@ -42,8 +45,8 @@ python -B -m dexmani_policy.test_tools.smoke_test dp3
 
 ```bash
 python -m pip install -e '.[dev]'
-python -B -m pytest -q dexmani_policy/test_tools/test_regression.py
-# 原生集成需要 CUDA、PyTorch3D、Open3D、dexmani_sim 和 dexmani_real
+python -B -m pytest -q dexmani_policy/test_tools/test_regression.py dexmani_policy/test_tools/test_rgb_point.py
+# 原生集成单独启动，需要 CUDA、PyTorch3D、Open3D、dexmani_sim 和 dexmani_real
 OMP_NUM_THREADS=1 python -B -m pytest -q dexmani_policy/test_tools/native_integration.py
 ```
 
@@ -61,7 +64,7 @@ OMP_NUM_THREADS=1 python -B -m pytest -q dexmani_policy/test_tools/native_integr
 
 仿真数据的每个 episode 独立划分；Real 数据按原始采集分组划分，连续段仍独立采样。同一采集的段不会跨 train/val；`val_episodes` 和 `max_train_episodes` 均按采集组计数，日志同时显示组数与段数。核心模块及其数据流见[项目架构](docs/项目架构.md)。
 
-同源 VQ、观测预训练和策略训练可通过 `--policy-config` 共享分组和训练预算。Real 数据要求逐段 `source_episodes` 和 `source_row_ranges`，Real ODE 还需要由逐行命令接受状态导出的 `action_ode`。接触预训练启用时需要 1024 个固定物体点槽及共享 `geometry_sha256`。 [预训练与数据划分](docs/观测预训练.md) · [Real ODE 数据协议](docs/手部动作表示.md#ode从上一条指令积分生成轨迹)
+同源 VQ、观测预训练和策略训练通过 `--policy-config` 共享分组和训练预算。Real 数据要求逐段 `source_episodes`，Real ODE 还需要由逐行命令接受状态导出的 `action_ode`。接触预训练启用时需要 1024 个固定物体点槽及共享 `geometry_sha256`。 [预训练与数据划分](docs/观测预训练.md) · [Real ODE 数据协议](docs/手部动作表示.md#ode从上一条指令积分生成轨迹)
 
 ## 策略方向
 

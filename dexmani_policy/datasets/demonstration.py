@@ -17,11 +17,7 @@ from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler
 from dexmani_policy.datasets.split import format_split_summary, split_episodes
-from dexmani_policy.datasets.transforms import (
-    AUGMENTATION_SPECS,
-    PointCoordinateNoise,
-    random_sample_points,
-)
+from dexmani_policy.datasets.transforms import AUGMENTATION_SPECS, PointCoordinateNoise
 
 
 class DemonstrationDataset(torch.utils.data.Dataset):
@@ -139,12 +135,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             for augmentor in augmentors:
                 if np.random.random() <= augmentor.prob:
                     augmentor.augment(values)
-        if self.random_keep_points is not None:
-            data["obs"]["point_cloud"] = random_sample_points(
-                data["obs"]["point_cloud"],
-                self.random_keep_points,
-            )
-
         if "rgb" in data["obs"]:
             if self.rgb_preprocess_size is not None:
                 data["obs"]["rgb"] = preprocess_rgb_train(
@@ -163,17 +153,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
     def build_augmentors(self, augmentation_cfg):
         self.augmentors: dict[str, list[Any]] = {}
         augmentation = augmentation_cfg or {}
-        pc_cfg = augmentation.get("pc") or {}
-        self.random_keep_points = pc_cfg.get("random_keep_points")
-        if self.random_keep_points is not None:
-            if "point_cloud" not in self.sensor_modalities:
-                raise ValueError("random_keep_points requires the point_cloud modality")
-            positive_int(self.random_keep_points, "random_keep_points")
-            shape = self.episode_store["point_cloud"].shape
-            if shape[1] < self.random_keep_points:
-                raise ValueError(
-                    f"point_cloud N={shape[1]} must be >= random_keep_points={self.random_keep_points}"
-                )
         for section, cls, key, modality in AUGMENTATION_SPECS:
             if modality not in self.sensor_modalities:
                 continue

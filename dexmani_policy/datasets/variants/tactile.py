@@ -30,7 +30,9 @@ class AdapTacDataset(DemonstrationDataset):
         future_steps = self.horizon - self.action_start_index
         force = self.episode_store.read(self.force_key, slice(query + 1, min(query + 1 + future_steps, end)))
         steps = np.arange(future_steps)
-        # The sampler keeps at least one future frame; repeat its last force for invalid tail steps.
-        data["future_force"] = torch.from_numpy(force[np.minimum(steps, len(force) - 1)])
+        padded = np.empty((future_steps, *force.shape[1:]), dtype=force.dtype)
+        padded[:len(force)] = force
+        padded[len(force):] = 0
+        data["future_force"] = torch.from_numpy(padded)
         data["future_force_valid"] = torch.from_numpy(steps < len(force))
         return data

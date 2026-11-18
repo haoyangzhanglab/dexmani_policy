@@ -9,14 +9,10 @@ from dexmani_policy.common.config import (
 )
 
 
-def validate_required_limits(spec, fields):
-    for key in fields:
+def normalization_feature_shapes(dims, spec, *, required_identity_fields=(), required_limits_fields=()):
+    for key in required_limits_fields:
         if spec.get(key) != "limits":
             raise ValueError(f"normalization.{key} must use limits")
-
-
-def normalization_feature_shapes(dims, spec, *, required_identity_fields=(), required_limits_fields=()):
-    validate_required_limits(spec, required_limits_fields)
     shapes = {}
     identity_fields = {"rgb", *TACTILE_FEATURE_SHAPES, *required_identity_fields}
     for key, width in dims.items():

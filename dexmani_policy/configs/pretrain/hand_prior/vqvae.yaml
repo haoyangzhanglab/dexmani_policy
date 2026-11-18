@@ -17,8 +17,6 @@ vq_vae:
   num_layers: 6
   vq_decay: 0.8
   threshold_ema_dead_code: 0
-  kmeans_init: false
-  kmeans_iters: 10
 
   # 关节顺序：拇指×3、食指×3、中指×2、无名指×2、小指×2。
   loss_weight: [1.0, 1.0, 1.0,  1.0, 1.0, 1.0,  1.0, 1.0,  0.5, 0.5,  0.5, 0.5]

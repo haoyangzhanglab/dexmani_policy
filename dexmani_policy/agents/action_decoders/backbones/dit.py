@@ -1,4 +1,4 @@
-"""Standalone SmolVLA-style action expert for the repository's flow decoders.
+"""SmolVLA-style action expert for SAT joint trajectories.
 
 Reference: huggingface/lerobot at 45a0756dfda4010eef6c0bfb2a95c5dd23c03fc6,
 src/lerobot/policies/smolvla/{modeling_smolvla,smolvlm_with_expert}.py.
@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .modules import WEIGHT_INIT_STD, add_temporal_embedding, batch_timesteps
+from .sat_action_io import SATActionIO
 
 
 class RMSNorm(nn.Module):
@@ -26,24 +27,6 @@ class RMSNorm(nn.Module):
         values = x.float()
         normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + self.eps)
         return normalized.to(x.dtype) * self.weight.to(x.dtype)
-
-
-class RotaryEmbedding(nn.Module):
-    def __init__(self, head_dim):
-        super().__init__()
-        self.head_dim = head_dim
-        self.register_buffer("indices", torch.arange(head_dim // 2), persistent=False)
-
-    def forward(self, positions):
-        frequencies = 10000.0 ** (-2.0 * self.indices.float() / self.head_dim)
-        angles = positions.float()[:, None] * frequencies[None]
-        return angles.cos()[None, None], angles.sin()[None, None]
-
-    @staticmethod
-    def apply_rotary(x, cos, sin):
-        # SmolVLA rotates the two halves, rather than adjacent even/odd channels.
-        first, second = x.float().chunk(2, dim=-1)
-        return torch.cat((first * cos - second * sin, second * cos + first * sin), -1).to(x.dtype)
 
 
 class TimeEmbedding(nn.Module):
@@ -109,21 +92,15 @@ class ExpertBlock(nn.Module):
         value = self.split_heads(self.context_v_proj(context), self.n_kv_head)
         return self.k_norm(key), value
 
-    def forward(self, x, context, *, context_kv=None, rotary=None, joint_attn_mask=None):
+    def forward(self, x, context, *, context_kv=None):
         key, value = self.prepare_context_kv(context) if context_kv is None else context_kv
         hidden = self.input_norm(x)
         query = self.q_norm(self.split_heads(self.q_proj(hidden), self.n_head))
-        attention_mask = None
-        if rotary is not None:
-            query = RotaryEmbedding.apply_rotary(query, *rotary)
         if not self.cross_attention:
             action_key = self.k_norm(self.split_heads(self.k_proj(hidden), self.n_kv_head))
-            if rotary is not None:
-                action_key = RotaryEmbedding.apply_rotary(action_key, *rotary)
             action_value = self.split_heads(self.v_proj(hidden), self.n_kv_head)
             key = torch.cat((key, action_key), dim=2)
             value = torch.cat((value, action_value), dim=2)
-            attention_mask = joint_attn_mask
 
         groups = self.n_head // self.n_kv_head
         if groups > 1:
@@ -131,7 +108,7 @@ class ExpertBlock(nn.Module):
             value = value.repeat_interleave(groups, dim=1)
         # Keep the projection dtype so SDPA can select fused BF16/FP16 kernels.
         output = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attention_mask,
+            query, key, value,
             dropout_p=self.p_drop_attn if self.training else 0.0,
         )
         x = x + self.o_proj(output.transpose(1, 2).flatten(2))
@@ -145,17 +122,15 @@ class DiT(nn.Module):
     [B, n_obs_steps * tokens_per_frame, obs_token_dim], without padding.
     ``forward`` returns a velocity of the same shape as ``x``. A cache belongs
     to one fixed context and is reused unchanged across flow integration steps.
-    Ordinary actions use causal temporal tokens with local RoPE. Custom
-    ``action_io`` owns token identity/readout (e.g. SAT joint trajectories): its
-    tokens interact bidirectionally, without additional index positions.
+    ``action_io`` owns the encoding and readout of bidirectional SAT joint tokens.
     """
 
     def __init__(
         self,
-        horizon: int,
-        action_dim: int,
         n_obs_steps: int,
         obs_token_dim: int,
+        *,
+        action_io: SATActionIO,
         timestep_embed_dim: int | None = None,
         n_layers: int = 8,
         hidden_dim: int = 768,
@@ -164,7 +139,6 @@ class DiT(nn.Module):
         p_drop_attn: float = 0.0,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        action_io: nn.Module | None = None,
         n_kv_head: int = 2,
         head_dim: int | None = None,
         self_attn_every_n_layers: int = 2,
@@ -182,24 +156,17 @@ class DiT(nn.Module):
             head_dim = hidden_dim // n_head
         if head_dim <= 0:
             raise ValueError("head_dim must be positive")
-        if action_io is None and head_dim % 2:
-            raise ValueError("head_dim must be even for RoPE")
         timestep_embed_dim = hidden_dim if timestep_embed_dim is None else timestep_embed_dim
         if timestep_embed_dim <= 0 or timestep_embed_dim % 2:
             raise ValueError("timestep_embed_dim must be positive and even")
         if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be finite and positive")
-        if not 0 <= p_drop_attn < 1:
-            raise ValueError("p_drop_attn must be in [0, 1)")
         # Match SmolVLA's gated-MLP parameter budget and 256-wide rounding.
         intermediate_dim = 256 * math.ceil(int(int(2 * hidden_dim / 3) * mlp_ratio) / 256)
         if intermediate_dim == 0:
             raise ValueError("hidden_dim and mlp_ratio produce an empty MLP")
 
         self.action_io = action_io
-        if action_io is None:
-            self.input_embedder = nn.Linear(action_dim, hidden_dim)
-            self.rope = RotaryEmbedding(head_dim)
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.timestep_embedder = TimeEmbedding(timestep_embed_dim)
@@ -216,10 +183,7 @@ class DiT(nn.Module):
             )
             for index in range(n_layers)
         )
-        if action_io is None:
-            self.final_norm = RMSNorm(hidden_dim)
-            self.output_proj = nn.Linear(hidden_dim, action_dim)
-        # Custom I/O owns its initialization, including SAT's zero velocity head.
+        # SATActionIO initializes its own zero velocity head.
         for module in self.children():
             if module is not self.action_io:
                 module.apply(self._initialize_weights)
@@ -242,35 +206,18 @@ class DiT(nn.Module):
         return tuple(block.prepare_context_kv(context) for block in self.dit_blocks)
 
     def forward(self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None):
-        hidden = self._forward_hidden(x, timestep, context, context_kv=context_kv)
-        if self.action_io is not None:
-            return self.action_io.decode_velocity(hidden)
-        return self.output_proj(self.final_norm(hidden))
-
-    def _forward_hidden(self, x, timestep, context, *, context_kv=None):
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
         context_c = self.embed_context(context) if context_kv is None else None
         timestep = batch_timesteps(timestep, x, dtype=torch.float32)
-        hidden = self.input_embedder(x) if self.action_io is None else self.action_io.encode(x)
+        hidden = self.action_io.encode(x)
         time = self.timestep_embedder(timestep).to(hidden.dtype)
         hidden = self.action_time_mlp(torch.cat((
             hidden, time[:, None].expand(-1, hidden.shape[1], -1),
         ), dim=-1))
 
-        rotary = joint_attn_mask = None
-        if self.action_io is None:
-            positions = torch.arange(hidden.shape[1], device=hidden.device)
-            rotary = self.rope(positions)
-            prefix_length = context.shape[1]
-            # SDPA's non-square is_causal mask would hide part of the prefix.
-            joint_attn_mask = torch.arange(
-                prefix_length + hidden.shape[1], device=hidden.device,
-            )[None] <= prefix_length + positions[:, None]
-
         for index, block in enumerate(self.dit_blocks):
             hidden = block(
                 hidden, context_c, context_kv=None if context_kv is None else context_kv[index],
-                rotary=rotary, joint_attn_mask=joint_attn_mask,
             )
-        return hidden
+        return self.action_io.decode_velocity(hidden)

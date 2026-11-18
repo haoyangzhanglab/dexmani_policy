@@ -2,7 +2,6 @@ import copy
 import hashlib
 import importlib
 import json
-import logging
 import math
 import random
 import shutil
@@ -33,7 +32,6 @@ from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.common import config as common_config, io_util
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from dexmani_policy.common.inference import predict_actions, prepare_observations, resolve_inference_settings, restore_policy
-from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state, set_seed
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
@@ -51,7 +49,7 @@ from dexmani_policy.evaluation import rollout, selection
 from dexmani_policy.training import resume, trainer as policy_training
 from dexmani_policy.training.config import load_config, validate_config
 from dexmani_policy.training.data import (
-    build_dataset, build_train_loader, fit_action_normalizer, inherit_training_data, use_policy_split,
+    build_dataset, build_train_loader, fit_action_normalizer, record_prior_data, use_policy_split,
 )
 from dexmani_policy.training.initialization import build_policy
 from dexmani_policy.training.optimization import clip_gradients
@@ -255,10 +253,18 @@ def test_ddim_actual_time_grid(steps):
 
 
 def test_ddim_config_and_checkpoint_overrides(small_dp3_checkpoint):
-    for recipe, override in (("dp3", "agent.num_inference_steps=1"), ("dp3", "eval.inference_steps=1"),
-                             ("adaptac", "agent.force_num_inference_steps=1")):
-        with pytest.raises(ValueError, match="leading DDIM"):
-            load_config(recipe, [override])
+    for recipe, overrides in (
+        ("dp3", ["agent.num_inference_steps=1", "agent.state_dim=19"]),
+        ("adaptac", ["agent.force_num_inference_steps=1"]),
+    ):
+        cfg = load_config(recipe, ["agent.action_dim=19", *overrides])
+        with pytest.raises(hydra.errors.InstantiationException) as error:
+            hydra.utils.instantiate(cfg.agent)
+        assert isinstance(error.value.__cause__, ValueError)
+        assert "leading DDIM" in str(error.value.__cause__)
+    cfg = load_config("dp3", ["eval.inference_steps=1"])
+    with pytest.raises(ValueError, match="leading DDIM"):
+        resolve_inference_settings(cfg)
     with pytest.raises(ValueError, match="leading DDIM"):
         load_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
     with pytest.raises(ValueError, match="leading DDIM"):
@@ -299,7 +305,8 @@ def test_ddim_rtc_matches_two_step_reference():
     torch.testing.assert_close(actual, reference)
 
 
-def test_r3d_limits_config_and_restoration(tmp_path, make_demo, monkeypatch):
+@pytest.mark.parametrize("pc_dim", [3, 6])
+def test_r3d_limits_config_and_restoration(tmp_path, make_demo, monkeypatch, pc_dim):
     class SmallUni3D(nn.Module):
         def __init__(self, embed_dim, **kwargs):
             super().__init__()
@@ -319,13 +326,16 @@ def test_r3d_limits_config_and_restoration(tmp_path, make_demo, monkeypatch):
     cfg = load_config("r3d", [
         f"zarr_path={data}", "task_name=test", f"workspace.output_dir={directory}",
         "workspace.wandb_cfg=null", "initialization.uni3d=null", "dataset.augmentation_cfg=null",
+        f"+dataset.pc_dim={pc_dim}",
         "training.device=cpu", "training.use_compile=false", "training.loop.total_train_steps=3",
         "dataloader.num_workers=0", "dataloader.batch_size=2", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
         "agent.pc_encoder_config.embed_dim=16", "agent.embedding_dim=16", "agent.num_heads=2", "agent.depth=1",
         "agent.state_out_dim=8", "agent.mlp_dim=32", "agent.timestep_embed_dim=8",
     ])
-    with pytest.raises(ValueError, match=r"normalization.point_cloud must use limits"):
-        load_config("r3d", ["normalization.point_cloud=mean_std"])
+    unsupported = copy.deepcopy(cfg)
+    unsupported.normalization.point_cloud = "mean_std"
+    with pytest.raises(ValueError, match="point_cloud must use limits"):
+        build_trainer(unsupported)
     with closing(build_trainer(cfg)) as trainer:
         trainer.train(max_updates=1)
     latest = directory / "checkpoints/latest.pt"
@@ -340,11 +350,22 @@ def test_r3d_limits_config_and_restoration(tmp_path, make_demo, monkeypatch):
     with closing(build_trainer(cfg)) as trainer:
         assert trainer.global_step == 0
     for weights in ("raw", "ema"):
-        assert load_policy(latest, weights=weights, device="cpu").agent.normalization_dims["point_cloud"] == 6
-    cfg.normalization.point_cloud = "mean_std"
-    with pytest.raises(ValueError, match="point_cloud must use limits"):
-        build_trainer(cfg)
-    cfg.normalization.point_cloud = "limits"
+        assert load_policy(latest, weights=weights, device="cpu").agent.normalization_dims["point_cloud"] == pc_dim
+    cfg.workspace.output_dir = str(tmp_path / "warm_bad")
+    cloud = zarr.open_group(str(data), mode="r+")["data/point_cloud"]
+    if pc_dim == 3:
+        cloud[6, 2, 5] = np.inf
+        with closing(prepare_resume(directory)) as trainer:
+            assert trainer.global_step == 1
+    column = pc_dim - 1
+    value = cloud[6, 2, column]
+    cloud[6, 2, column] = np.inf
+    for restore in (lambda: prepare_resume(directory), lambda: build_trainer(cfg)):
+        with pytest.raises(ValueError, match=rf"field=point_cloud,.*row=6, channel=\(2, {column}\)"):
+            restore()
+    assert load_checkpoint(latest).global_step == 1
+    assert not Path(cfg.workspace.output_dir).exists()
+    cloud[6, 2, column] = value
     checkpoint.effective_config["normalization"]["point_cloud"] = "mean_std"
     bad = save_checkpoint(directory / "checkpoints/bad.pt", checkpoint)
     cfg.initialization.policy = str(bad)
@@ -398,10 +419,7 @@ def test_same_source_pretraining_carries_real_group_budget(tmp_path, make_demo):
     data["meta/episode_ends"].resize(6)
     data["meta/episode_ends"][:] = [2, 4, 6, 8, 10, 12]
     sources = ["a", "a", "b", "c", "d", "e"]
-    data.attrs.update(
-        format="dexmani.real.canonical", source_episodes=sources,
-        source_row_ranges=[[0, 2], [3, 5], [0, 2], [0, 2], [0, 2], [0, 2]],
-    )
+    data.attrs.update(format="dexmani.real.canonical", source_episodes=sources)
     policy = load_config("dqrise", [
         f"zarr_path={path}", "task_name=test", "dataset.seed=9",
         "dataset.val_episodes=1", "dataset.max_train_episodes=2",
@@ -426,24 +444,28 @@ def test_same_source_pretraining_carries_real_group_budget(tmp_path, make_demo):
     ])
     use_policy_split(cfg, policy_path)
     train_vq(cfg)
-    _, affine, records = load_codebook(run / "codebook.npz")
-    record, = records
+    _, affine, record = load_codebook(run / "codebook.npz")
     assert record["source"] == str(path)
     assert set(record["train_source_episodes"]) == chosen
     assert set(record["val_source_episodes"]) == held_out
     rows = np.repeat(dataset.train_mask, 2)
     hand = torch.from_numpy(data["data/action"][:][rows, 7:])
     torch.testing.assert_close(affine["scale"], 2 / (hand.amax(0) - hand.amin(0)))
-    inherit_training_data(policy, dataset, records, "codebook.npz")
+    record_prior_data(policy, dataset, "codebook.npz", record)
+    assert policy.prior_data[0].budget_verified
+    assert "training_data" not in policy
     outside_budget = set(sources) - chosen - held_out
     for group, key in [(next(iter(outside_budget)), "train_source_episodes"),
                        (next(iter(held_out)), "train_source_episodes"),
                        (next(iter(outside_budget)), "val_source_episodes")]:
         with pytest.raises(ValueError, match="same-source prior exceeds"):
-            inherit_training_data(policy, dataset, [dict(record, **{key: [group]})], "leaky.pt")
-    inherit_training_data(policy, dataset, [dict(record, source="/external.zarr")], "external.pt")
-    inherit_training_data(policy, dataset, [], "unknown.pt")
-    assert policy.training_data[-1] == {"source": None, "artifact": "unknown.pt"}
+            record_prior_data(policy, dataset, "leaky.pt", dict(record, **{key: [group]}))
+    copied = tmp_path / "copy" / path.name
+    shutil.copytree(path, copied)
+    record_prior_data(policy, dataset, "external.pt", dict(record, source=str(copied)))
+    record_prior_data(policy, dataset, "unknown.pt")
+    assert not policy.prior_data[-2].budget_verified
+    assert policy.prior_data[-1] == {"source": None, "artifact": "unknown.pt", "budget_verified": False}
 
 
 class ConstantVelocity(nn.Module):
@@ -539,9 +561,10 @@ def test_ode_closed_form_and_detached_side_head(monkeypatch, solver):
 @pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX])
 def test_context_cache_outputs_gradients_and_new_observation(monkeypatch, backbone_class):
     action_io = sat_action_io.SATActionIO(4, 16)
+    layout = {"horizon": 4, "action_dim": 19} if backbone_class is ditx.DiTX else {}
     backbone = backbone_class(
-        horizon=4, action_dim=19, n_obs_steps=1, obs_token_dim=8, hidden_dim=16,
-        n_head=2, n_layers=2, timestep_embed_dim=8, p_drop_attn=0, action_io=action_io,
+        n_obs_steps=1, obs_token_dim=8, hidden_dim=16, n_head=2, n_layers=2,
+        timestep_embed_dim=8, p_drop_attn=0, action_io=action_io, **layout,
     ).eval()
     with torch.no_grad():
         for parameter in backbone.parameters():
@@ -595,7 +618,7 @@ def segments(tmp_path):
 def test_window_boundaries_and_short_observations(segments, horizon, before, after, obs_horizon):
     path, fields = segments
     obs_horizon = min(obs_horizon, horizon)
-    store = EpisodeStore(path)
+    store = EpisodeStore(path, keys=("action", "point_cloud", "rgb"))
     mask = np.array([True, False, True, True])
     sampler = SequenceSampler(
         store, horizon, before, after, episode_mask=mask,
@@ -711,7 +734,7 @@ def test_mean_std_deployment_matches_training_model(tmp_path, small_dp3_config):
             np.testing.assert_array_equal(runtime.predict(obs), expected)
 
 
-def test_ode_tactile_and_afro_temporal_targets(segments):
+def test_ode_tactile_and_afro_temporal_targets(segments, monkeypatch):
     path, fields = segments
     group = zarr.open_group(str(path), mode="a")
     group["meta/episode_ends"][:] = [3, 6, 9, 12]
@@ -728,11 +751,26 @@ def test_ode_tactile_and_afro_temporal_targets(segments):
             np.testing.assert_array_equal(ode[episode * 4 + offset]["prev_action"], expected)
         for offset in range(2):
             sample = tactile[episode * 2 + offset]
-            expected = [start + 1, start + 2, start + 2] if offset == 0 else [start + 2] * 3
+            expected = [start + 1, start + 2, 0] if offset == 0 else [start + 2, 0, 0]
             np.testing.assert_array_equal(sample["future_force"][:, 0, 0], expected)
             np.testing.assert_array_equal(sample["future_force_valid"], [True, offset == 0, False])
         for offset, rows in enumerate([[start, start + 1], [start, start + 2], [start + 1, start + 2], [start + 2] * 2]):
             np.testing.assert_array_equal(afro[episode * 4 + offset]["obs"]["point_cloud"], fields["point_cloud"][rows, :, :3])
+
+    read = ode.episode_store.read
+    action_reads = []
+
+    def record_read(key, index, **kwargs):
+        if key == "action":
+            action_reads.append(index)
+        return read(key, index, **kwargs)
+
+    monkeypatch.setattr(ode.episode_store, "read", record_read)
+    np.testing.assert_array_equal(ode[1]["prev_action"], fields["action"][0])
+    assert action_reads == [slice(0, 3)]
+    single = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
+    np.testing.assert_array_equal(single[0]["prev_action"], fields["joint_state"][0])
+    np.testing.assert_array_equal(single[1]["prev_action"], fields["action"][0])
 
 
 # R3D dataset and loss
@@ -893,10 +931,16 @@ class SmallRGBWeights(nn.Linear):
 def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
     module = importlib.import_module(f"dexmani_policy.agents.policies.{method}")
     monkeypatch.setattr(module, "RGBPointObservationEncoder", SmallRGBEncoder)
-    dataset = DemonstrationDataset(make_demo(), sensor_modalities=["joint_state"], horizon=4, obs_horizon=1)
+    data_path = make_demo()
+    dataset = DemonstrationDataset(data_path, sensor_modalities=["joint_state"], horizon=4, obs_horizon=1)
+    directory = tmp_path / "run"
     cfg = load_config(method, [
+        f"zarr_path={data_path}", "task_name=test", f"workspace.output_dir={directory}",
+        "workspace.wandb_cfg=null", "dataset.sensor_modalities=[joint_state]", "dataset.augmentation_cfg=null",
         "training.device=cpu", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
         "agent.hidden_dim=16", "agent.n_layers=1", "agent.n_head=2",
+        "training.use_compile=false", "training.loop.total_train_steps=3",
+        "dataloader.num_workers=0", "dataloader.batch_size=2",
     ])
     cfg.agent.action_dim = 19
     rgb = SmallRGBWeights()
@@ -911,9 +955,17 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         scale, offset = torch.full((12,), 2.0), torch.full((12,), -0.5)
         np.savez(
             path, sorted_hand_poses=poses, hand_normalizer_scale=scale.numpy(), hand_normalizer_offset=offset.numpy(),
-            training_data=json.dumps([{"source": dataset.episode_store.source_path, "train_source_episodes": [0]}]),
         )
         cfg.initialization.codebook = str(path)
+        invalid_cfg = copy.deepcopy(cfg)
+        invalid_path = tmp_path / "invalid_codebook.npz"
+        np.savez(
+            invalid_path, sorted_hand_poses=poses, hand_normalizer_scale=np.zeros(12, dtype=np.float32),
+            hand_normalizer_offset=offset.numpy(),
+        )
+        invalid_cfg.initialization.codebook = str(invalid_path)
+        with pytest.raises(ValueError, match="Invalid affine parameters"):
+            build_policy(invalid_cfg, dataset, {"action": 19, "joint_state": 19})
     else:
         from dexmani_policy.agents.hand_prior.dexlatent import DexLatentHandPrior
 
@@ -930,6 +982,8 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
     if method == "dqrise":
         assert cfg.agent.num_codes == model.hand_codebook.num_codes == 3
         torch.testing.assert_close(model.hand_codebook.sorted_hand_poses, torch.from_numpy(poses))
+        assert cfg.prior_data[0].artifact == str(path)
+        assert not cfg.prior_data[0].budget_verified
     else:
         reference = LinearNormalizer()
         chunks = [torch.from_numpy(chunk) for chunk in dataset.iter_normalization_data("action")]
@@ -954,6 +1008,23 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
     torch.testing.assert_close(model.state_dict(), before)
     assert cfg.agent == before_config
 
+    with closing(build_trainer(cfg)) as trainer:
+        trainer.train(max_updates=1)
+    latest = directory / "checkpoints/latest.pt"
+    saved = load_checkpoint(latest)
+    cfg.initialization.policy = str(latest)
+    cfg.workspace.output_dir = str(tmp_path / "warm")
+    for restore in (lambda: prepare_resume(directory), lambda: build_trainer(cfg)):
+        with closing(restore()) as trainer:
+            torch.testing.assert_close(trainer.model.state_dict(), saved.model_state)
+    cfg.workspace.output_dir = str(tmp_path / "warm_bad")
+    zarr.open_group(str(data_path), mode="r+")["data/action"][6, 8] = np.inf
+    for restore in (lambda: prepare_resume(directory), lambda: build_trainer(cfg)):
+        with pytest.raises(ValueError, match=r"field=action,.*row=6, channel=\(8,\)"):
+            restore()
+    assert load_checkpoint(latest).global_step == 1
+    assert not Path(cfg.workspace.output_dir).exists()
+
 
 @pytest.mark.parametrize("method", ["afro", "cordvip"])
 @pytest.mark.parametrize("mode", ["limits", "identity", "mean_std"])
@@ -977,14 +1048,17 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
         field.scale.fill_(2.5)
         field.offset.fill_(0.75)
     source = tmp_path / "encoder.pt"
-    torch.save({
+    payload = {
         "encoder_state": encoder.state_dict(),
         "normalizer_state": inherited.state_dict(),
         "normalization": dict.fromkeys(fields, mode),
-        "training_data": [{"source": dataset.episode_store.source_path, "train_source_episodes": [0]}],
-    }, source)
+    }
+    if mode != "identity":
+        payload["training_data"] = {"source": dataset.episode_store.source_path, "train_source_episodes": [0]}
+    torch.save(payload, source)
     cfg.initialization.encoder = str(source)
     model = build_policy(cfg, dataset, dims)
+    assert cfg.prior_data[0].budget_verified == (mode != "identity")
     actual_encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
     torch.testing.assert_close(actual_encoder.state_dict(), encoder.state_dict())
     for key in fields:
@@ -1001,7 +1075,7 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
         torch.testing.assert_close(model.normalizer["joint_state"].state_dict(), expected["joint_state"].state_dict())
 
 
-def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monkeypatch):
+def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, make_demo, monkeypatch):
     directory = tmp_path / "source"
     first_source, resumed_source = "gpu:/snapshots/first", "gpu:/snapshots/resumed"
     monkeypatch.setenv("DEXMANI_POLICY_REMOTE_SOURCE", first_source)
@@ -1039,15 +1113,24 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monk
     for group, base_lr in zip(continued.optimizer_state["param_groups"], saved.scheduler_state["base_lrs"]):
         assert group["lr"] == pytest.approx(0.25 * base_lr)
     assert continued.effective_config["remote_source"] == resumed_source
+    assert continued.effective_config["training_data"] == saved.effective_config["training_data"]
+    assert "prior_data" not in continued.effective_config
     assert OmegaConf.load(directory / "config.yaml").remote_source == first_source
 
-    warm_cfg = small_dp3_config(tmp_path / "warm", f"initialization.policy={first_checkpoint}")
+    new_data = make_demo("warm")
+    warm_cfg = small_dp3_config(
+        tmp_path / "warm", f"initialization.policy={first_checkpoint}", f"zarr_path={new_data}",
+    )
     with closing(build_trainer(warm_cfg)) as warm:
         torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
         assert warm.global_step == 0
         assert warm.scheduler.last_epoch == 0
         assert warm.optimizer.state_dict()["state"] == {}
         assert warm.logger.output_dir == tmp_path / "warm"
+        assert warm.cfg.training_data.source == str(new_data)
+        prior, = warm.cfg.prior_data
+        assert prior.source == saved.effective_config["training_data"]["source"]
+        assert not prior.budget_verified
         torch.testing.assert_close(warm.ema_model.state_dict(), warm.model.state_dict())
 
 
@@ -1182,10 +1265,10 @@ def test_sat_readout_formula_with_nonzero_output():
 @pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX])
 def test_sat_backbones(backbone_class):
     io = sat_action_io.SATActionIO(4, 16)
+    layout = {"horizon": 4, "action_dim": 19} if backbone_class is ditx.DiTX else {}
     backbone = backbone_class(
-        horizon=4, action_dim=19, n_obs_steps=1, obs_token_dim=8,
-        hidden_dim=16, n_head=2, n_layers=2, timestep_embed_dim=8,
-        p_drop_attn=0, action_io=io,
+        n_obs_steps=1, obs_token_dim=8, hidden_dim=16, n_head=2, n_layers=2,
+        timestep_embed_dim=8, p_drop_attn=0, action_io=io, **layout,
     )
     actions = torch.randn(2, 4, 19, requires_grad=True)
     tokens = io.encode(actions)
@@ -1204,20 +1287,6 @@ def test_sat_backbones(backbone_class):
     backbone(actions, 0.5, context).square().mean().backward()
     assert torch.isfinite(actions.grad).all()
     assert actions.grad.abs().sum() > 0
-
-
-def test_dit_branch_does_not_construct_ditx_output(monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("SAT must own its readout")
-
-    monkeypatch.setattr(ditx, "DiTXOutput", forbidden)
-    module = importlib.reload(sat_action_io)
-    io = module.SATActionIO(4, 16)
-    backbone = DiT(
-        horizon=4, action_dim=19, n_obs_steps=1, obs_token_dim=8,
-        hidden_dim=16, n_head=2, n_layers=1, action_io=io,
-    )
-    assert backbone(torch.randn(2, 4, 19), 0.5, torch.randn(2, 3, 8)).shape == (2, 4, 19)
 
 
 # Gradient accumulation
@@ -1415,55 +1484,22 @@ def test_atomic_publish_does_not_unlink_after_replace(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("source", ["writer", "replace"])
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_publish_failure_preserves_exception_and_traceback(tmp_path, monkeypatch, caplog, source, cleanup_fails):
+def test_failed_atomic_publish_keeps_previous_file(tmp_path, monkeypatch, source):
     target = tmp_path / "result"
     target.write_text("old")
-    primary = ValueError("writer failed") if source == "writer" else OSError("replace failed")
-    secondary = PermissionError("cleanup failed")
-    original_traceback = None
-    calls = []
-    unlink = Path.unlink
 
     def fail(*args):
-        nonlocal original_traceback
-        try:
-            raise primary
-        except BaseException:
-            original_traceback = primary.__traceback__
-            raise
-
-    def cleanup(path, *args, **kwargs):
-        if path == temporary:
-            calls.append(path)
-            if cleanup_fails:
-                raise secondary
-        return unlink(path, *args, **kwargs)
+        raise OSError("publish failed")
 
     if source == "replace":
         monkeypatch.setattr(io_util.os, "replace", fail)
-    monkeypatch.setattr(Path, "unlink", cleanup)
-    with caplog.at_level(logging.WARNING, logger=io_util.__name__):
-        with pytest.raises(type(primary)) as caught:
-            with io_util.atomic_path(target) as temporary:
-                temporary.write_text("new")
-                if source == "writer":
-                    fail()
-    assert caught.value is primary
-    traceback = caught.value.__traceback__
-    while traceback is not None and traceback is not original_traceback:
-        traceback = traceback.tb_next
-    assert traceback is original_traceback
+    with pytest.raises(OSError):
+        with io_util.atomic_path(target) as temporary:
+            temporary.write_text("new")
+            if source == "writer":
+                fail()
     assert target.read_text() == "old"
-    assert calls == [temporary]
-    assert temporary.exists() == cleanup_fails
-    if cleanup_fails:
-        record, = [record for record in caplog.records if record.name == io_util.__name__]
-        assert str(temporary) in record.getMessage()
-        assert record.exc_info[1] is secondary
-        assert "PermissionError: cleanup failed" in caplog.text
-    else:
-        assert not caplog.records
+    assert not temporary.exists()
 
 
 def test_keyboard_interrupt_cleans_up(tmp_path):
@@ -1543,8 +1579,9 @@ def test_policy_artifact_paths(output_path, small_dp3_config):
 
 def test_vq_artifact_paths(output_path, make_demo):
     value, expected = output_path
+    data = make_demo()
     cfg = load_config("pretrain/hand_prior/vqvae", [
-        f"zarr_path={make_demo()}", f"workspace.output_dir='{value}'",
+        f"zarr_path={data}", f"workspace.output_dir='{value}'",
         "vq_vae.device=cpu", "vq_vae.num_epochs=1", "vq_vae.save_epochs=1",
         "vq_vae.batch_size=12", "vq_vae.warmup_steps=0", "vq_vae.hidden_dim=16",
         "vq_vae.latent_dim=8", "vq_vae.num_layers=1",
@@ -1552,6 +1589,13 @@ def test_vq_artifact_paths(output_path, make_demo):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.set_float32_matmul_precision("medium")
+    actions = zarr.open_group(str(data), mode="r+")["data/action"]
+    valid = actions[0, 7]
+    actions[0, 7] = np.inf
+    with pytest.raises(ValueError, match="Nonfinite data"):
+        train_vq(cfg)
+    assert not expected.exists()
+    actions[0, 7] = valid
     train_vq(cfg)
     assert not torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark
     assert torch.get_float32_matmul_precision() == "medium"
@@ -1606,6 +1650,8 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     assert torch.get_float32_matmul_precision() == "medium"
     saved = load_checkpoint(directory / "checkpoints/latest.pt")
     assert saved.global_step == 1
+    betas = saved.optimizer_state["param_groups"][0]["betas"]
+    assert isinstance(betas, tuple) and betas == (0.95, 0.999)
     assert saved.effective_config["workspace"]["output_dir"] == str(directory)
     assert OmegaConf.load(directory / "config.yaml").workspace.output_dir == str(directory)
     with pytest.raises(FileExistsError):
@@ -1613,7 +1659,7 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     assert any(key.startswith("contact_head.") for key in saved.model_state)
     payload = torch.load(directory / "encoder.pt", weights_only=True)
     assert payload["training_data"] == saved.effective_config["training_data"]
-    assert payload["training_data"][0]["source"] == str(source)
+    assert payload["training_data"]["source"] == str(source)
     states = zarr.open_group(str(contact_data), mode="r")["data/joint_state"][:]
     np.testing.assert_allclose(payload["normalizer_state"]["fields.joint_state.scale"],
                                1 / states.std(axis=0, dtype=np.float64), rtol=1e-6)
@@ -1631,18 +1677,22 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     resumed = load_checkpoint(directory / "checkpoints/latest.pt")
     assert resumed.global_step == 2
     assert resumed.scheduler_state["last_epoch"] == 2
+    assert resumed.effective_config["training_data"] == saved.effective_config["training_data"]
     for key in payload["normalizer_state"]:
         torch.testing.assert_close(resumed.model_state["normalizer." + key], payload["normalizer_state"][key])
 
     artifacts = [directory / name for name in ("config.yaml", "metrics.jsonl", "encoder.pt", "checkpoints/latest.pt")]
     before = [path.read_bytes() for path in artifacts]
+    with pytest.raises(OSError):
+        obs_training.train("cordvip", CordViP, ["--resume-from", str(artifacts[-1]), "--max-updates", "1"])
     other_data = tmp_path / "other.zarr"
     shutil.copytree(contact_data, other_data)
     del zarr.open_group(str(other_data), mode="a").attrs["source_zarr_path"]
-    with pytest.raises(ValueError, match="share the policy source and episode split"):
+    with pytest.raises(SystemExit) as rejected:
         obs_training.train("cordvip", CordViP, [
             "--resume-from", value, "--max-updates", "1", "--zarr-path", str(other_data),
         ])
+    assert rejected.value.code == 2
     assert [path.read_bytes() for path in artifacts] == before
     store = zarr.open_group(str(contact_data), mode="a")
     store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "f" * 64}}
@@ -1674,13 +1724,17 @@ def test_disabled_contact_does_not_require_labels_or_geometry(contact_data):
     del store.attrs["data_processing"]
     dataset = CordViPPretrainDataset(contact_data, contact_loss_weight=0)
     assert "contact_map" not in dataset.episode_store.keys()
-    model = CordViP(dict.fromkeys(dataset.sensor_modalities, "identity"), contact_loss_weight=0)
+    model = CordViP(
+        dict.fromkeys(dataset.sensor_modalities, "identity"), contact_loss_weight=0,
+        arm_loss_weight=0,
+    )
     assert not hasattr(model, "contact_head")
+    assert not hasattr(model, "arm_head")
     batch = {"obs": {key: value.unsqueeze(0) for key, value in dataset[0]["obs"].items()}}
     loss, metrics = model(batch)
     loss.backward()
     assert torch.isfinite(loss)
-    assert set(metrics) == {"loss", "arm", "hand"}
+    assert set(metrics) == {"loss", "hand"}
 
 
 @pytest.mark.parametrize("mode,benchmark", [(None, False), ("default", True)])
@@ -1711,142 +1765,33 @@ def test_training_options_and_resume(tmp_path, small_dp3_config, monkeypatch, mo
     assert compiled == [expected, expected]
 
 
-def test_training_failure_closes_all_resources(capsys):
+def test_training_failure_closes_trainer():
     closed = []
 
     def fail():
         raise ValueError("training failed")
 
-    def fail_close():
-        raise RuntimeError("close failed")
-
     trainer = SimpleNamespace(
         compile_models=fail,
-        close=lambda: close_resources(fail_close, lambda: closed.append(True)),
+        close=lambda: closed.append(True),
     )
     with pytest.raises(ValueError, match="training failed"):
         run_trainer(trainer)
     assert closed == [True]
-    assert "close failed" in capsys.readouterr().err
 
 
 # Resume paths
 
 
-@pytest.mark.parametrize("path_kind", ["relative", "absolute", "tilde", "saved_zarr"])
-def test_cli_and_api_choose_caller_files(tmp_path, small_dp3_config, make_demo, monkeypatch, path_kind):
-    caller, project = tmp_path / "caller", tmp_path / "project"
-    for directory, marker, step in ((caller, "caller", 1), (project, "project", 2)):
-        directory.mkdir()
-        shutil.copytree(make_demo(marker), directory / "data.zarr")
-        zarr.open_group(str(directory / "data.zarr"), mode="a").attrs["marker"] = marker
-        cfg = small_dp3_config(directory / "run", f"zarr_path={directory / 'data.zarr'}")
-        save_checkpoint(directory / "run/checkpoints/latest.pt", Checkpoint(
-            step, {"marker": marker}, {}, {}, OmegaConf.to_container(cfg, resolve=True),
-        ))
-    monkeypatch.setattr(common_config, "PROJECT_ROOT", project)
-    monkeypatch.chdir(caller)
-    if path_kind == "tilde":
-        expanduser = Path.expanduser
-
-        def controlled_home(path):
-            return caller.joinpath(*path.parts[1:]) if path.parts[:1] == ("~",) else expanduser(path)
-
-        monkeypatch.setattr(Path, "expanduser", controlled_home)
-    run_arg = str(caller / "run") if path_kind == "absolute" else "~/run" if path_kind == "tilde" else "run"
-    zarr_arg = str(caller / "data.zarr") if path_kind == "absolute" else "~/data.zarr" if path_kind == "tilde" else "data.zarr"
-    if path_kind == "saved_zarr":
-        zarr_arg = None
-
-    constructed = []
-
-    def inspect_build(cfg, *, checkpoint):
-        dataset, _ = build_dataset(cfg)
-        result = SimpleNamespace(
-            directory=cfg.workspace.output_dir, data_path=dataset.episode_store.path,
-            data_marker=dataset.episode_store.attrs["marker"],
-            checkpoint_marker=checkpoint.model_state["marker"], step=checkpoint.global_step,
-        )
-        constructed.append(result)
-        return result
-
-    monkeypatch.setattr(policy_training, "build_trainer", inspect_build)
-    monkeypatch.setattr(policy_training, "run_trainer", lambda result, **kwargs: result.step)
-    api = resume.prepare_resume(run_arg, zarr_path=zarr_arg)
-    assert Path.cwd() == caller
-    prepare_resume = resume.prepare_resume
-
-    def inspect_prepare(run, *, zarr_path, **kwargs):
-        assert Path.cwd() == project
-        assert run == str(caller / "run")
-        assert zarr_path == (None if path_kind == "saved_zarr" else str(caller / "data.zarr"))
-        return prepare_resume(run, zarr_path=zarr_path, **kwargs)
-
-    monkeypatch.setattr(resume, "prepare_resume", inspect_prepare)
-    args = ["--run", run_arg]
-    if zarr_arg is not None:
-        args += ["--zarr-path", zarr_arg]
-    resume.main(args)
-    cli = constructed[-1]
-    assert cli == api
-    assert cli.checkpoint_marker == cli.data_marker == "caller"
-    assert cli.step == 1 and cli.directory == str(caller / "run")
-    assert cli.data_path == str(caller / "data.zarr")
-    assert Path.cwd() == project
-
-
-@pytest.mark.parametrize("missing", ["run", "zarr"])
-def test_missing_paths_fail_at_existing_io_boundary(tmp_path, small_dp3_checkpoint, monkeypatch, missing):
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.setattr(common_config, "PROJECT_ROOT", project)
+def test_resume_cli_uses_saved_zarr(tmp_path, small_dp3_checkpoint, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    run_arg = "missing_run" if missing == "run" else "dp3_run"
-    zarr_arg = "missing.zarr" if missing == "zarr" else "demo.zarr"
-    prepare_resume = resume.prepare_resume
-    entered = []
+    with pytest.raises(SystemExit) as rejected:
+        resume.main(["--run", "dp3_run", "--zarr-path", "other.zarr"])
+    assert rejected.value.code == 2
+    assert load_checkpoint(small_dp3_checkpoint).global_step == 1
 
-    def inspect_prepare(run, *, zarr_path, **kwargs):
-        entered.append(True)
-        assert Path.cwd() == project
-        assert run == str(tmp_path / run_arg)
-        assert zarr_path == str(tmp_path / zarr_arg)
-        return prepare_resume(run, zarr_path=zarr_path, **kwargs)
-
-    monkeypatch.setattr(resume, "prepare_resume", inspect_prepare)
-    error_type = FileNotFoundError if missing == "run" else hydra.errors.InstantiationException
-    with pytest.raises(error_type) as caught:
-        resume.main(["--run", run_arg, "--zarr-path", zarr_arg])
-    assert entered == [True]
-    if missing == "run":
-        assert Path(caught.value.filename) == tmp_path / "missing_run/checkpoints/latest.pt"
-    else:
-        assert isinstance(caught.value.__cause__, zarr.errors.GroupNotFoundError)
-
-
-def test_cli_really_restores_and_continues_current_dp3(tmp_path, small_dp3_checkpoint, monkeypatch):
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.setattr(common_config, "PROJECT_ROOT", project)
-    monkeypatch.chdir(tmp_path)
-    with closing(resume.prepare_resume("dp3_run", zarr_path="demo.zarr")) as restored:
-        assert Path.cwd() == tmp_path
-        assert restored.global_step == 1
-        assert restored.logger.output_dir == tmp_path / "dp3_run"
-        assert restored.train_loader.dataset.episode_store.path == str(tmp_path / "demo.zarr")
-    run_trainer = policy_training.run_trainer
-    steps = []
-
-    def inspect_run(restored, **kwargs):
-        assert Path.cwd() == project
-        assert restored.global_step == 1
-        assert restored.logger.output_dir == tmp_path / "dp3_run"
-        assert restored.cfg.dataset.zarr_path == str(tmp_path / "demo.zarr")
-        steps.append(run_trainer(restored, **kwargs))
-
-    monkeypatch.setattr(policy_training, "run_trainer", inspect_run)
-    resume.main(["--run", "dp3_run", "--zarr-path", "demo.zarr", "--max-updates", "1"])
-    assert steps == [2]
+    resume.main(["--run", "dp3_run", "--max-updates", "1"])
+    assert Path.cwd() == tmp_path
     checkpoint = load_checkpoint(small_dp3_checkpoint)
     assert checkpoint.global_step == 2
     assert checkpoint.effective_config["workspace"]["output_dir"] == str(tmp_path / "dp3_run")
@@ -1996,7 +1941,6 @@ class SmallEnv:
     def __init__(self):
         self.state = np.zeros(19, dtype=np.float32)
         self.close_count = 0
-        self.close_error = False
         self.step_error = False
 
     def reset(self, *, seed):
@@ -2021,8 +1965,6 @@ class SmallEnv:
 
     def close(self):
         self.close_count += 1
-        if self.close_error:
-            raise RuntimeError("close failed")
 
 
 @pytest.fixture
@@ -2076,44 +2018,35 @@ def test_rollout_uses_executed_action_and_stops_mid_chunk(environments):
         assert agent.calls[offset][2] == agent.calls[offset + 1][2] == seed
 
 
-@pytest.mark.parametrize("early_close", [False, True])
-def test_normal_shutdown_propagates_close_failure(environments, early_close):
+def test_stopping_rollout_iteration_closes_env(environments):
     results = make_runner().run(SmallPolicy(), seeds=[7], inference_steps=2, action_steps=2)
     assert next(results)["success"]
-    environments[0].close_error = True
-    with pytest.raises(RuntimeError, match="close failed"):
-        results.close() if early_close else next(results)
+    results.close()
     assert environments[0].close_count == 1
 
 
-def test_step_error_preserved_during_cleanup(environments, capsys):
+def test_step_error_closes_env(environments):
     results = make_runner().run(SmallPolicy(), seeds=[7, 8], inference_steps=2, action_steps=2)
     next(results)
-    environments[0].step_error = environments[0].close_error = True
+    environments[0].step_error = True
     with pytest.raises(ValueError, match="step failed"):
         next(results)
     assert environments[0].close_count == 1
-    assert "close failed" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("failure", ["init", "dt"])
-def test_partial_environment_cleanup(monkeypatch, capsys, failure):
+def test_control_period_mismatch_closes_env(monkeypatch):
     created = []
 
-    class FailingEnv(SmallEnv):
+    class WrongPeriodEnv(SmallEnv):
         def __init__(self, **kwargs):
             super().__init__()
             created.append(self)
-            self.close_error = True
-            if failure == "init":
-                raise ValueError("init failed")
             self.dt = 0.1
 
-    monkeypatch.setattr(SimRunner, "_environment_class", lambda self: FailingEnv)
-    with pytest.raises(ValueError, match="init failed|Control period mismatch"):
+    monkeypatch.setattr(SimRunner, "_environment_class", lambda self: WrongPeriodEnv)
+    with pytest.raises(ValueError, match="Control period mismatch"):
         make_runner().make_env(record_video=False)
     assert created[0].close_count == 1
-    assert "close failed" in capsys.readouterr().err
 
 
 @pytest.fixture
@@ -2158,31 +2091,41 @@ def test_selection_and_independent_test(checkpoints, tmp_path):
     assert sorted(candidates, key=selection.candidate_score) == candidates
 
 
+def test_fixed_checkpoint_uses_only_test_seeds(checkpoints, tmp_path):
+    output = tmp_path / "fixed_eval"
+    path = selection.run_pipeline(
+        checkpoints[:1], selection_episodes=25, test_episodes=3, seed=5, device="cpu", output_dir=output,
+    )
+    assert path == output / "result_details.json"
+    result = json.loads(path.read_text())
+    test_seeds, _ = selection.split_evaluation_seeds(range(100, 110), 5, 3, 2)
+    assert [row["seed"] for row in result["episodes"]] == test_seeds
+    assert result["completed"] and not (output / "candidates").exists()
+
+
 @pytest.mark.parametrize("failure", ["video", "write"])
-def test_evaluation_failure_closes_env_and_preserves_primary(checkpoints, environments, tmp_path, monkeypatch, capsys, failure):
+def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints, environments, tmp_path, monkeypatch, failure):
     output = tmp_path / "failed_eval"
     if failure == "video":
-        def fail_video(*args):
-            environments[0].close_error = True
-            raise OSError("video failed")
+        def fail_video(frames, fps, path):
+            if path.stem == "episode_8":
+                raise OSError("video failed")
+            return str(path)
 
         monkeypatch.setattr("dexmani_policy.env_runner.video.save_episode_video", fail_video)
     else:
         write_json = rollout.write_json
 
         def fail_write(path, record):
-            if record["episodes"]:
-                environments[0].close_error = True
+            if len(record["episodes"]) == 2:
                 raise OSError("write failed")
             write_json(path, record)
 
         monkeypatch.setattr(rollout, "write_json", fail_write)
     with pytest.raises(OSError, match=f"{failure} failed"):
-        rollout.evaluate_policy(checkpoints[0], seeds=[7], device="cpu", video=failure == "video", output_dir=output)
+        rollout.evaluate_policy(checkpoints[0], seeds=[7, 8], device="cpu", video=failure == "video", output_dir=output)
     assert environments[0].close_count == 1
-    assert "close failed" in capsys.readouterr().err
     record = json.loads((output / "result_details.json").read_text())
     assert not record["completed"]
-    if failure == "video":
-        assert record["statistics"]["n_success"] == 1
-        assert record["episodes"][0]["video"] is None
+    assert record["statistics"]["n_success"] == 1
+    assert [row["seed"] for row in record["episodes"]] == [7]

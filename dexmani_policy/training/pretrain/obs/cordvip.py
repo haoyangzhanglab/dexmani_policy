@@ -28,12 +28,14 @@ class CordViP(nn.Module):
         robot_dim, object_dim, hand_dim, arm_dim = self.encoder.output_dims
         visual_dim = robot_dim + object_dim
         # The pretraining recipe cross-conditions arm and hand prediction.
-        self.arm_head = build_mlp(
-            [n_obs_steps * (visual_dim + hand_dim), 512, 256, 64, 7], activation=nn.ReLU, normalize=False,
-        )
-        self.hand_head = build_mlp(
-            [n_obs_steps * (visual_dim + arm_dim), 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
-        )
+        if arm_loss_weight > 0:
+            self.arm_head = build_mlp(
+                [n_obs_steps * (visual_dim + hand_dim), 512, 256, 64, 7], activation=nn.ReLU, normalize=False,
+            )
+        if hand_loss_weight > 0:
+            self.hand_head = build_mlp(
+                [n_obs_steps * (visual_dim + arm_dim), 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
+            )
         if contact_loss_weight > 0:
             self.contact_head = build_mlp(
                 [visual_dim, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
