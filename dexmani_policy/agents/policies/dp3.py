@@ -61,6 +61,7 @@ class DP3Encoder(nn.Module):
 
 
 class DP3(Policy):
+    uses_ddim = True
     supports_rtc = True
     supported_action_keys = ("action", "action_ee", "action_rotvec")
 

@@ -10,7 +10,7 @@ class AFROPretrainDataset(ObservationPretrainDataset):
     sensor_modalities = ("point_cloud",)
 
     def __init__(self, zarr_path, *, frame_stride, seed=42, val_episodes=0, max_train_episodes=None,
-                 horizon=33, pad_before=0, pad_after=7):
+                 horizon=33, pad_before=0, pad_after=0):
         self.frame_stride = positive_int(frame_stride, "frame_stride")
         if len(range(0, horizon, self.frame_stride)) < 2:
             raise ValueError("AFRO frame_stride must leave at least two sampled frames")

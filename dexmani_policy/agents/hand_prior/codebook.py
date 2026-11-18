@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -52,13 +53,14 @@ class HandStateCodebook(nn.Module):
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}"
 
 
-def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor]]:
+def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor], list[dict]]:
     with np.load(Path(path).expanduser(), allow_pickle=False) as data:
         poses = torch.from_numpy(data["sorted_hand_poses"])
         affine = {
             key: torch.from_numpy(data[f"hand_normalizer_{key}"])
             for key in ("scale", "offset")
         }
+        training_data = json.loads(data["training_data"].item())
     if poses.ndim != 2 or poses.shape[1] != 12:
         raise ValueError("Hand codebook requires sorted_hand_poses shape [K,12]")
     if poses.is_complex() or poses.dtype == torch.bool:
@@ -74,4 +76,4 @@ def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor
     if any(not torch.isfinite(value).all() for value in affine.values()) or (affine["scale"] == 0).any():
         raise ValueError("Hand normalizer must be finite and invertible in runtime dtype")
     codebook.sorted_hand_poses.copy_(poses)
-    return codebook, affine
+    return codebook, affine, training_data

@@ -54,6 +54,7 @@ class DPEncoder(nn.Module):
 
 
 class DP(Policy):
+    uses_ddim = True
     supports_rtc = True
     supported_action_keys = ("action", "action_ee", "action_rotvec")
 

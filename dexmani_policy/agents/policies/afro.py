@@ -32,6 +32,7 @@ class AFROEncoder(nn.Module):
 
 
 class AFRO(Policy):
+    uses_ddim = True
     supports_rtc = True
     supported_action_keys = ("action",)
 

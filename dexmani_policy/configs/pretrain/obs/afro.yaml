@@ -9,7 +9,7 @@ dataset:
   horizon: 33
   frame_stride: 2
   pad_before: 0
-  pad_after: 7
+  pad_after: 0
   seed: 42
   val_episodes: 0
   max_train_episodes: null

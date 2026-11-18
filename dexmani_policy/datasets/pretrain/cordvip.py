@@ -1,6 +1,7 @@
 import torch
 
 from dexmani_policy.datasets.episode_store import EpisodeStore
+from dexmani_policy.datasets.preprocess.contact_map import require_contact_geometry
 from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 from dexmani_policy.datasets.sampler import SequenceSampler
 
@@ -22,14 +23,9 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
         self.pad_before = obs_horizon - 1 if pad_before is None else pad_before
         self.pad_after = pad_after
         if contact_loss_weight > 0:
-            if buffer["object_pointcloud"].shape[1] != 1024:
-                raise ValueError("CordViP contact head predicts 1024 object point labels")
-            if buffer["contact_map"].shape[1:] != (1024,):
+            require_contact_geometry(buffer)
+            if buffer["contact_map"].shape[1:] != buffer["object_pointcloud"].shape[1:2]:
                 raise ValueError("Contact labels must match the 1024 object point slots")
-            processing = buffer.attrs.get("data_processing") or {}
-            geometry = processing.get("object_pointcloud", {}).get("geometry_sha256")
-            if not isinstance(geometry, str) or not geometry:
-                raise ValueError("Contact supervision requires a shared object geometry_sha256 for fixed point slots")
         super().__init__(
             buffer, normalization_fields={
                 "hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None,

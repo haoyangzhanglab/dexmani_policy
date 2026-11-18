@@ -1,11 +1,12 @@
 """Build a self-contained CordViP Zarr with offline contact labels."""
 
 import argparse
+import re
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from multiprocessing import get_context
 from pathlib import Path
-import tempfile
 
 import numpy as np
 import zarr
@@ -15,6 +16,18 @@ from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 
 
 CHUNK_ROWS = 16
+
+
+def require_contact_geometry(buffer):
+    if buffer["object_pointcloud"].shape[1] != 1024:
+        raise ValueError(f"{buffer.path}: CordViP contact supervision requires 1024 object point slots")
+    processing = buffer.attrs.get("data_processing") or {}
+    geometry = processing.get("object_pointcloud", {}).get("geometry_sha256")
+    if not isinstance(geometry, str) or re.fullmatch("[0-9a-f]{64}", geometry) is None:
+        raise ValueError(
+            f"{buffer.path}: missing shared object geometry_sha256. "
+            "Export episodes with the same ordered local template and part offsets"
+        )
 
 
 def estimate_normals(points):
@@ -53,22 +66,24 @@ def generate(zarr_path, output, num_workers=1):
     if output.exists():
         raise FileExistsError(f"Contact output already exists: {output}")
     source = zarr.open_group(zarr.DirectoryStore(Path(zarr_path).expanduser()), mode="r")
-    keys = ["hand_pointcloud", "object_pointcloud", "joint_state"]
+    fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None}
     if "action" in source["data"]:
-        keys.append("action")
-    buffer = EpisodeStore(zarr_path, keys=keys, pc_dim=3)
+        fields["action"] = None
+    buffer = EpisodeStore(zarr_path, keys=fields, pc_dim=3)
+    require_contact_geometry(buffer)
     rows = int(buffer.episode_ends[-1])
     attrs = dict(buffer.attrs)
+    attrs["source_zarr_path"] = buffer.source_path
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".contact-", dir=output.parent) as directory:
         temporary = Path(directory) / "data.zarr"
         group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
         group.attrs.update(attrs)
-        group.create_group("meta").create_dataset("episode_ends", data=buffer.episode_ends)
+        zarr.copy(source["meta"], group)
         data = group.create_group("data")
-        for key in keys:
+        for key, columns in fields.items():
             array = buffer[key]
-            shape = (*array.shape[:-1], 3) if key in keys[:2] else array.shape
+            shape = (*array.shape[:-1], 3) if columns is not None else array.shape
             data.create_dataset(
                 key, shape=shape, chunks=(CHUNK_ROWS, *shape[1:]), dtype="float32",
             )
@@ -86,13 +101,12 @@ def generate(zarr_path, output, num_workers=1):
             for start in range(0, rows, CHUNK_ROWS):
                 stop = min(start + CHUNK_ROWS, rows)
                 points = {}
-                for key in keys:
-                    columns = slice(0, 3) if key in keys[:2] else None
-                    values = np.asarray(buffer.read(key, slice(start, stop), columns=columns), dtype=np.float32)
-                    data[key][start:stop] = values
-                    if key in keys[:2]:
+                for key, columns in fields.items():
+                    values = buffer.read(key, slice(start, stop), columns=columns)
+                    if columns is not None:
                         check_finite(buffer, key, start, values, columns)
                         points[key] = values
+                    data[key][start:stop] = values
                 labels[start:stop] = np.stack(list(map_frames(
                     frame_contact_map, points["object_pointcloud"], points["hand_pointcloud"],
                 )))

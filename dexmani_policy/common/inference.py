@@ -7,6 +7,7 @@ import numpy as np
 from dexmani_policy.common.config import (
     POINT_CLOUD_FIELDS,
     positive_int,
+    validate_ddim_steps,
     validate_observation_shape,
 )
 
@@ -23,6 +24,11 @@ def resolve_inference_settings(config, *, weights=None, inference_steps=None):
     if weights not in {"ema", "raw"}:
         raise ValueError("weights must be ema or raw")
     steps = positive_int(defaults["inference_steps"] if inference_steps is None else inference_steps, "inference_steps")
+    if steps == 1:
+        from hydra.utils import get_class
+
+        if get_class(config["agent"]["_target_"]).uses_ddim:
+            validate_ddim_steps(steps, "inference_steps")
     return weights, steps
 
 
@@ -112,6 +118,7 @@ def restore_policy(
 
     feature_shapes = normalization_feature_shapes(
         feature_dims, effective_config["normalization"], required_identity_fields=agent.required_identity_fields,
+        required_limits_fields=agent.required_limits_fields,
     )
     agent.configure_normalizer(feature_dims, feature_shapes)
     agent.load_weights(state_dict, device)

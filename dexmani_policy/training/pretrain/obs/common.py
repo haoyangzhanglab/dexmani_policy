@@ -1,6 +1,6 @@
 import argparse
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import hydra
 import torch
@@ -22,6 +22,8 @@ from dexmani_policy.training.data import (
     close_data_loader,
     fit_observation_normalizer,
     record_data_processing,
+    record_training_data,
+    use_policy_split,
 )
 from dexmani_policy.training.logging import (
     ExperimentLogger,
@@ -43,6 +45,7 @@ def load_run(method, argv=None):
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--zarr-path")
+    parser.add_argument("--policy-config", help="Read the data split from a resolved policy YAML")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("--total-steps", type=int)
@@ -50,8 +53,8 @@ def load_run(method, argv=None):
     args = parser.parse_args(argv)
     checkpoint = None
     if args.resume_from is not None:
-        if args.config is not None or args.output_dir is not None or args.overrides:
-            parser.error("Resume reads the saved recipe from the specified run; --config, --output-dir and overrides are fresh-only")
+        if args.config is not None or args.output_dir is not None or args.policy_config is not None or args.overrides:
+            parser.error("Resume uses the saved recipe; config, output directory and overrides are fresh-only")
         source = Path(args.resume_from).expanduser().resolve(strict=True)
         if source.is_dir():
             directory = source
@@ -60,6 +63,8 @@ def load_run(method, argv=None):
             directory = source.parent.parent
         checkpoint = load_checkpoint(source)
         cfg = OmegaConf.create(checkpoint.effective_config)
+        if "training_data" not in cfg:
+            raise ValueError("Observation pretraining resume requires a checkpoint with training_data")
         cfg.workspace.output_dir = str(directory)
     else:
         cfg = load_config(args.config or f"pretrain/obs/{method}", args.overrides)
@@ -80,7 +85,9 @@ def load_run(method, argv=None):
         cfg.dataloader.num_workers = args.num_workers
     if args.log_interval is not None:
         cfg.training.loop.log_interval_steps = args.log_interval
-    if args.zarr_path is not None:
+    if args.policy_config is not None:
+        use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
+    elif args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
         cfg.dataset.zarr_path = cfg.zarr_path
     return cfg, checkpoint, args.max_updates
@@ -88,19 +95,17 @@ def load_run(method, argv=None):
 
 def export_encoder(checkpoint, output_path):
     state = checkpoint.model_state
-    normalization = checkpoint.effective_config["normalization"]
-    payload = {
+    payload: dict[str, Any] = {
         f"{name}_state": {
             key.removeprefix(f"{name}."): value.detach().cpu()
             for key, value in state.items() if key.startswith(f"{name}.")
         }
         for name in ("encoder", "normalizer")
     }
-    payload["data_processing"] = checkpoint.effective_config["data_processing"]
-    payload["normalization"] = dict(normalization)
-    payload["global_step"] = checkpoint.global_step
     if not payload["encoder_state"]:
         raise ValueError("Checkpoint has no encoder.* parameters")
+    payload["normalization"] = checkpoint.effective_config["normalization"]
+    payload["training_data"] = checkpoint.effective_config["training_data"]
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output_path) as temporary:
@@ -156,6 +161,7 @@ def train(method, model_class, argv=None):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
+    record_training_data(cfg, dataset.episode_store, dataset.train_mask, dataset.val_mask)
     if method == "cordvip" and cfg.model.contact_loss_weight > 0 and resuming:
         previous = checkpoint.effective_config["data_processing"]
         current = dataset.episode_store.attrs["data_processing"]

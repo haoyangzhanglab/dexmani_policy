@@ -89,11 +89,18 @@ class EpisodeStore:
     def n_episodes(self):
         return len(self.episode_ends)
 
-    def count_groups(self, episode_mask=None):
-        return len({
+    @property
+    def source_path(self):
+        return self.attrs.get("source_zarr_path", self.path)
+
+    def source_groups(self, episode_mask=None):
+        return {
             source for index, source in enumerate(self.episode_groups)
             if episode_mask is None or episode_mask[index]
-        })
+        }
+
+    def count_groups(self, episode_mask=None):
+        return len(self.source_groups(episode_mask))
 
     def keys(self):
         return self.data.keys()
@@ -113,5 +120,6 @@ def check_finite(buffer, key, start, values, columns=None):
         location[-1] = int(np.arange(buffer[key].shape[-1])[columns][location[-1]])
     raise ValueError(
         f"Nonfinite data: path={buffer.path}, field={key}, episode={episode}, "
+        f"source={buffer.episode_groups[episode]!r}, "
         f"row={row}, channel={tuple(location[1:])}"
     )

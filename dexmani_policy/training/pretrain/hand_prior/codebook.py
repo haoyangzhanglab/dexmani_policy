@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -58,8 +59,10 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     with atomic_path(output) as temporary:
         # An open file prevents NumPy from silently appending a second suffix.
         with open(temporary, "wb") as file:
-            np.savez(file, sorted_hand_poses=poses,
-                     hand_normalizer_scale=scale.numpy(), hand_normalizer_offset=offset.numpy())
+            np.savez(
+                file, sorted_hand_poses=poses, hand_normalizer_scale=scale.numpy(),
+                hand_normalizer_offset=offset.numpy(), training_data=json.dumps(checkpoint["training_data"]),
+            )
     return len(poses)
 
 

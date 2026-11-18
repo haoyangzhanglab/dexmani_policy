@@ -32,6 +32,7 @@ done
 }
 SESSION="dex_$(date +%Y%m%d_%H%M%S)_${RANDOM}_${RANDOM}"
 SOURCE="${REPO%/}/outputs/remote_sources/$SESSION"
+REMOTE_SOURCE="$HOST:$SOURCE"
 if $RESUME; then
     COMMAND=(-u -m dexmani_policy.training.resume --run "$RUN" "$@" --device cuda:0)
 else
@@ -43,7 +44,7 @@ else
 fi
 printf 'Host: %s\nSource: %s\nRun: %s\nSession: %s\n' "$HOST" "$SOURCE" "$RUN" "$SESSION"
 if $DRY_RUN; then
-    printf 'Command: '; printf '%q ' env "CUDA_VISIBLE_DEVICES=$GPU" "$PYTHON" "${COMMAND[@]}"; printf '\n'
+    printf 'Command: '; printf '%q ' env "CUDA_VISIBLE_DEVICES=$GPU" "DEXMANI_POLICY_REMOTE_SOURCE=$REMOTE_SOURCE" "$PYTHON" "${COMMAND[@]}"; printf '\n'
     exit 0
 fi
 printf -v setup_args '%q ' "$REPO" "$SOURCE"
@@ -53,16 +54,16 @@ mkdir -p "$1/outputs/remote_sources"
 mkdir "$2"
 BASH
 bash "$SCRIPT_DIR/sync_code.sh" --host "$HOST" --dest "$SOURCE"
-printf -v launch_args '%q ' "$SOURCE" "$DATA_ROOT" "$REPO" "$PYTHON" "$GPU" "$SESSION" "$FOREGROUND" "${COMMAND[@]}"
+printf -v launch_args '%q ' "$SOURCE" "$DATA_ROOT" "$REPO" "$PYTHON" "$GPU" "$SESSION" "$FOREGROUND" "$REMOTE_SOURCE" "${COMMAND[@]}"
 ssh "$HOST" "bash -s -- $launch_args" <<'BASH'
 set -euo pipefail
-source_dir="$1"; data_root="$2"; repo="$3"; interpreter="$4"; gpu="$5"; session="$6"; foreground="$7"
-shift 7
+source_dir="$1"; data_root="$2"; repo="$3"; interpreter="$4"; gpu="$5"; session="$6"; foreground="$7"; remote_source="$8"
+shift 8
 for name in robot_data data; do
     ln -s -- "$data_root/$name" "$source_dir/$name"
 done
 cd "$source_dir"
-command=(env "CUDA_VISIBLE_DEVICES=$gpu" "$interpreter" "$@")
+command=(env "CUDA_VISIBLE_DEVICES=$gpu" "DEXMANI_POLICY_REMOTE_SOURCE=$remote_source" "$interpreter" "$@")
 if [[ "$foreground" == true ]]; then
     exec "${command[@]}"
 fi

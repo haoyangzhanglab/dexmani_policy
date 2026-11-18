@@ -9,7 +9,14 @@ from dexmani_policy.common.config import (
 )
 
 
-def normalization_feature_shapes(dims, spec, *, required_identity_fields=()):
+def validate_required_limits(spec, fields):
+    for key in fields:
+        if spec.get(key) != "limits":
+            raise ValueError(f"normalization.{key} must use limits")
+
+
+def normalization_feature_shapes(dims, spec, *, required_identity_fields=(), required_limits_fields=()):
+    validate_required_limits(spec, required_limits_fields)
     shapes = {}
     identity_fields = {"rgb", *TACTILE_FEATURE_SHAPES, *required_identity_fields}
     for key, width in dims.items():
@@ -51,13 +58,13 @@ class FieldNormalizer(nn.Module):
         return (value - offset).div_(scale)
 
 
-def _feature_chunks(key, chunks):
+def _feature_chunks(key, chunks, check_values):
     feature_shape = None
     for chunk in chunks:
         values = torch.as_tensor(chunk)
         if not values.numel():
             continue
-        if not torch.isfinite(values).all():
+        if check_values and not torch.isfinite(values).all():
             raise ValueError(f"Nonfinite normalization data for {key}")
         if feature_shape is None:
             feature_shape = FIXED_OBSERVATION_SHAPES.get(key, values.shape[-1:])
@@ -112,8 +119,8 @@ class LinearNormalizer(nn.Module):
             self.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
 
     @torch.no_grad()
-    def fit_field(self, key: str, chunks: Iterable, *, mode: str = "limits") -> None:
-        samples = _feature_chunks(key, chunks)
+    def fit_field(self, key: str, chunks: Iterable, *, mode: str = "limits", check_values: bool = True) -> None:
+        samples = _feature_chunks(key, chunks, check_values)
         if mode == "limits":
             scale, offset = _fit_limits(samples)
         elif mode == "mean_std":

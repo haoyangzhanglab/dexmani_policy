@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.config import validate_ddim_steps
 
 from .sampling.rtc import guided_ddim, rtc_enabled
 
@@ -22,7 +22,7 @@ class Diffusion(nn.Module):
         clip_sample: bool = True,
     ) -> None:
         super().__init__()
-        positive_int(num_inference_steps, "num_inference_steps")
+        validate_ddim_steps(num_inference_steps, "num_inference_steps")
         if type(clip_sample) is not bool:
             raise TypeError("agent.clip_sample must be a bool")
         if prediction_type not in ("epsilon", "sample", "v_prediction"):
@@ -37,6 +37,7 @@ class Diffusion(nn.Module):
             clip_sample=clip_sample,
             set_alpha_to_one=True,
             steps_offset=0,
+            timestep_spacing="leading",
             prediction_type=prediction_type,
         )
         self.num_inference_steps = num_inference_steps
@@ -110,11 +111,8 @@ class Diffusion(nn.Module):
         history_offset=0,
         rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
-        num_steps = (
-            self.num_inference_steps
-            if inference_steps is None
-            else positive_int(inference_steps, "inference_steps")
-        )
+        num_steps = self.num_inference_steps if inference_steps is None else inference_steps
+        validate_ddim_steps(num_steps, "inference_steps")
 
         # Scheduler tensors are not module buffers; restored and trained instances need the same device.
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
@@ -165,8 +163,11 @@ class ForceDiffusion(Diffusion):
     def compute_loss_and_prediction(
         self, condition: torch.Tensor, force: torch.Tensor, valid: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prediction, target = self._training_prediction(condition, force.float())
+        valid = valid[..., None]
+        # A timestep's force prediction can depend on targets at other timesteps.
+        force = torch.where(valid, force.float(), 0.0)
+        prediction, target = self._training_prediction(condition, force)
         prediction = prediction.float()
-        error = (prediction - target).square() * valid[..., None]
-        loss = error.sum() / (force.shape[-1] * valid.float().sum())
+        residual = torch.where(valid, prediction - target, 0.0)
+        loss = residual.square().sum() / (force.shape[-1] * valid.sum(dtype=torch.float32))
         return loss, prediction

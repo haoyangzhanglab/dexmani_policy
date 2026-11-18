@@ -5,7 +5,9 @@ import torch
 from omegaconf import open_dict
 
 from dexmani_policy.common.normalizer import normalization_feature_shapes
-from dexmani_policy.training.data import fit_action_normalizer, fit_observation_normalizer
+from dexmani_policy.training.data import (
+    fit_action_normalizer, fit_observation_normalizer, inherit_training_data, iter_validated_actions,
+)
 
 
 def resolve_rgb_architecture(agent, source):
@@ -57,7 +59,8 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
 
         if initialization.codebook is None:
             raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
-        codebook, hand_affine = load_codebook(initialization.codebook)
+        codebook, hand_affine, records = load_codebook(initialization.codebook)
+        inherit_training_data(cfg, dataset, records, initialization.codebook)
         with open_dict(cfg.agent):
             cfg.agent.num_codes = codebook.num_codes
 
@@ -73,6 +76,7 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
             payload = torch.load(
                 Path(initialization.encoder).expanduser(), map_location="cpu", weights_only=True,
             )
+            inherit_training_data(cfg, dataset, payload["training_data"], initialization.encoder)
             fields: tuple[str, ...]
             if method == "afro":
                 encoder, fields = model.obs_encoder.pc_encoder, ("point_cloud",)
@@ -93,9 +97,13 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint=None):
 
     feature_shapes = normalization_feature_shapes(
         field_dims, cfg.normalization, required_identity_fields=model.required_identity_fields,
+        required_limits_fields=model.required_limits_fields,
     )
     model.configure_normalizer(field_dims, feature_shapes)
     if checkpoint is not None:
+        if method == "dqrise":
+            for _ in iter_validated_actions(dataset):
+                pass
         model.load_weights(checkpoint.model_state, cfg.training.device)
         return model
 

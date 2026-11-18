@@ -33,6 +33,7 @@ class CordViPEncoder(nn.Module):
 
 
 class CordViP(Policy):
+    uses_ddim = True
     supports_rtc = True
     supported_action_keys = ("action",)
 

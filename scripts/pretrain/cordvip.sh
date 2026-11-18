@@ -1,5 +1,5 @@
 #!/bin/bash
-# CORDVIP 观测预训练：cordvip.sh [--output-dir DIR] [--resume-from RUN_OR_CHECKPOINT] [key=value ...]
+# 同源 CordViP 观测预训练：cordvip.sh --policy-config POLICY_CONFIG --zarr-path CONTACT_ZARR [key=value ...]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

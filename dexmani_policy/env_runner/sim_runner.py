@@ -155,10 +155,13 @@ class SimRunner:
             if env is not None:
                 close_resources(env.close)
 
-    def make_env(self, *, record_video: bool):
+    def _environment_class(self):
         from dexmani_sim import resolve_env_class
 
-        env_class = resolve_env_class(self.task_name)
+        return resolve_env_class(self.task_name)
+
+    def make_env(self, *, record_video: bool):
+        env_class = self._environment_class()
         kwargs = {"render_mode": "rgb_array", **self.env_kwargs}
         # Keep the partially constructed instance reachable for cleanup.
         env = env_class.__new__(env_class)

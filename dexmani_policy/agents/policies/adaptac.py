@@ -74,6 +74,7 @@ class AdapTacEncoder(nn.Module):
 
 
 class AdapTac(Policy):
+    uses_ddim = True
     required_identity_fields = frozenset({"point_cloud"})
     supports_rtc = True
     supported_action_keys = ("action",)

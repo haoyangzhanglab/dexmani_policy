@@ -43,6 +43,8 @@ def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float)
 
 class Policy(nn.Module):
     required_identity_fields: frozenset[str] = frozenset()
+    required_limits_fields: frozenset[str] = frozenset()
+    uses_ddim: bool = False
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
     supports_rtc: bool = False
     requires_prev_action: bool = False

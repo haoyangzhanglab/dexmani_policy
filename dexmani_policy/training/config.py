@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, cast
 import hydra
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.common.config import PROJECT_ROOT, positive_int
+from dexmani_policy.common.config import PROJECT_ROOT, positive_int, validate_ddim_steps
+from dexmani_policy.common.normalizer import validate_required_limits
 
 if TYPE_CHECKING:
     from dexmani_policy.agents.policies.base import Policy
@@ -52,7 +53,17 @@ def assemble_policy_config(cfg):
                 **(cfg.env_runner.env_kwargs or {}),
                 "control_mode": "ee" if action_key == "action_ee" else "joint",
             }
+    validate_policy_recipe(cfg, hydra.utils.get_class(cfg.agent._target_))
     return cfg
+
+
+def validate_policy_recipe(cfg, cls):
+    validate_required_limits(cfg.normalization, cls.required_limits_fields)
+    if cls.uses_ddim:
+        for name in ("num_inference_steps", "force_num_inference_steps"):
+            if name in cfg.agent:
+                validate_ddim_steps(cfg.agent[name], f"agent.{name}")
+        validate_ddim_steps(cfg.eval.inference_steps, "eval.inference_steps")
 
 
 def normalize_output_dir(cfg) -> Path:
@@ -83,3 +94,4 @@ def validate_config(cfg):
     cls = cast("type[Policy]", hydra.utils.get_class(cfg.agent._target_))
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
+    validate_policy_recipe(cfg, cls)

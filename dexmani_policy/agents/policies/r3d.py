@@ -47,6 +47,8 @@ class R3DEncoder(nn.Module):
 
 
 class R3D(Policy):
+    required_limits_fields = frozenset({"point_cloud"})
+    uses_ddim = True
     supports_rtc = True
     joint_dim = 19
     ee_dim = 9

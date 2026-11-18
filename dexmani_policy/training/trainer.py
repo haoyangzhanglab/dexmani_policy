@@ -1,4 +1,5 @@
 import copy
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,10 +13,14 @@ from tqdm import tqdm
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy_state_dict, save_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.normalizer import validate_required_limits
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training import initialization
 from dexmani_policy.training.config import check_fresh_output, normalize_output_dir, validate_config
-from dexmani_policy.training.data import build_dataset, build_train_loader, close_data_loader, record_data_processing
+from dexmani_policy.training.data import (
+    build_dataset, build_train_loader, close_data_loader, inherit_training_data,
+    record_data_processing, record_training_data,
+)
 from dexmani_policy.training.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
@@ -28,21 +33,27 @@ from dexmani_policy.training.runtime import training_signals
 def build_trainer(cfg, *, checkpoint=None):
     cfg = copy.deepcopy(cfg)
     normalize_output_dir(cfg)
+    with open_dict(cfg):
+        remote_source = os.environ.get("DEXMANI_POLICY_REMOTE_SOURCE")
+        cfg.pop("remote_source", None)
+        if remote_source is not None:
+            cfg.remote_source = remote_source
     source = cfg.initialization.policy
     if checkpoint is not None and source is not None:
         raise ValueError("initialization.policy and resume are mutually exclusive")
+    validate_config(cfg)
     model_checkpoint = checkpoint
     if source is not None:
         model_checkpoint = load_checkpoint(Path(source).expanduser())
         saved = model_checkpoint.effective_config
         if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
             raise ValueError("Policy initialization requires the same policy and action semantics")
+        validate_required_limits(saved["normalization"], hydra.utils.get_class(cfg.agent._target_).required_limits_fields)
         with open_dict(cfg):
             cfg.normalization = saved["normalization"]
             cfg.normalization_dims = saved["normalization_dims"]
             cfg.initialization.policy = None
         initialization.prepare_warm_start(cfg.policy_name, cfg.agent, saved["agent"])
-    validate_config(cfg)
     if checkpoint is None:
         check_fresh_output(cfg.workspace.output_dir)
     if model_checkpoint is None and cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
@@ -51,8 +62,18 @@ def build_trainer(cfg, *, checkpoint=None):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
     dataset, data_description = build_dataset(cfg)
+    if model_checkpoint is not None:
+        inherit_training_data(
+            cfg, dataset, model_checkpoint.effective_config["training_data"], source or "resume checkpoint",
+        )
+    record_training_data(cfg, dataset.episode_store, dataset.train_mask)
     record_data_processing(cfg, dataset)
     if checkpoint is not None:
+        if cfg.policy_name == "ode":
+            current = (cfg.data_processing or {}).get("action_ode")
+            previous = (checkpoint.effective_config["data_processing"] or {}).get("action_ode")
+            if current != previous:
+                raise ValueError("Resume ODE action target semantics mismatch; use a fresh or warm-start run")
         data_dt = data_description["control_dt_s"]
         policy_dt = cfg.control_dt_s
         if not np.isclose(data_dt, policy_dt, rtol=1e-6, atol=1e-9):

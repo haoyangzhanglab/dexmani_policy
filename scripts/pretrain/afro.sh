@@ -1,5 +1,5 @@
 #!/bin/bash
-# AFRO 观测预训练：afro.sh [--output-dir DIR] [--resume-from RUN_OR_CHECKPOINT] [key=value ...]
+# 同源 AFRO 观测预训练：afro.sh --policy-config POLICY_CONFIG [key=value ...]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

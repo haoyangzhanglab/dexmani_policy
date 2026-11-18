@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import importlib
 import json
 import logging
@@ -21,11 +22,17 @@ from torch.utils.data import Dataset
 
 from dexmani_policy.agents.action_decoders.backbones import ditx, sat_action_io
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
+from dexmani_policy.agents.action_decoders.ode import ODE
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
+from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer
+from dexmani_policy.agents.obs_encoder.rgb.resnet import convert_group_norm
 from dexmani_policy.agents.policies import r3d
 from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.common import config as common_config, io_util
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
-from dexmani_policy.common.inference import predict_actions, prepare_observations, restore_policy
+from dexmani_policy.common.inference import predict_actions, prepare_observations, resolve_inference_settings, restore_policy
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state, set_seed
@@ -33,6 +40,7 @@ from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.afro import AFROPretrainDataset
 from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
+from dexmani_policy.datasets.preprocess.contact_map import generate as generate_contacts
 from dexmani_policy.datasets.sampler import SequenceSampler
 from dexmani_policy.datasets.variants.ode import ODEDataset
 from dexmani_policy.datasets.variants.r3d import R3DDataset
@@ -42,7 +50,9 @@ from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation import rollout, selection
 from dexmani_policy.training import resume, trainer as policy_training
 from dexmani_policy.training.config import load_config, validate_config
-from dexmani_policy.training.data import build_dataset, fit_action_normalizer
+from dexmani_policy.training.data import (
+    build_dataset, build_train_loader, fit_action_normalizer, inherit_training_data, use_policy_split,
+)
 from dexmani_policy.training.initialization import build_policy
 from dexmani_policy.training.optimization import clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.vqvae import train as train_vq
@@ -125,6 +135,438 @@ def small_dp3_checkpoint(tmp_path, small_dp3_config):
     with closing(build_trainer(small_dp3_config(directory))) as trainer:
         trainer.train(max_updates=1)
     return directory / "checkpoints/latest.pt"
+
+
+@pytest.mark.parametrize("bad", [None, np.nan, np.inf, -np.inf])
+def test_inherited_hand_affine_validates_full_zarr_action(make_demo, bad):
+    path = make_demo()
+    actions = zarr.open_group(str(path), mode="r+")["data/action"]
+    if bad is not None:
+        actions[6, 8] = bad
+    dataset = DemonstrationDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
+    normalizer = LinearNormalizer({"action": (19,)})
+    hand = {"scale": torch.linspace(0.5, 1.5, 12), "offset": torch.linspace(-0.2, 0.3, 12)}
+    if bad is not None:
+        with pytest.raises(ValueError, match=r"field=action, episode=0, source=0, row=6, channel=\(8,\)") as error:
+            fit_action_normalizer(dataset, normalizer, hand_affine=hand)
+        assert str(path) in str(error.value)
+        return
+    fit_action_normalizer(dataset, normalizer, hand_affine=hand)
+    field = normalizer["action"]
+    torch.testing.assert_close(field.scale[7:], hand["scale"])
+    torch.testing.assert_close(field.offset[7:], hand["offset"])
+    raw = torch.from_numpy(actions[:])
+    coded = field.normalize(raw)
+    prior = HandStateCodebook(hand_dim=12, num_codes=len(raw))
+    prior.sorted_hand_poses.copy_(raw[:, 7:] * hand["scale"] + hand["offset"])
+    reconstructed = torch.cat((coded[:, :7], prior.decode(prior.encode(coded[:, 7:]).squeeze(-1))), -1)
+    torch.testing.assert_close(field.unnormalize(reconstructed), raw)
+
+
+@pytest.mark.parametrize("mode", ["force", "taxel"])
+def test_adaptac_padded_force_invariance(monkeypatch, mode):
+    # CPU reference grouping keeps this loss test independent of the native point-cloud extension.
+    def group(points, num_patches, group_size, *args):
+        centers = points[:, :num_patches, :3]
+        return centers, torch.cdist(centers, points[..., :3]).topk(group_size, largest=False).indices
+
+    monkeypatch.setattr(point_transformer, "sample_point_patches", group)
+    cfg = load_config("adaptac", [
+        f"tactile={mode}", "agent.action_dim=19", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
+        "agent.feature_dim=32", "agent.state_out_dim=16", "agent.num_points=16",
+        "agent.pc_encoder_config.channels=48", "agent.pc_encoder_config.num_patches=4",
+        "agent.pc_encoder_config.group_size=4", "agent.pc_encoder_config.num_heads=4",
+        "agent.down_dims=[16,32]", "agent.diffusion_step_embed_dim=32",
+        "agent.force_predictor_config.depth=1", "agent.force_predictor_config.embed_dim=32",
+    ])
+    model = hydra.utils.instantiate(cfg.agent, _convert_="all")
+    shape = common_config.TACTILE_FEATURE_SHAPES[model.force_key]
+    model.configure_normalizer(
+        {"action": 19, "point_cloud": 6, "joint_state": 19, model.force_key: math.prod(shape)},
+        {"action": (19,), "joint_state": (19,)},
+    )
+    batch = {"obs": {"point_cloud": torch.randn(2, 1, 16, 6), "joint_state": torch.randn(2, 1, 19),
+                     model.force_key: torch.randn(2, 1, *shape)}, "action": torch.randn(2, 4, 19)}
+    force = torch.randn(2, 4, *shape)
+    valid = torch.tensor([[True, True, False, False], [True, False, False, False]])
+    params = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    conditions = []
+    action_loss = model.action_decoder.compute_loss
+
+    def capture(condition, *args, **kwargs):
+        conditions.append(condition.detach())
+        return action_loss(condition, *args, **kwargs)
+
+    monkeypatch.setattr(model.action_decoder, "compute_loss", capture)
+
+    def run(target, mask):
+        torch.manual_seed(11)
+        loss, metrics = model.compute_loss(dict(batch, future_force=target, future_force_valid=mask))
+        return conditions[-1], metrics, torch.autograd.grad(loss, params, allow_unused=True)
+
+    expected = run(force, valid)
+    for invalid in (0.0, -1e9, float("nan"), float("inf"), -float("inf")):
+        target = force.clone()
+        target[~valid] = invalid
+        torch.testing.assert_close(run(target, valid), expected, rtol=0, atol=0)
+
+    model.force_loss_weight = 0
+    _, metrics, grads = run(force, valid)
+    assert metrics["loss_force_weighted"] == 0
+    torch.testing.assert_close(metrics["loss"], metrics["loss_action"])
+    force_parameters = {id(parameter) for parameter in model.force_predictor.parameters()}
+    assert any(grad is not None and grad.abs().max() > 0
+               for parameter, grad in zip(params, grads) if id(parameter) in force_parameters)
+
+    model.force_loss_weight = 1
+    all_valid = torch.ones_like(valid)
+    actual = run(force, all_valid)
+
+    def original(condition, target, mask):
+        prediction, target = model.force_predictor._training_prediction(condition, target.float())
+        error = (prediction.float() - target).square() * mask[..., None]
+        return error.sum() / (target.shape[-1] * mask.float().sum()), prediction.float()
+
+    monkeypatch.setattr(model.force_predictor, "compute_loss_and_prediction", original)
+    torch.testing.assert_close(run(force, all_valid), actual, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("steps", [10, 20])
+def test_ddim_actual_time_grid(steps):
+    visited = []
+
+    class Denoiser(nn.Module):
+        def forward(self, x, timestep, context):
+            visited.append(timestep.item())
+            return x * 0.5
+
+    cond, shape = torch.zeros(1, 1, 2), (1, 4, 2)
+    decoder = Diffusion(Denoiser(), num_inference_steps=steps)
+    result = decoder.predict_action(cond, shape, generator=torch.Generator().manual_seed(9))
+    stride = 100 // steps
+    assert visited == list(range(100 - stride, -1, -stride))
+    assert result.isfinite().all()
+    with pytest.raises(ValueError, match="t=0"):
+        Diffusion(Denoiser(), num_inference_steps=1)
+    with pytest.raises(ValueError, match="t=0"):
+        decoder.predict_action(cond, shape, inference_steps=1)
+    with pytest.raises(ValueError, match="t=0"):
+        decoder.predict_action(cond, shape, inference_steps=1, rtc_prefix=torch.zeros(1, 2, 2), rtc_guidance_cap=1)
+
+
+def test_ddim_config_and_checkpoint_overrides(small_dp3_checkpoint):
+    for recipe, override in (("dp3", "agent.num_inference_steps=1"), ("dp3", "eval.inference_steps=1"),
+                             ("adaptac", "agent.force_num_inference_steps=1")):
+        with pytest.raises(ValueError, match="leading DDIM"):
+            load_config(recipe, [override])
+    with pytest.raises(ValueError, match="leading DDIM"):
+        load_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
+    with pytest.raises(ValueError, match="leading DDIM"):
+        rollout.evaluate_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
+    with pytest.raises(ValueError, match="leading DDIM"):
+        selection.run_pipeline([small_dp3_checkpoint], inference_steps=1, device="cpu")
+    for name in ("ode", "maniflow"):
+        cfg = load_config(name, ["eval.inference_steps=1"])
+        assert resolve_inference_settings(cfg)[1] == 1
+
+
+def test_ddim_rtc_matches_two_step_reference():
+    class Denoiser(nn.Module):
+        def forward(self, x, timestep, context):
+            return (0.3 + 0.001 * timestep) * x
+
+    decoder = Diffusion(Denoiser(), num_inference_steps=2, clip_sample=False)
+    prefix, shape = torch.full((1, 1, 1), -0.4), (1, 2, 1)
+    with torch.inference_mode():
+        actual = decoder.predict_action(
+            torch.zeros(1, 1, 1), shape, generator=torch.Generator().manual_seed(18),
+            rtc_prefix=prefix, history_offset=1, rtc_guidance_cap=0.8,
+        )
+    reference = torch.randn(shape, generator=torch.Generator().manual_seed(18))
+    alpha_bar = decoder.noise_scheduler.alphas_cumprod
+    soft_weight = 0.5 * math.expm1(0.5) / math.expm1(1)
+    for current, previous in [(50, 0), (0, -50)]:
+        a, a_prev = float(alpha_bar[current]), float(alpha_bar[previous]) if previous >= 0 else 1.0
+        scale = 0.3 + 0.001 * current
+        clean = scale * reference
+        residual = prefix - clean[:, 1:]
+        predicted_noise = (reference - math.sqrt(a) * clean) / math.sqrt(1 - a)
+        reference = math.sqrt(a_prev) * clean + math.sqrt(1 - a_prev) * predicted_noise
+        strength = (math.sqrt(a_prev * (1 - a)) - math.sqrt(a * (1 - a_prev))) * min(
+            0.8, 1 / math.sqrt(a * (1 - a)),
+        )
+        reference[:, 1:] += scale * soft_weight * strength * residual
+    torch.testing.assert_close(actual, reference)
+
+
+def test_r3d_limits_config_and_restoration(tmp_path, make_demo, monkeypatch):
+    class SmallUni3D(nn.Module):
+        def __init__(self, embed_dim, **kwargs):
+            super().__init__()
+            self.out_dim = embed_dim
+            self.project = nn.Linear(3, embed_dim)
+
+        def initialize_weights(self, source):
+            assert source is None
+
+        def forward(self, cloud):
+            projected = self.project(cloud[..., :3])
+            return projected, torch.zeros_like(projected)
+
+    monkeypatch.setattr(r3d, "Uni3DEncoder", SmallUni3D)
+    data = make_demo()
+    directory = tmp_path / "r3d"
+    cfg = load_config("r3d", [
+        f"zarr_path={data}", "task_name=test", f"workspace.output_dir={directory}",
+        "workspace.wandb_cfg=null", "initialization.uni3d=null", "dataset.augmentation_cfg=null",
+        "training.device=cpu", "training.use_compile=false", "training.loop.total_train_steps=3",
+        "dataloader.num_workers=0", "dataloader.batch_size=2", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
+        "agent.pc_encoder_config.embed_dim=16", "agent.embedding_dim=16", "agent.num_heads=2", "agent.depth=1",
+        "agent.state_out_dim=8", "agent.mlp_dim=32", "agent.timestep_embed_dim=8",
+    ])
+    with pytest.raises(ValueError, match=r"normalization.point_cloud must use limits"):
+        load_config("r3d", ["normalization.point_cloud=mean_std"])
+    with closing(build_trainer(cfg)) as trainer:
+        trainer.train(max_updates=1)
+    latest = directory / "checkpoints/latest.pt"
+    checkpoint = load_checkpoint(latest)
+    assert checkpoint.effective_config["normalization"]["point_cloud"] == "limits"
+    with closing(prepare_resume(directory)) as trainer:
+        assert trainer.global_step == 1
+        torch.testing.assert_close(trainer.model.normalizer["point_cloud"].scale,
+                                   checkpoint.model_state["normalizer.fields.point_cloud.scale"])
+    cfg.workspace.output_dir = str(tmp_path / "warm")
+    cfg.initialization.policy = str(latest)
+    with closing(build_trainer(cfg)) as trainer:
+        assert trainer.global_step == 0
+    for weights in ("raw", "ema"):
+        assert load_policy(latest, weights=weights, device="cpu").agent.normalization_dims["point_cloud"] == 6
+    cfg.normalization.point_cloud = "mean_std"
+    with pytest.raises(ValueError, match="point_cloud must use limits"):
+        build_trainer(cfg)
+    cfg.normalization.point_cloud = "limits"
+    checkpoint.effective_config["normalization"]["point_cloud"] = "mean_std"
+    bad = save_checkpoint(directory / "checkpoints/bad.pt", checkpoint)
+    cfg.initialization.policy = str(bad)
+    with pytest.raises(ValueError, match="point_cloud must use limits"):
+        build_trainer(cfg)
+    with pytest.raises(ValueError, match="point_cloud must use limits"):
+        build_trainer(OmegaConf.create(checkpoint.effective_config), checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="point_cloud must use limits"):
+        load_policy(bad, device="cpu")
+
+
+def test_bn_to_gn_copies_learned_affines():
+    batch_norm = nn.BatchNorm2d(4).double()
+    with torch.no_grad():
+        batch_norm.weight.copy_(torch.tensor([2., 0.5, 1.5, -1.]))
+        batch_norm.bias.fill_(0.4)
+        batch_norm.running_mean.fill_(5)
+    model = convert_group_norm(nn.Sequential(batch_norm))
+    assert isinstance(model[0], nn.GroupNorm)
+    torch.testing.assert_close(model[0].weight, batch_norm.weight)
+    torch.testing.assert_close(model[0].bias, batch_norm.bias)
+    assert set(model[0].state_dict()) == {"weight", "bias"}
+
+
+def test_ode_refuses_real_attempt_only_store(make_demo):
+    path = make_demo()
+    zarr.open_group(str(path), mode="a").attrs.update(
+        format="dexmani.real.canonical", source_episodes=["capture"], source_row_ranges=[[0, 12]],
+    )
+    with pytest.raises(ValueError, match="Real ODE requires action_ode"):
+        ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
+
+
+def test_afro_default_frames_use_only_complete_windows(segments):
+    path, fields = segments
+    cfg = load_config("pretrain/obs/afro")
+    assert (cfg.dataset.pad_before, cfg.dataset.pad_after, cfg.dataset.frame_stride) == (0, 0, 2)
+    dataset = hydra.utils.instantiate(cfg.dataset, zarr_path=str(path), horizon=5)
+    assert len(dataset) == 1
+    np.testing.assert_array_equal(dataset[0]["obs"]["point_cloud"], fields["point_cloud"][[3, 5, 7], :, :3])
+    with pytest.raises(ValueError, match="No AFROPretrainDataset training windows"):
+        AFROPretrainDataset(path, frame_stride=2, horizon=6)
+    loader_cfg = OmegaConf.create({"dataloader": {"num_workers": 0, "batch_size": 2, "drop_last": True}})
+    with pytest.raises(ValueError, match="Training DataLoader is empty"):
+        build_train_loader(loader_cfg, dataset)
+
+
+def test_same_source_pretraining_carries_real_group_budget(tmp_path, make_demo):
+    path = make_demo()
+    data = zarr.open_group(str(path), mode="a")
+    data["meta/episode_ends"].resize(6)
+    data["meta/episode_ends"][:] = [2, 4, 6, 8, 10, 12]
+    sources = ["a", "a", "b", "c", "d", "e"]
+    data.attrs.update(
+        format="dexmani.real.canonical", source_episodes=sources,
+        source_row_ranges=[[0, 2], [3, 5], [0, 2], [0, 2], [0, 2], [0, 2]],
+    )
+    policy = load_config("dqrise", [
+        f"zarr_path={path}", "task_name=test", "dataset.seed=9",
+        "dataset.val_episodes=1", "dataset.max_train_episodes=2",
+        f"workspace.output_dir={tmp_path / 'policy'}",
+    ])
+    policy_path = tmp_path / "policy.yaml"
+    # Hydra --cfg job prints the recipe before runtime assembly fills dataset.zarr_path.
+    policy_recipe = OmegaConf.to_container(policy, resolve=True)
+    del policy_recipe["dataset"]["zarr_path"]
+    OmegaConf.save(OmegaConf.create(policy_recipe), policy_path)
+    kwargs = {"seed": 9, "val_episodes": 1, "max_train_episodes": 2}
+    dataset = DemonstrationDataset(path, sensor_modalities=["joint_state"], obs_horizon=1, **kwargs)
+    chosen = set(np.asarray(sources)[dataset.train_mask])
+    held_out = set(np.asarray(sources)[dataset.val_mask])
+    assert len(chosen) == 2 and len(held_out) == 1 and chosen.isdisjoint(held_out)
+    assert dataset.train_mask[0] == dataset.train_mask[1]
+
+    run = tmp_path / "vq"
+    cfg = load_config("pretrain/hand_prior/vqvae", [
+        f"workspace.output_dir={run}", "vq_vae.device=cpu", "vq_vae.batch_size=2",
+        "vq_vae.codebook_size=2", "vq_vae.num_groups=2", "vq_vae.num_epochs=1",
+    ])
+    use_policy_split(cfg, policy_path)
+    train_vq(cfg)
+    _, affine, records = load_codebook(run / "codebook.npz")
+    record, = records
+    assert record["source"] == str(path)
+    assert set(record["train_source_episodes"]) == chosen
+    assert set(record["val_source_episodes"]) == held_out
+    rows = np.repeat(dataset.train_mask, 2)
+    hand = torch.from_numpy(data["data/action"][:][rows, 7:])
+    torch.testing.assert_close(affine["scale"], 2 / (hand.amax(0) - hand.amin(0)))
+    inherit_training_data(policy, dataset, records, "codebook.npz")
+    outside_budget = set(sources) - chosen - held_out
+    for group, key in [(next(iter(outside_budget)), "train_source_episodes"),
+                       (next(iter(held_out)), "train_source_episodes"),
+                       (next(iter(outside_budget)), "val_source_episodes")]:
+        with pytest.raises(ValueError, match="same-source prior exceeds"):
+            inherit_training_data(policy, dataset, [dict(record, **{key: [group]})], "leaky.pt")
+    inherit_training_data(policy, dataset, [dict(record, source="/external.zarr")], "external.pt")
+    inherit_training_data(policy, dataset, [], "unknown.pt")
+    assert policy.training_data[-1] == {"source": None, "artifact": "unknown.pt"}
+
+
+class ConstantVelocity(nn.Module):
+    def __init__(self, value):
+        super().__init__()
+        self.velocity = nn.Parameter(torch.tensor(value))
+
+    def forward(self, x, timestep, context, **kwargs):
+        self.last_input = x.detach()
+        self.last_time = timestep
+        self.last_target_time = kwargs.get("target_t")
+        return x * 0.0 + self.velocity
+
+    def prepare_context_kv(self, context):
+        return None
+
+
+def test_flow_direction_and_rtc_against_reference():
+    cond, action = torch.zeros(1, 1, 2), torch.full((1, 2, 1), 0.7)
+    decoder = RectifiedFlow(ConstantVelocity(0.25)).eval()
+    torch.manual_seed(31)
+    noise, t = torch.randn_like(action), torch.rand(1)
+    torch.manual_seed(31)
+    loss, _ = decoder.compute_loss(cond, action)
+    torch.testing.assert_close(decoder.model.last_input, torch.lerp(noise, action, t))
+    torch.testing.assert_close(loss, (0.25 - (action - noise)).square().mean())
+
+    def generator():
+        return torch.Generator().manual_seed(31)
+
+    plain = decoder.predict_action(cond, action.shape, inference_steps=1, generator=generator())
+    torch.testing.assert_close(plain, noise + 0.25)
+    prefix = torch.full((1, 1, 1), 0.9)
+    guided = decoder.predict_action(
+        cond, action.shape, inference_steps=2, generator=generator(),
+        rtc_prefix=prefix, history_offset=1, rtc_guidance_cap=0.2,
+    )
+    expected = noise.clone()
+    weight = 0.5 * math.expm1(0.5) / math.expm1(1)
+    for t in (0., 0.5):
+        residual = prefix - (expected[:, 1:] + (1 - t) * 0.25)
+        expected += 0.125
+        expected[:, 1:] += 0.1 * weight * residual
+    torch.testing.assert_close(guided, expected)
+
+
+@pytest.mark.parametrize("mode", ["relative", "absolute"])
+def test_consistency_teacher_target_matches_reference(monkeypatch, mode):
+    decoder = ConsistencyFlow(ConstantVelocity(0.2), target_t_sample_mode=mode)
+    teacher = ConstantVelocity(-0.4)
+    t, dt = torch.tensor([0.2, 0.9]), torch.tensor([0.4, 0.3])
+    times = iter((t, dt))
+    monkeypatch.setattr(decoder.time_sampler, "sample", lambda *args, **kwargs: next(times))
+    target = torch.tensor([[[0.8]], [[-0.3]]])
+    torch.manual_seed(8)
+    noise = torch.randn_like(target)
+    torch.manual_seed(8)
+    result = decoder.sample_consistency_targets(target, torch.zeros(2, 1, 2), teacher)
+    start = torch.lerp(noise, target, t[:, None, None])
+    next_t = torch.minimum(t + dt, torch.ones_like(t))
+    next_action = torch.lerp(noise, target, next_t[:, None, None])
+    final = next_action - 0.4 * (1 - next_t[:, None, None])
+    torch.testing.assert_close(teacher.last_input, next_action)
+    torch.testing.assert_close(teacher.last_time, next_t)
+    torch.testing.assert_close(teacher.last_target_time, dt if mode == "relative" else next_t + dt)
+    torch.testing.assert_close(result["target_t"], dt if mode == "relative" else next_t)
+    torch.testing.assert_close(result["vt_target"], (final - start) / (1 - t[:, None, None]))
+    assert not result["vt_target"].requires_grad
+
+
+@pytest.mark.parametrize("solver", ["euler", "rk4"])
+def test_ode_closed_form_and_detached_side_head(monkeypatch, solver):
+    decoder = ODE(4, 2, 3, 4, cond_dim=8, hidden_dim=8, num_layers=1,
+                  solver=solver, vel_scale=0.2, perturb_prob=0, side_head=2)
+    state, initial, condition = torch.randn(2, 3), torch.randn(2, 2), torch.randn(2, 4)
+    with monkeypatch.context() as patch:
+        patch.setattr(decoder.model, "forward", lambda action, *args: torch.full_like(action, 0.75))
+        actual = decoder.integrate(initial, state, None, substeps=3)
+        expected = initial[:, None] + 0.15 * torch.arange(1, 5).view(1, 4, 1)
+        torch.testing.assert_close(actual, expected)
+    reference = copy.deepcopy(decoder)
+    reference.num_components = 0
+    target = torch.randn(2, 4, 2)
+    loss, _ = decoder.compute_loss(condition, initial, state, target, perturb_std=0)
+    expected, _ = reference.compute_loss(condition, initial, state, target, perturb_std=0)
+    main = (*decoder.model.parameters(), *decoder.condition_encoder.parameters())
+    ref = (*reference.model.parameters(), *reference.condition_encoder.parameters())
+    grads = torch.autograd.grad(loss, (*main, *decoder.side_head.parameters()))
+    torch.testing.assert_close(grads[:len(main)], torch.autograd.grad(expected, ref))
+    assert any(grad.abs().sum() > 0 for grad in grads[len(main):])
+
+
+@pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX])
+def test_context_cache_outputs_gradients_and_new_observation(monkeypatch, backbone_class):
+    action_io = sat_action_io.SATActionIO(4, 16)
+    backbone = backbone_class(
+        horizon=4, action_dim=19, n_obs_steps=1, obs_token_dim=8, hidden_dim=16,
+        n_head=2, n_layers=2, timestep_embed_dim=8, p_drop_attn=0, action_io=action_io,
+    ).eval()
+    with torch.no_grad():
+        for parameter in backbone.parameters():
+            parameter.normal_(mean=0.2, std=0.15)
+    actions = torch.randn(2, 4, 19, requires_grad=True)
+    cond = torch.randn(2, 3, 8, requires_grad=True)
+
+    def gradients(cache):
+        output = backbone(actions, 0.4, cond, context_kv=cache)
+        return output, torch.autograd.grad(output.square().mean(), (actions, cond, *backbone.parameters()),
+                                          allow_unused=True)
+
+    torch.testing.assert_close(gradients(backbone.prepare_context_kv(cond)), gradients(None))
+    decoder = RectifiedFlow(backbone, num_inference_steps=3).eval()
+
+    def sample(context):
+        return decoder.predict_action(context, actions.shape, generator=torch.Generator().manual_seed(3))
+
+    first = sample(cond)
+    changed = cond + torch.randn_like(cond)
+    second = sample(changed)
+    assert (second - first).abs().max() > 1e-6
+    with monkeypatch.context() as patch:
+        patch.setattr(backbone, "prepare_context_kv", lambda context: None)
+        torch.testing.assert_close(sample(changed), second)
 
 
 # Data sampling
@@ -382,7 +824,7 @@ def test_r3d_group_loss_and_gradients(monkeypatch, auxiliary, weight, log_metric
     model = r3d.R3D(
         horizon=4, n_obs_steps=1, n_action_steps=4, action_dim=dim, state_dim=19,
         use_aux_ee=auxiliary, aux_loss_weight=weight, embedding_dim=16, depth=1,
-        num_heads=2, mlp_dim=32, timestep_embed_dim=8, num_inference_steps=1,
+        num_heads=2, mlp_dim=32, timestep_embed_dim=8, num_inference_steps=2,
     )
     model.action_decoder.model = ConstantPrediction(dim)
     model.configure_normalizer({"action": dim}, {"action": (dim,)})
@@ -467,7 +909,10 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         path = tmp_path / "codebook.npz"
         poses = np.linspace(-1, 1, 36, dtype=np.float32).reshape(3, 12)
         scale, offset = torch.full((12,), 2.0), torch.full((12,), -0.5)
-        np.savez(path, sorted_hand_poses=poses, hand_normalizer_scale=scale.numpy(), hand_normalizer_offset=offset.numpy())
+        np.savez(
+            path, sorted_hand_poses=poses, hand_normalizer_scale=scale.numpy(), hand_normalizer_offset=offset.numpy(),
+            training_data=json.dumps([{"source": dataset.episode_store.source_path, "train_source_episodes": [0]}]),
+        )
         cfg.initialization.codebook = str(path)
     else:
         from dexmani_policy.agents.hand_prior.dexlatent import DexLatentHandPrior
@@ -532,8 +977,12 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
         field.scale.fill_(2.5)
         field.offset.fill_(0.75)
     source = tmp_path / "encoder.pt"
-    torch.save({"encoder_state": encoder.state_dict(), "normalizer_state": inherited.state_dict(),
-                "normalization": dict.fromkeys(fields, mode)}, source)
+    torch.save({
+        "encoder_state": encoder.state_dict(),
+        "normalizer_state": inherited.state_dict(),
+        "normalization": dict.fromkeys(fields, mode),
+        "training_data": [{"source": dataset.episode_store.source_path, "train_source_episodes": [0]}],
+    }, source)
     cfg.initialization.encoder = str(source)
     model = build_policy(cfg, dataset, dims)
     actual_encoder = model.obs_encoder.pc_encoder if method == "afro" else model.obs_encoder.interaction_encoder
@@ -554,11 +1003,16 @@ def test_encoder_normalization_inherited_before_configuration(tmp_path, make_dem
 
 def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monkeypatch):
     directory = tmp_path / "source"
+    first_source, resumed_source = "gpu:/snapshots/first", "gpu:/snapshots/resumed"
+    monkeypatch.setenv("DEXMANI_POLICY_REMOTE_SOURCE", first_source)
     with closing(build_trainer(small_dp3_config(directory))) as trainer:
         trainer.train(max_updates=1)
-    saved = load_checkpoint(directory / "checkpoints/latest.pt")
+    latest = directory / "checkpoints/latest.pt"
+    first_checkpoint = latest.resolve()
+    saved = load_checkpoint(first_checkpoint)
+    assert saved.effective_config["remote_source"] == first_source
     for override in ("action_key=action_ee", "agent._target_=dexmani_policy.agents.policies.dp.DP"):
-        invalid = small_dp3_config(tmp_path / "invalid", f"initialization.policy={directory / 'checkpoints/latest.pt'}", override)
+        invalid = small_dp3_config(tmp_path / "invalid", f"initialization.policy={first_checkpoint}", override)
         with pytest.raises(ValueError, match="same policy and action semantics"):
             build_trainer(invalid)
 
@@ -567,17 +1021,27 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, monk
 
     monkeypatch.setattr(LinearNormalizer, "fit_field", forbidden)
     monkeypatch.setattr("dexmani_policy.training.initialization.resolve_rgb_architecture", forbidden)
+    monkeypatch.setenv("DEXMANI_POLICY_REMOTE_SOURCE", resumed_source)
     with closing(prepare_resume(directory)) as resumed:
         torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
         torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
-        torch.testing.assert_close(resumed.optimizer.state_dict()["state"], saved.optimizer_state["state"])
-        assert resumed.optimizer.state_dict()["param_groups"] == saved.optimizer_state["param_groups"]
+        optimizer = resumed.optimizer.state_dict()
+        torch.testing.assert_close(optimizer["state"], saved.optimizer_state["state"])
+        assert optimizer["param_groups"] == saved.optimizer_state["param_groups"]
         assert resumed.scheduler.state_dict() == saved.scheduler_state
         assert resumed.global_step == 1
         actual_parameters = {id(p) for p in resumed.model.parameters() if p.requires_grad}
         assert {id(p) for group in resumed.optimizer.param_groups for p in group["params"]} == actual_parameters
         assert {id(p) for p in resumed.ema_updater.parameters} == actual_parameters
-    warm_cfg = small_dp3_config(tmp_path / "warm", f"initialization.policy={directory / 'checkpoints/latest.pt'}")
+        resumed.train(max_updates=1)
+    continued = load_checkpoint(latest)
+    assert continued.global_step == continued.scheduler_state["last_epoch"] == 2
+    for group, base_lr in zip(continued.optimizer_state["param_groups"], saved.scheduler_state["base_lrs"]):
+        assert group["lr"] == pytest.approx(0.25 * base_lr)
+    assert continued.effective_config["remote_source"] == resumed_source
+    assert OmegaConf.load(directory / "config.yaml").remote_source == first_source
+
+    warm_cfg = small_dp3_config(tmp_path / "warm", f"initialization.policy={first_checkpoint}")
     with closing(build_trainer(warm_cfg)) as warm:
         torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
         assert warm.global_step == 0
@@ -762,10 +1226,11 @@ def test_dit_branch_does_not_construct_ditx_output(monkeypatch):
 class Samples(Dataset):
     sensor_modalities = ("target",)
 
-    def __init__(self, targets):
+    def __init__(self, targets, episode_store):
         self.targets = targets
         self.obs_horizon = 1
-        self.episode_store = SimpleNamespace(path="unused")
+        self.episode_store = episode_store
+        self.train_mask, self.val_mask = np.array([True]), np.array([False])
 
     def __len__(self):
         return len(self.targets)
@@ -826,14 +1291,14 @@ def training_config(directory, batch_size, accumulation, updates):
     (1, 128, 4), (5, 2, 1), (129, 128, 2),
 ])
 @pytest.mark.parametrize("loop", ["policy", "observation"])
-def test_sample_weighted_updates(tmp_path, monkeypatch, count, batch_size, accumulation, loop):
+def test_sample_weighted_updates(tmp_path, monkeypatch, make_demo, count, batch_size, accumulation, loop):
     targets = torch.arange(count).float() / count
     if count == 129:
         targets.zero_()
         targets[-1] = 1
     updates = math.ceil(math.ceil(count / batch_size) / accumulation)
     cfg = training_config(tmp_path, batch_size, accumulation, updates)
-    dataset = Samples(targets)
+    dataset = Samples(targets, EpisodeStore(make_demo(), keys=()))
     actual_gradients, optimizers, schedulers = [], [], []
 
     def capture_clip(parameters, finite_loss, max_grad_norm=0, *, step):
@@ -876,7 +1341,6 @@ def test_sample_weighted_updates(tmp_path, monkeypatch, count, batch_size, accum
     else:
         monkeypatch.setattr(obs_training, "load_run", lambda *args: (cfg, None, None))
         monkeypatch.setattr(obs_training.hydra.utils, "instantiate", lambda *args, **kwargs: dataset)
-        monkeypatch.setattr(obs_training, "record_data_processing", lambda *args: None)
         monkeypatch.setattr(obs_training.torch.optim, "AdamW", sgd)
         monkeypatch.setattr(obs_training, "build_scheduler", scheduler)
         monkeypatch.setattr(obs_training, "clip_gradients", capture_clip)
@@ -1105,16 +1569,31 @@ def contact_data(make_demo):
     store = zarr.open_group(str(path), mode="a")
     points = store["data/point_cloud"][:, :, :3]
     store.create_dataset("data/hand_pointcloud", data=points)
-    store.create_dataset("data/object_pointcloud", data=np.tile(points, (1, 128, 1)))
+    template = np.random.default_rng(45).normal(size=(1024, 3)).astype("<f4")
+    world_points = template[None] + np.arange(12, dtype=np.float32)[:, None, None] * 0.1
+    store.create_dataset("data/object_pointcloud", data=world_points)
     store.create_dataset("data/contact_map", data=np.zeros((12, 1024), dtype=np.float32))
-    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "ordered-geometry"}}
+    offsets = np.array([0, len(template)], dtype="<i8")
+    payload = b"".join(
+        np.array(values.shape, dtype="<i8").tobytes() + values.tobytes()
+        for values in (template, offsets)
+    )
+    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": hashlib.sha256(payload).hexdigest()}}
     return path
 
 
-def test_observation_artifacts(output_path, contact_data, monkeypatch):
+def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch):
     value, directory = output_path
+    source = tmp_path / "source.zarr"
+    shutil.copytree(contact_data, source)
+    zarr.open_group(str(contact_data), mode="a").attrs["source_zarr_path"] = str(source)
+    policy = tmp_path / "policy.yaml"
+    OmegaConf.save(OmegaConf.create(dict(
+        task_name="test", zarr_path=str(source),
+        dataset=dict(seed=42, val_episodes=0, max_train_episodes=1),
+    )), policy)
     args = [
-        "--output-dir", value, "--zarr-path", str(contact_data),
+        "--output-dir", value, "--policy-config", str(policy), "--zarr-path", str(contact_data),
         "--device", "cpu", "--no-wandb", "--max-updates", "1",
         "normalization.joint_state=mean_std", "n_obs_steps=1", "dataloader.num_workers=0", "dataloader.batch_size=2",
         "training.loop.total_train_steps=3", "training.loop.gradient_accumulation_steps=2",
@@ -1133,6 +1612,8 @@ def test_observation_artifacts(output_path, contact_data, monkeypatch):
         obs_training.train("cordvip", CordViP, args)
     assert any(key.startswith("contact_head.") for key in saved.model_state)
     payload = torch.load(directory / "encoder.pt", weights_only=True)
+    assert payload["training_data"] == saved.effective_config["training_data"]
+    assert payload["training_data"][0]["source"] == str(source)
     states = zarr.open_group(str(contact_data), mode="r")["data/joint_state"][:]
     np.testing.assert_allclose(payload["normalizer_state"]["fields.joint_state.scale"],
                                1 / states.std(axis=0, dtype=np.float64), rtol=1e-6)
@@ -1153,20 +1634,36 @@ def test_observation_artifacts(output_path, contact_data, monkeypatch):
     for key in payload["normalizer_state"]:
         torch.testing.assert_close(resumed.model_state["normalizer." + key], payload["normalizer_state"][key])
 
-    store = zarr.open_group(str(contact_data), mode="a")
-    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "different-geometry"}}
     artifacts = [directory / name for name in ("config.yaml", "metrics.jsonl", "encoder.pt", "checkpoints/latest.pt")]
     before = [path.read_bytes() for path in artifacts]
+    other_data = tmp_path / "other.zarr"
+    shutil.copytree(contact_data, other_data)
+    del zarr.open_group(str(other_data), mode="a").attrs["source_zarr_path"]
+    with pytest.raises(ValueError, match="share the policy source and episode split"):
+        obs_training.train("cordvip", CordViP, [
+            "--resume-from", value, "--max-updates", "1", "--zarr-path", str(other_data),
+        ])
+    assert [path.read_bytes() for path in artifacts] == before
+    store = zarr.open_group(str(contact_data), mode="a")
+    store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": "f" * 64}}
     with pytest.raises(ValueError, match="same object geometry"):
         obs_training.train("cordvip", CordViP, ["--resume-from", value, "--max-updates", "1"])
     assert [path.read_bytes() for path in artifacts] == before
 
 
-def test_contact_requires_geometry_identity(contact_data):
+def test_contact_requires_geometry_identity(contact_data, tmp_path):
     store = zarr.open_group(str(contact_data), mode="a")
+    del store["data/contact_map"]
+    store.create_dataset("data/contact_map", data=np.zeros((12, 1023), dtype=np.float32))
+    with pytest.raises(ValueError, match="Contact labels must match the 1024 object point slots"):
+        CordViPPretrainDataset(contact_data, contact_loss_weight=1)
     store.attrs["data_processing"] = {"object_pointcloud": {"geometry_sha256": None}}
     with pytest.raises(ValueError, match="geometry_sha256"):
         CordViPPretrainDataset(contact_data, contact_loss_weight=1)
+    output = tmp_path / "missing.zarr"
+    with pytest.raises(ValueError, match="geometry_sha256"):
+        generate_contacts(contact_data, output)
+    assert not output.exists()
 
 
 def test_disabled_contact_does_not_require_labels_or_geometry(contact_data):
@@ -1212,21 +1709,6 @@ def test_training_options_and_resume(tmp_path, small_dp3_config, monkeypatch, mo
         monkeypatch.setattr(resumed.model, "compile_backbone", lambda *, mode: compiled.append(mode))
         resumed.compile_models()
     assert compiled == [expected, expected]
-
-
-def test_afro_pretraining_inherits_matmul(tmp_path, monkeypatch):
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.set_float32_matmul_precision("medium")
-
-    def stop_before_data(*args, **kwargs):
-        assert not torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark
-        assert torch.get_float32_matmul_precision() == "medium"
-        raise RuntimeError("stop before data")
-
-    monkeypatch.setattr(obs_training.hydra.utils, "instantiate", stop_before_data)
-    with pytest.raises(RuntimeError, match="stop before data"):
-        obs_training.train("afro", None, ["--output-dir", str(tmp_path), "--device", "cpu"])
 
 
 def test_training_failure_closes_all_resources(capsys):
@@ -1616,8 +2098,6 @@ def test_step_error_preserved_during_cleanup(environments, capsys):
 
 @pytest.mark.parametrize("failure", ["init", "dt"])
 def test_partial_environment_cleanup(monkeypatch, capsys, failure):
-    import dexmani_sim
-
     created = []
 
     class FailingEnv(SmallEnv):
@@ -1629,7 +2109,7 @@ def test_partial_environment_cleanup(monkeypatch, capsys, failure):
                 raise ValueError("init failed")
             self.dt = 0.1
 
-    monkeypatch.setattr(dexmani_sim, "resolve_env_class", lambda task: FailingEnv)
+    monkeypatch.setattr(SimRunner, "_environment_class", lambda self: FailingEnv)
     with pytest.raises(ValueError, match="init failed|Control period mismatch"):
         make_runner().make_env(record_video=False)
     assert created[0].close_count == 1

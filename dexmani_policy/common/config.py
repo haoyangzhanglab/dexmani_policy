@@ -18,6 +18,11 @@ FIXED_OBSERVATION_SHAPES: dict[str, tuple[int, ...]] = {
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
 
 
+def validate_ddim_steps(steps: int, name: str) -> None:
+    if positive_int(steps, name) == 1:
+        raise ValueError(f"{name} must be at least 2 for leading DDIM; 1 NFE starts at t=0")
+
+
 def validate_observation_shape(name: str, shape: tuple[int, ...], *, width: int | None = None) -> None:
     """Validate one frame before point-cloud channel selection."""
     if name in FIXED_OBSERVATION_SHAPES:

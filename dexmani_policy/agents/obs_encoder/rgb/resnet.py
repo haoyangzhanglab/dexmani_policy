@@ -12,11 +12,15 @@ def convert_group_norm(module: nn.Module) -> nn.Module:
             num_groups = min(32, child.num_features)
             while child.num_features % num_groups != 0:
                 num_groups -= 1
-            setattr(
-                module,
-                name,
-                nn.GroupNorm(num_groups=num_groups, num_channels=child.num_features),
-            )
+            norm = nn.GroupNorm(num_groups, child.num_features, eps=child.eps, affine=child.affine)
+            if child.affine:
+                norm.to(child.weight)
+                with torch.no_grad():
+                    norm.weight.copy_(child.weight)
+                    norm.bias.copy_(child.bias)
+                norm.weight.requires_grad_(child.weight.requires_grad)
+                norm.bias.requires_grad_(child.bias.requires_grad)
+            setattr(module, name, norm)
         else:
             convert_group_norm(child)
     return module

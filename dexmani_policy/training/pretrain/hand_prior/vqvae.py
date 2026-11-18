@@ -21,6 +21,7 @@ from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.hand import load_hand_array
 from dexmani_policy.datasets.split import format_split_summary, split_episodes
 from dexmani_policy.training.config import check_fresh_output, load_config, normalize_output_dir
+from dexmani_policy.training.data import record_training_data, use_policy_split
 from dexmani_policy.training.optimization import build_scheduler, clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
@@ -38,6 +39,7 @@ def prepare_hand_data(cfg):
         buffer.episode_groups, seed=cfg.dataset.seed,
         val_episodes=cfg.dataset.val_episodes, max_train_episodes=cfg.dataset.max_train_episodes,
     )
+    record_training_data(cfg, buffer, train, val)
 
     train_hand = load_hand_array(buffer, train)
     val_hand = load_hand_array(buffer, val) if val.any() else None
@@ -198,6 +200,7 @@ def train(cfg):
                 "normalizer_state_dict": normalizer.state_dict(),
                 "model_config": vqvae.model_config,
                 "metrics": metrics,
+                "training_data": OmegaConf.to_container(cfg.training_data),
             }
             for checkpoint_path in checkpoint_paths:
                 with atomic_path(checkpoint_path) as temporary:
@@ -213,10 +216,14 @@ def train(cfg):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="pretrain/hand_prior/vqvae", help="Config name or relative path under dexmani_policy/configs")
+    parser.add_argument("--policy-config", help="Read the data split from a resolved policy YAML")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. vq_vae.device=cpu")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    train(load_config(args.config, args.overrides))
+    cfg = load_config(args.config, args.overrides)
+    if args.policy_config is not None:
+        use_policy_split(cfg, args.policy_config)
+    train(cfg)
 
 
 if __name__ == "__main__":
