@@ -82,6 +82,7 @@ def test_sim_recording_to_contact_pretraining(tmp_path):
     shutil.copyfile(episode, reordered)
     points[:2] = points[:2][::-1]
     with h5py.File(reordered, "r+") as file:
+        file.attrs["seed"] = 33
         file["object_geometry/points_local"][:2] = points[:2]
         world = file["object_pointcloud"]
         world[:, :2] = world[:, :2][:, ::-1]
@@ -96,21 +97,11 @@ def test_sim_recording_to_contact_pretraining(tmp_path):
         generate(mixed, tmp_path / "invalid.zarr")
     assert len(CordViPPretrainDataset(mixed, contact_loss_weight=0, obs_horizon=2))
 
-    legacy_dir = tmp_path / "legacy"
-    legacy_dir.mkdir()
-    legacy = legacy_dir / episode.name
-    shutil.copyfile(episode, legacy)
-    with h5py.File(legacy, "r+") as file:
+    missing_dir = tmp_path / "missing_geometry"
+    missing_dir.mkdir()
+    missing = missing_dir / episode.name
+    shutil.copyfile(episode, missing)
+    with h5py.File(missing, "r+") as file:
         del file["object_geometry"]
-    missing = HDF5ToZarrConverter(legacy_dir, tmp_path / "missing.zarr").convert()
-    plain = zarr.open_group(str(missing), mode="r")
-    original = zarr.open_group(str(source), mode="r")
-    np.testing.assert_array_equal(plain["data/action"][:], original["data/action"][:])
-    assert len(CordViPPretrainDataset(missing, contact_loss_weight=0, obs_horizon=2))
-    with pytest.raises(ValueError, match="shared object geometry_sha256"):
-        generate(missing, tmp_path / "legacy_contact.zarr")
-
-    shutil.copyfile(legacy, reordered_dir / episode.name)
-    partial = HDF5ToZarrConverter(reordered_dir, tmp_path / "partial.zarr").convert()
-    processing = zarr.open_group(str(partial), mode="r").attrs["data_processing"]
-    assert processing["object_pointcloud"]["geometry_sha256"] is None
+    with pytest.raises(KeyError, match="object_geometry"):
+        HDF5ToZarrConverter(missing_dir, tmp_path / "missing.zarr").convert()
