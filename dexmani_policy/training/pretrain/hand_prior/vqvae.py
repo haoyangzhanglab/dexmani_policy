@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from math import isfinite
 
-import numpy as np
 import torch
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.agents.hand_prior.codebook import codebook_distances
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
@@ -46,16 +46,24 @@ def prepare_hand_data(cfg):
     normalizer = LinearNormalizer()
     normalizer.fit_field(
         "hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)),
-        check_values=False,
     )
     logger.info(
         "VQ %s; train frames=%d", format_split_summary(buffer, train, val), len(train_hand),
     )
     logger.info("Hand normalization: fitted from train episodes only")
-    train_hand = normalizer["hand"].normalize(train_hand).numpy()
+    train_hand = normalizer["hand"].normalize(train_hand)
     if val_hand is not None:
-        val_hand = normalizer["hand"].normalize(val_hand).numpy()
+        val_hand = normalizer["hand"].normalize(val_hand)
     return train_hand, val_hand, normalizer
+
+
+def hand_batches(hand, batch_size, device, *, shuffle=False, generator=None):
+    sampler = RandomSampler(hand, generator=generator) if shuffle else SequentialSampler(hand)
+    # Treat each list of indices as one tensor lookup and bypass per-row collation.
+    return DataLoader(
+        hand, batch_size=None, sampler=BatchSampler(sampler, batch_size, drop_last=False),
+        pin_memory=device.type == "cuda", generator=generator,
+    )
 
 
 @torch.no_grad()
@@ -64,13 +72,13 @@ def evaluate_vq(vqvae, loader, device) -> float:
     prototypes = build_hand_prototypes(vqvae)
     lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
     count = 0
-    for (batch,) in loader:
+    for batch in loader:
         batch = batch.to(device, non_blocking=True)
         count += batch.shape[0]
         distances = codebook_distances(batch, prototypes)
         lookup_sum += distances.amin(-1).double().square().sum()
     lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
-    if not np.isfinite(lookup_mse):
+    if not isfinite(lookup_mse):
         raise FloatingPointError("Non-finite lookup_mse during VQ evaluation")
     return lookup_mse
 
@@ -93,20 +101,11 @@ def train(cfg):
     checkpoint_dir.mkdir(parents=True)
     logger.info("VQ run: %s", output_dir)
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
-    train_ds = TensorDataset(torch.from_numpy(train_norm))
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=recipe.batch_size,
-        shuffle=True,
-        drop_last=False,
-        pin_memory=device.type == "cuda",
-    )
+    train_loader = hand_batches(train_norm, recipe.batch_size, device, shuffle=True)
     val_loader = None
     if val_norm is not None:
-        val_loader = DataLoader(
-            TensorDataset(torch.from_numpy(val_norm)),
-            batch_size=codebook_chunk_size(recipe.codebook_size ** recipe.num_groups),
-            pin_memory=device.type == "cuda",
+        val_loader = hand_batches(
+            val_norm, codebook_chunk_size(recipe.codebook_size ** recipe.num_groups), device,
             generator=torch.Generator().manual_seed(recipe.seed),
         )
     vqvae = HandVQVAE(
@@ -140,7 +139,7 @@ def train(cfg):
         vqvae.train()
         sums = torch.zeros(3, device=device, dtype=torch.float64)
         train_count = 0
-        for (batch,) in train_loader:
+        for batch in train_loader:
             batch = batch.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             recon_loss, commitment_loss, recon_mse = vqvae(batch)

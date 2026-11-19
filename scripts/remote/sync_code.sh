@@ -1,30 +1,21 @@
 #!/usr/bin/env bash
-# Upload a source snapshot into an explicitly named empty directory.
+# Upload a source snapshot into a new directory.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-HOST=""
-DEST=""
-DRY_RUN=()
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --host) HOST="${2:?--host requires a value}"; shift 2 ;;
-        --dest) DEST="${2:?--dest requires an absolute directory}"; shift 2 ;;
-        --dry-run) DRY_RUN=(--dry-run); shift ;;
-        *) echo "Usage: sync_code.sh --host HOST --dest ABSOLUTE_DIRECTORY [--dry-run]" >&2; exit 1 ;;
-    esac
-done
-[[ -n "$HOST" && "$DEST" == /* && "$DEST" != / ]] || { echo "Explicit --host and absolute --dest are required" >&2; exit 1; }
-printf -v dest_q '%q' "$DEST"
-ssh "$HOST" "bash -s -- $dest_q" <<'BASH'
+HOST="${1:-}"
+DEST="${2:-}"
+DEST="${DEST%/}"
+[[ $# -eq 2 && -n "$HOST" && "$DEST" == /* && "$DEST" != / ]] || {
+    echo "Usage: sync_code.sh HOST ABSOLUTE_DIRECTORY" >&2; exit 1;
+}
+printf -v destination_q '%q' "$DEST"
+ssh "$HOST" "bash -s -- $destination_q" <<'BASH'
 set -euo pipefail
-if [[ -e "$1" ]]; then
-    [[ -d "$1" && -z "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
-        echo "Source destination must be empty: $1" >&2; exit 1;
-    }
-fi
+mkdir -p -- "$(dirname -- "$1")"
+mkdir -- "$1"
 BASH
-rsync -azs --progress "${DRY_RUN[@]}" \
+rsync -azs --progress \
     --exclude='.git/' --exclude='__pycache__/' --exclude='*.py[cod]' --exclude='*.so' \
     --exclude='build/' --exclude='dist/' --exclude='*.egg-info/' --exclude='*.egg' \
     --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.ruff_cache/' --exclude='.mypy_cache/' \
@@ -34,4 +25,4 @@ rsync -azs --progress "${DRY_RUN[@]}" \
     --exclude='/data' --exclude='/robot_data' --exclude='/experiments' \
     --exclude='/wandb' --exclude='/_wandb' \
     --exclude='/outputs' --exclude='/logs' --exclude='/results' --exclude='/bin' \
-    -- "$PROJECT_ROOT/" "$HOST:${DEST%/}/"
+    -- "$PROJECT_ROOT/" "$HOST:$DEST/"

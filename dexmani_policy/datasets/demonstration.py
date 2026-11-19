@@ -7,12 +7,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int
-from dexmani_policy.common.image_util import (
-    preprocess_rgb_eval,
-    preprocess_rgb_train,
-    validate_rgb_preprocessing,
-)
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS
+from dexmani_policy.common.image_util import preprocess_rgb_train, validate_rgb_preprocessing
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.sampler import SequenceSampler
@@ -23,7 +19,7 @@ from dexmani_policy.datasets.transforms import AUGMENTATION_SPECS, PointCoordina
 class DemonstrationDataset(torch.utils.data.Dataset):
     def __init__(
         self,
-        zarr_path: str,
+        zarr_path: str | Path,
         *,
         sensor_modalities: list[str],
         obs_horizon: int,
@@ -127,26 +123,33 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         }
 
     def __getitem__(self, idx):
-        sample = self.sampler.sample_sequence(idx)
+        return self._prepare_sample(self.sampler.sample_sequence(idx))
+
+    def __getitems__(self, indices):
+        # Preserve per-item hooks supplied by dataset and sampler subclasses.
+        if type(self).__getitem__ is not DemonstrationDataset.__getitem__ or type(self.sampler) is not SequenceSampler:
+            return [self[idx] for idx in indices]
+        return [self._prepare_sample(sample) for sample in self.sampler.sample_batch(indices)]
+
+    def _prepare_sample(self, sample):
         data = self.sample_to_data(sample)
-        # EpisodeStore reads own their storage, so augmentation can run in place.
+        # Each sample has a separate writable row range for in-place augmentation.
         for modality, augmentors in self.augmentors.items():
             values = data["obs"][modality]
             for augmentor in augmentors:
                 if np.random.random() <= augmentor.prob:
                     augmentor.augment(values)
         if "rgb" in data["obs"]:
+            rgb = data["obs"]["rgb"]
             if self.rgb_preprocess_size is not None:
                 data["obs"]["rgb"] = preprocess_rgb_train(
-                    data["obs"]["rgb"],
+                    rgb,
                     resize_hw=self.rgb_preprocess_size,
                     random_crop_hw=self.rgb_random_crop_size,
                     color_augmentation=self.rgb_color_aug,
                 )
             else:
-                data["obs"]["rgb"] = preprocess_rgb_eval(
-                    data["obs"]["rgb"], resize_hw=None, center_crop_hw=None,
-                )
+                data["obs"]["rgb"] = np.ascontiguousarray(rgb.transpose(0, 3, 1, 2))
 
         return dict_apply(data, torch.as_tensor)
 

@@ -24,7 +24,7 @@ class AdapTacDataset(DemonstrationDataset):
 
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
-        query = int(self.sampler.sample_source_rows(idx)[self.action_start_index])
+        query = self.sampler.sample_source_row(idx, self.action_start_index)
         episode_ends = self.episode_store.episode_ends
         end = int(episode_ends[np.searchsorted(episode_ends, query, side="right")])
         future_steps = self.horizon - self.action_start_index

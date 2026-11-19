@@ -62,41 +62,21 @@ class PointNetPatchEmbedding(nn.Module):
             self.patch_size,
             self.fps_random_config,
             self.training,
-            knn_backend="torch",
+            torch_knn=True,
         )
         patch_features = index_points(pointcloud, neighbors)
         patch_features[..., :3].sub_(centers.unsqueeze(2))
         return self.patch_encoder(patch_features), centers
 
 
-class PatchDropout(nn.Module):
-    """Randomly drop patch tokens during training."""
-
-    def __init__(self, prob):
-        super().__init__()
-        if not 0 <= prob < 1.0:
-            raise ValueError("patch dropout probability must be in [0, 1)")
-        self.prob = prob
-
-    def forward(self, x):
-        if not self.training or self.prob == 0.0:
-            return x, None
-
-        batch_size, num_tokens, _ = x.shape
-        num_keep = max(1, int(num_tokens * (1 - self.prob)))
-        scores = torch.randn(batch_size, num_tokens, device=x.device)
-        indices = scores.topk(num_keep, dim=-1).indices
-        return index_points(x, indices), indices
-
-
 class RandomFourierPositionEmbedding3D(nn.Module):
     """Fourier feature encoding of 3D coordinates (adapted from SAM)."""
 
-    def __init__(self, num_pos_feats=64, scale=1.0):
+    def __init__(self, num_pos_feats):
         super().__init__()
         self.register_buffer(
             "positional_encoding_gaussian_matrix",
-            scale * torch.randn((3, num_pos_feats)),
+            torch.randn((3, num_pos_feats)),
         )
 
     def forward(self, coords):
@@ -139,7 +119,9 @@ class Uni3DEncoder(nn.Module):
         self.out_proj = nn.Linear(transformer_dim, embed_dim)
         self.pe_layer = RandomFourierPositionEmbedding3D(embed_dim // 2)
 
-        self.patch_dropout = PatchDropout(patch_dropout)
+        if not 0 <= patch_dropout < 1.0:
+            raise ValueError("patch dropout probability must be in [0, 1)")
+        self.patch_dropout = patch_dropout
 
         # Image-embedding parameters are unused by the point-cloud encoder.
         for name, p in self.transformer.named_parameters():
@@ -189,8 +171,12 @@ class Uni3DEncoder(nn.Module):
         x = patch_embed + pos_embed
 
         if self.training:
-            x, keep = self.patch_dropout(x)
-            if keep is not None:
+            if self.patch_dropout != 0.0:
+                batch_size, num_tokens, _ = x.shape
+                num_keep = max(1, int(num_tokens * (1 - self.patch_dropout)))
+                scores = torch.randn(batch_size, num_tokens, device=x.device)
+                keep = scores.topk(num_keep, dim=-1).indices
+                x = index_points(x, keep)
                 centers = index_points(centers, keep)
             x = self.transformer.pos_drop(x)
 

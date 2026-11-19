@@ -1,6 +1,8 @@
 import torch
 from torch.optim.swa_utils import get_ema_multi_avg_fn
 
+from dexmani_policy.training.logging import accumulate_metrics
+
 
 def restore_optimizer(optimizer, state):
     groups, saved = optimizer.param_groups, state["param_groups"]
@@ -12,11 +14,22 @@ def restore_optimizer(optimizer, state):
     optimizer.load_state_dict(state)
 
 
-def normalize_gradients(parameters, sample_count):
-    # Backward accumulated sum(n_i * L_i); divide before measuring or clipping.
-    for parameter in parameters:
-        if parameter.grad is not None:
-            parameter.grad.div_(sample_count)
+def backward_microbatches(iterator, group_size, parameters, forward, *, device, log_metrics):
+    finite_loss = torch.ones((), dtype=torch.bool, device=device)
+    totals: dict[str, torch.Tensor | float] = {}
+    sample_count = 0
+    for _ in range(group_size):
+        loss, metrics, count = forward(next(iterator))
+        sample_count += count
+        finite_loss.logical_and_(torch.isfinite(loss.detach()))
+        (loss * count if group_size > 1 and count != 1 else loss).backward()
+        if log_metrics:
+            accumulate_metrics(totals, metrics, weight=count)
+    if group_size > 1:
+        for parameter in parameters:
+            if parameter.grad is not None:
+                parameter.grad.div_(sample_count)
+    return finite_loss, {key: value / sample_count for key, value in totals.items()}
 
 
 def clip_gradients(parameters, finite_loss, max_grad_norm=0.0, *, step):
@@ -37,15 +50,14 @@ def build_optimizer(
     betas: tuple[float, float] = (0.95, 0.999),
     eps: float = 1e-8,
 ) -> torch.optim.AdamW:
-    """Require each trainable parameter once and retain its name for resume checks."""
+    """Check trainable parameter coverage and retain parameter names for resume."""
     obs_lr = obs_lr if obs_lr is not None else lr
     obs_weight_decay = obs_weight_decay if obs_weight_decay is not None else weight_decay
     groups = model.optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
     groups = [group for group in groups if group["params"]]
     names = {id(param): name for name, param in model.named_parameters() if param.requires_grad}
-    param_ids = [id(param) for group in groups for param in group["params"]]
-    if len(param_ids) != len(set(param_ids)) or set(param_ids) != names.keys():
-        raise ValueError("Optimizer groups must contain every trainable parameter exactly once")
+    if {id(param) for group in groups for param in group["params"]} != names.keys():
+        raise ValueError("Optimizer groups must cover all trainable parameters and only those parameters")
 
     for group in groups:
         group["param_names"] = [names[id(p)] for p in group["params"]]

@@ -37,8 +37,6 @@ def build_hand_prototypes(model: HandVQVAE) -> torch.Tensor:
 def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=False) -> int:
     """Decode and order a complete VQ checkpoint, then publish its runtime table."""
     output = Path(output_path)
-    if output.suffix != ".npz":
-        raise ValueError("Codebook path must use the .npz suffix")
     if output.exists() and not overwrite:
         raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
 

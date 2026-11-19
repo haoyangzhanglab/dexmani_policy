@@ -20,7 +20,6 @@ def split_episodes(
     # A recorded source can contain several stored continuous segments.
     groups = {source: index for index, source in enumerate(dict.fromkeys(episode_groups))}
     n_groups = len(groups)
-    positive_int(n_groups, "number of source groups")
     if max_train_episodes is not None:
         positive_int(max_train_episodes, "max_train_episodes")
     if type(val_episodes) is not int or val_episodes < 0:

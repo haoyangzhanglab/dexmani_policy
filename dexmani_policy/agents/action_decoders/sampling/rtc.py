@@ -35,9 +35,7 @@ def denoised_estimate(output, sample, alpha, sigma, prediction_type):
         return output
     if prediction_type == "epsilon":
         return (sample - sigma * output) / alpha
-    if prediction_type == "v_prediction":
-        return alpha * sample - sigma * output
-    raise NotImplementedError(prediction_type)
+    return alpha * sample - sigma * output
 
 
 def prefix_correction(denoised, sample, prefix, weights, offset):

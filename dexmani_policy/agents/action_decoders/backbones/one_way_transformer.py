@@ -55,7 +55,6 @@ class OneWayAttentionBlock(nn.Module):
         embedding_dim: int,
         num_heads: int,
         mlp_dim: int = 2048,
-        activation: type[nn.Module] = nn.ReLU,
         attention_downsample_rate: int = 2,
     ):
         super().__init__()
@@ -69,7 +68,7 @@ class OneWayAttentionBlock(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Linear(embedding_dim, mlp_dim),
-            activation(),
+            nn.ReLU(),
             nn.Linear(mlp_dim, embedding_dim),
         )
         self.norm3 = nn.LayerNorm(embedding_dim)

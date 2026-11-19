@@ -4,10 +4,10 @@ import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from torch import nn
 from torch.nn import functional as F
-from timm.models.vision_transformer import Mlp
+from timm.layers import GELUTanh, Mlp
 
 from dexmani_policy.agents.action_decoders.backbones.modules import (
-    DiTTimestepEmbedding, approximate_gelu, initialize_linear,
+    DiTTimestepEmbedding, initialize_linear,
 )
 from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
@@ -40,7 +40,7 @@ class DynamicsBlock(nn.Module):
         self.mlp = Mlp(
             in_features=hidden_size,
             hidden_features=int(hidden_size * mlp_ratio),
-            act_layer=approximate_gelu,
+            act_layer=GELUTanh,
             drop=0,
         )
         self.adaln_modulation = nn.Sequential(

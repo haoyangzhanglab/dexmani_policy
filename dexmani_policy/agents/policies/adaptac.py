@@ -6,10 +6,7 @@ import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.force_transformer import ForceTransformer
-from dexmani_policy.agents.action_decoders.backbones.unet1d import (
-    ConditionalUNet1D,
-    validate_unet_horizon,
-)
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
     ForceGuidedFusion,
@@ -110,7 +107,6 @@ class AdapTac(Policy):
             raise ValueError("AdapTac requires 19D joint state/actions")
         if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
             raise ValueError("force_loss_weight must be finite and nonnegative")
-        validate_unet_horizon(horizon, down_dims)
 
         obs_encoder = AdapTacEncoder(
             tactile_encoder=tactile_encoder,
@@ -123,6 +119,7 @@ class AdapTac(Policy):
         )
 
         backbone = ConditionalUNet1D(
+            horizon=horizon,
             input_dim=action_dim,
             context_dim=feature_dim + n_obs_steps * state_out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
@@ -190,7 +187,7 @@ class AdapTac(Policy):
         return torch.cat((fused, state), dim=-1)
 
     def compute_loss(
-        self, batch: dict, *, log_metrics: bool = True, **kwargs,
+        self, batch: dict, *, log_metrics: bool = True, force_loss_scale: float = 1.0, **kwargs,
     ) -> tuple[torch.Tensor, dict]:
         features, current_force, force_condition = self._encode_force_inputs(batch["obs"])
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
@@ -205,6 +202,8 @@ class AdapTac(Policy):
             self._encode_actions(batch["action"]),
             log_metrics=log_metrics, **kwargs,
         )
+        if force_loss_scale != 1.0:
+            force_loss = force_loss * force_loss_scale
         weighted_force_loss = self.force_loss_weight * force_loss
         loss = action_loss + weighted_force_loss
         if log_metrics:

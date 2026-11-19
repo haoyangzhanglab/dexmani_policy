@@ -28,8 +28,7 @@ def save_checkpoint(path: str | Path, checkpoint: Checkpoint) -> Path:
 def load_checkpoint(path: str | Path) -> Checkpoint:
     import torch
 
-    # Project checkpoints contain trusted training state, not just tensors.
-    return Checkpoint(**torch.load(path, map_location="cpu", weights_only=False, mmap=True))
+    return Checkpoint(**torch.load(path, map_location="cpu", weights_only=True, mmap=True))
 
 
 def policy_state_dict(model) -> dict:

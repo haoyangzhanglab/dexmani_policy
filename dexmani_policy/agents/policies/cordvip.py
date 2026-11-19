@@ -3,10 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import (
-    ConditionalUNet1D,
-    validate_unet_horizon,
-)
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.interaction.correspondence import (
     ContactCoordinationEncoder,
@@ -55,13 +52,12 @@ class CordViP(Policy):
     ) -> None:
         if action_dim != 19:
             raise ValueError("CordViP uses XYZ and arm7+hand12 state/actions")
-        validate_unet_horizon(horizon, down_dims)
 
         obs_encoder = CordViPEncoder(n_obs_steps)
 
         backbone = ConditionalUNet1D(
             action_dim, obs_encoder.out_dim, diffusion_step_embed_dim,
-            down_dims, kernel_size, n_groups, cond_predict_scale,
+            down_dims, kernel_size, n_groups, cond_predict_scale, horizon=horizon,
         )
 
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)

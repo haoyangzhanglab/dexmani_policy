@@ -5,10 +5,7 @@ from typing import Literal
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import (
-    ConditionalUNet1D,
-    validate_unet_horizon,
-)
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
@@ -79,8 +76,6 @@ class DP(Policy):
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
     ) -> None:
-        validate_unet_horizon(horizon, down_dims)
-
         obs_encoder = DPEncoder(
             rgb_backbone_name,
             state_dim,
@@ -91,6 +86,7 @@ class DP(Policy):
         )
 
         backbone = ConditionalUNet1D(
+            horizon=horizon,
             input_dim=action_dim,
             context_dim=obs_encoder.out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,

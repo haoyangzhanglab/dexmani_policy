@@ -18,7 +18,7 @@ class Augmentation:
     """In-place transform; the dataset applies probability gating to owned sample arrays."""
 
     def __init__(self, prob=1.0):
-        if not np.isfinite(prob) or not 0 <= prob <= 1:
+        if not 0 <= prob <= 1:
             raise ValueError("augmentation probability must be finite in [0,1]")
         self.prob = prob
 
@@ -90,9 +90,6 @@ class PointDropout(Augmentation):
             return
 
         T, N = x.shape[:2]
-        if N == 0:
-            return
-
         for t in range(T):
             ratio = np.random.uniform(0.0, self.max_dropout_ratio)
             drop_mask = np.random.random(N) <= ratio

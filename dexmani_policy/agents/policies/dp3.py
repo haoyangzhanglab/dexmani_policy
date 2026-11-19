@@ -3,10 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import (
-    ConditionalUNet1D,
-    validate_unet_horizon,
-)
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import MultiStagePointNet, PointNet
@@ -89,8 +86,6 @@ class DP3(Policy):
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
     ) -> None:
-        validate_unet_horizon(horizon, down_dims)
-
         obs_encoder = DP3Encoder(
             encoder_type,
             pc_dim,
@@ -104,6 +99,7 @@ class DP3(Policy):
         )
 
         backbone = ConditionalUNet1D(
+            horizon=horizon,
             input_dim=action_dim,
             context_dim=obs_encoder.out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,

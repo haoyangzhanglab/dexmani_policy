@@ -1,5 +1,6 @@
 import copy
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
+from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy_state_dict, save_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
@@ -21,10 +23,10 @@ from dexmani_policy.training.data import (
     record_prior_data, record_training_data, restore_data_records,
 )
 from dexmani_policy.training.logging import (
-    ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
+    ExperimentLogger, print_param_count, print_training_recipe, to_log_scalars,
 )
 from dexmani_policy.training.optimization import (
-    build_optimizer, build_scheduler, clip_gradients, normalize_gradients, restore_optimizer,
+    backward_microbatches, build_optimizer, build_scheduler, clip_gradients, restore_optimizer,
 )
 from dexmani_policy.training.runtime import training_signals
 
@@ -172,13 +174,12 @@ class PolicyTrainer:
         self.trainable_parameters = [
             param for group in self.optimizer.param_groups for param in group["params"]
         ]
-        self.last_grad_norm = None
         self.milestone_steps = {
             (pct * self.total_train_steps + 99) // 100 for pct in (20, 40, 60, 80, 100)
         }
 
         print_param_count(model)
-        print_training_recipe(self.cfg, batches_per_epoch=self.batches_per_epoch)
+        print_training_recipe(self.cfg, updates_per_epoch=self.updates_per_epoch)
         self.logger = ExperimentLogger(cfg, resuming=checkpoint is not None)
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
 
@@ -193,8 +194,8 @@ class PolicyTrainer:
     def close(self):
         self.logger.close()
 
-    def optimizer_step(self, finite_loss: torch.Tensor) -> None:
-        self.last_grad_norm = clip_gradients(
+    def optimizer_step(self, finite_loss: torch.Tensor) -> torch.Tensor:
+        grad_norm = clip_gradients(
             self.trainable_parameters, finite_loss, self.max_grad_norm, step=self.global_step,
         )
         self.optimizer.step()
@@ -202,14 +203,16 @@ class PolicyTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         if self.ema_updater is not None:
             self.ema_updater.step(self.global_step)
+        return grad_norm
 
-    def train_microbatch(
+    def _forward_microbatch(
         self,
         batch: dict[str, Any],
         *,
-        loss_weight: int = 1,
-        log_metrics: bool = True,
+        log_metrics: bool,
+        **loss_options,
     ):
+        count = batch["action"].shape[0]
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = self.model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(
@@ -217,10 +220,26 @@ class PolicyTrainer:
             dtype=torch.bfloat16,
             enabled=self.use_bfloat16,
         ):
-            raw_loss, log_dict = self.model(batch, log_metrics=log_metrics, **loss_kwargs)
+            loss, metrics = self.model(batch, log_metrics=log_metrics, **loss_kwargs, **loss_options)
+        return loss, metrics, count
 
-        (raw_loss if loss_weight == 1 else raw_loss * loss_weight).backward()
-        return raw_loss.detach(), log_dict
+    def _backward_group(self, iterator, group_size, *, log_metrics):
+        if group_size > 1 and isinstance(self.model, AdapTac):
+            batches = [next(iterator) for _ in range(group_size)]
+            counts = [(len(batch["action"]), int(batch["future_force_valid"].sum())) for batch in batches]
+            sample_total = sum(count for count, _ in counts)
+            valid_total = sum(valid for _, valid in counts)
+            # The outer sample weight count / sample_total becomes valid / valid_total for the force term.
+            scales = iter(sample_total * valid / (count * valid_total) for count, valid in counts)
+            iterator = iter(batches)
+
+            def forward(batch):
+                return self._forward_microbatch(batch, log_metrics=log_metrics, force_loss_scale=next(scales))
+        else:
+            forward = partial(self._forward_microbatch, log_metrics=log_metrics)
+        return backward_microbatches(
+            iterator, group_size, self.trainable_parameters, forward, device=self.device, log_metrics=log_metrics,
+        )
 
     def save_checkpoint(self):
         global_step = self.global_step
@@ -240,15 +259,14 @@ class PolicyTrainer:
             temporary.symlink_to(checkpoint_path.name)
         print(f"Saved {checkpoint_path}")
 
-    def log_step(self, group_metrics, pbar, *, lr, epoch):
+    def log_step(self, group_metrics, pbar, *, lr, epoch, grad_norm):
         metrics = {
             "train/lr": lr,
             "train/epoch": epoch,
+            "train/grad_norm": grad_norm,
         }
-        if self.last_grad_norm is not None:
-            metrics["train/grad_norm"] = self.last_grad_norm
-            if self.max_grad_norm > 0:
-                metrics["train/clip_ratio"] = self.last_grad_norm / self.max_grad_norm
+        if self.max_grad_norm > 0:
+            metrics["train/clip_ratio"] = grad_norm / self.max_grad_norm
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
         metrics = to_log_scalars(metrics)
         pbar.set_postfix(
@@ -274,9 +292,6 @@ class PolicyTrainer:
         if self.global_step:
             epoch = self.global_step // self.updates_per_epoch
             print(f"Resuming at step {self.global_step}, logical epoch {epoch}")
-
-        if self.ema_model is not None:
-            self.ema_model.eval()
 
         initial_step = self.global_step
         self.model.train()
@@ -304,33 +319,13 @@ class PolicyTrainer:
                             or (self.global_step + 1) % self.log_interval_steps == 0
                             or self.global_step + 1 == stop_step
                         )
-                        finite_loss = torch.ones((), dtype=torch.bool, device=self.device)
-                        group_metric_sums: dict[str, torch.Tensor | float] = {}
-                        sample_count = 0
-                        for _ in range(group_size):
-                            batch = next(iterator)
-                            count = batch["action"].shape[0]
-                            sample_count += count
-                            loss, log_dict = self.train_microbatch(
-                                batch, loss_weight=count if group_size > 1 else 1,
-                                log_metrics=record_group,
-                            )
-                            finite_loss.logical_and_(torch.isfinite(loss))
-                            if record_group:
-                                accumulate_metrics(group_metric_sums, log_dict, weight=count)
-
-                        if group_size > 1:
-                            normalize_gradients(self.trainable_parameters, sample_count)
+                        finite_loss, group_metrics = self._backward_group(iterator, group_size, log_metrics=record_group)
                         lr = self.optimizer.param_groups[0]["lr"]
-                        self.optimizer_step(finite_loss)
+                        grad_norm = self.optimizer_step(finite_loss)
                         self.global_step += 1
                         pbar.update(1)
                         if record_group:
-                            group_metrics = {
-                                key: value / sample_count
-                                for key, value in group_metric_sums.items()
-                            }
-                            self.log_step(group_metrics, pbar, lr=lr, epoch=epoch)
+                            self.log_step(group_metrics, pbar, lr=lr, epoch=epoch, grad_norm=grad_norm)
 
                         should_stop = stop.requested or self.global_step >= stop_step
                         if self.global_step in self.milestone_steps or should_stop:

@@ -4,6 +4,7 @@ import json
 import math
 import random
 import shutil
+import sys
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,17 +17,18 @@ import zarr
 from omegaconf import OmegaConf
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from dexmani_policy.agents.action_decoders.backbones import ditx, sat_action_io
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
 from dexmani_policy.agents.action_decoders.ode import ODE
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer
 from dexmani_policy.agents.obs_encoder.rgb.resnet import convert_group_norm
 from dexmani_policy.agents.policies import r3d
+from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.common import config as common_config, io_util
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
@@ -37,7 +39,7 @@ from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.afro import AFROPretrainDataset
 from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
-from dexmani_policy.datasets.preprocess.contact_map import compute_contact_map
+from dexmani_policy.datasets.preprocess.contact_map import batched_contact_maps, compute_contact_map
 from dexmani_policy.datasets.preprocess.contact_map import generate as generate_contacts
 from dexmani_policy.datasets.sampler import SequenceSampler
 from dexmani_policy.datasets.variants.ode import ODEDataset
@@ -56,6 +58,7 @@ from dexmani_policy.training.initialization import build_policy
 from dexmani_policy.training.optimization import clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.vqvae import train as train_vq
 from dexmani_policy.training.pretrain.obs import common as obs_training
+from dexmani_policy.training.pretrain.obs.afro import AFRO
 from dexmani_policy.training.pretrain.obs.cordvip import CordViP
 from dexmani_policy.training.resume import prepare_resume
 from dexmani_policy.training.trainer import build_trainer, run_trainer
@@ -270,8 +273,6 @@ def test_ddim_config_and_checkpoint_overrides(small_dp3_checkpoint):
         load_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
     with pytest.raises(ValueError, match="leading DDIM"):
         rollout.evaluate_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
-    with pytest.raises(ValueError, match="leading DDIM"):
-        selection.run_pipeline([small_dp3_checkpoint], inference_steps=1, device="cpu")
     for name in ("ode", "maniflow"):
         cfg = load_config(name, ["eval.inference_steps=1"])
         assert resolve_inference_settings(cfg)[1] == 1
@@ -469,7 +470,7 @@ def test_same_source_pretraining_carries_real_group_budget(tmp_path, make_demo):
     copied = tmp_path / "copy" / path.name
     shutil.copytree(path, copied)
     record_prior_data(policy, dataset, "external.pt", dict(record, source=str(copied)))
-    record_prior_data(policy, dataset, "unknown.pt")
+    record_prior_data(policy, dataset, "unknown.pt", {"source": None})
     assert not policy.prior_data[-2].budget_verified
     assert policy.prior_data[-1] == {"source": None, "artifact": "unknown.pt", "budget_verified": False}
 
@@ -686,6 +687,12 @@ def test_window_boundaries_and_short_observations(segments, horizon, before, aft
         assert sample["rgb"].dtype == np.uint8
         sample["action"][:] = -1
         np.testing.assert_array_equal(sampler.sample_sequence(index)["action"], fields["action"][rows])
+
+    indices = [*reversed(range(len(expected_rows))), 0, len(expected_rows) - 1]
+    for index, sample in zip(indices, sampler.sample_batch(indices), strict=True):
+        for key, value in sampler.sample_sequence(index).items():
+            np.testing.assert_array_equal(sample[key], value)
+        sample["action"][:] = -1
 
 
 def test_real_sources_split_together_and_normalize_train_only(segments):
@@ -998,15 +1005,17 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         path = tmp_path / "codebook.npz"
         poses = np.linspace(-1, 1, 36, dtype=np.float32).reshape(3, 12)
         scale, offset = torch.full((12,), 2.0), torch.full((12,), -0.5)
+        training_data = json.dumps({"source": str(make_demo("codebook_source")), "train_source_episodes": [0]})
         np.savez(
             path, sorted_hand_poses=poses, hand_normalizer_scale=scale.numpy(), hand_normalizer_offset=offset.numpy(),
+            training_data=training_data,
         )
         cfg.initialization.codebook = str(path)
         invalid_cfg = copy.deepcopy(cfg)
         invalid_path = tmp_path / "invalid_codebook.npz"
         np.savez(
             invalid_path, sorted_hand_poses=poses, hand_normalizer_scale=np.zeros(12, dtype=np.float32),
-            hand_normalizer_offset=offset.numpy(),
+            hand_normalizer_offset=offset.numpy(), training_data=training_data,
         )
         invalid_cfg.initialization.codebook = str(invalid_path)
         with pytest.raises(ValueError, match="Invalid affine parameters"):
@@ -1524,6 +1533,56 @@ def test_sample_weighted_updates(tmp_path, monkeypatch, make_demo, count, batch_
         assert float(actual_gradients[0]) == pytest.approx(-2 / 129)
 
 
+@pytest.mark.parametrize("force_weight", [0.0, 0.7])
+def test_adaptac_accumulation_matches_combined_force_and_action_means(tmp_path, monkeypatch, force_weight):
+    class FixedForce(ForceDiffusion):
+        def _training_prediction(self, condition, target):
+            return self.model.weight.expand_as(target), target
+
+    class ActionDecoder(MeanDecoder):
+        def compute_loss(self, condition, target, *, log_metrics):
+            loss = (self.weight + condition - target).square().mean()
+            return loss, {}
+
+    class SmallAdapTac(AdapTac):
+        def __init__(self):
+            Policy.__init__(self, nn.Identity(), ActionDecoder(), 4, 1, 4, 1)
+            Policy.configure_normalizer(self, {"action": 1}, {"action": (1,)})
+            self.force_predictor = FixedForce(MeanDecoder())
+            self.force_fusion = nn.Identity()
+            self.force_loss_weight = force_weight
+
+        def _encode_force_inputs(self, obs):
+            return None, None, None
+
+        def _action_condition(self, features, current_force, prediction):
+            return prediction
+
+    dataset = [
+        {"obs": {}, "action": torch.full((4, 1), action),
+         "future_force": torch.full((4, 1), force), "future_force_valid": torch.arange(4) < valid}
+        for action, force, valid in [(0.5, 0.0, 1), (0.7, 0.0, 1), (0.9, 1.0, 4)]
+    ]
+    model = SmallAdapTac()
+    expected_loss, expected_metrics = model.compute_loss(default_collate(dataset))
+    expected_gradients = torch.autograd.grad(expected_loss, tuple(model.parameters()))
+    updates = []
+
+    def capture_clip(parameters, finite_loss, max_grad_norm=0, *, step):
+        updates.append([p.grad.clone() for p in model.parameters()])
+        return clip_gradients(parameters, finite_loss, max_grad_norm, step=step)
+
+    monkeypatch.setattr(policy_training, "clip_gradients", capture_clip)
+    cfg = training_config(tmp_path, batch_size=2, accumulation=2, updates=1)
+    with closing(policy_training.PolicyTrainer(cfg, model, dataset)) as trainer:
+        trainer.train()
+    assert len(updates) == 1
+    torch.testing.assert_close(updates[0], list(expected_gradients))
+    record = json.loads((tmp_path / "metrics.jsonl").read_text())
+    for key, value in expected_metrics.items():
+        assert record[f"train/{key}"] == pytest.approx(float(value))
+
+
 def test_nonfinite_gradient_rejected():
     parameter = nn.Parameter(torch.zeros(()))
     parameter.grad = torch.tensor(float("inf"))
@@ -1715,13 +1774,33 @@ def test_observation_validation_reports_nonfinite_contact_metric(contact_data):
         obs_training.evaluate(model, validation, 2, torch.device("cpu"), stop=SimpleNamespace(requested=False))
 
 
+def test_afro_validation_reuses_noise_and_preserves_training_rng():
+    model = AFRO({"point_cloud": "identity"})
+    generator = torch.Generator().manual_seed(17)
+    dataset = [{"obs": {"point_cloud": torch.rand(4, 16, 3, generator=generator)}} for _ in range(4)]
+    metrics = []
+    for seed in (42, 112):
+        state = torch.Generator().manual_seed(seed).get_state()
+        torch.set_rng_state(state)
+        metrics.append(obs_training.evaluate(
+            model, dataset, 2, torch.device("cpu"), stop=SimpleNamespace(requested=False),
+        ))
+        torch.testing.assert_close(torch.get_rng_state(), state, rtol=0, atol=0)
+        assert model.training
+    assert metrics[0] == metrics[1]
+
+
 def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch):
     value, directory = output_path
-    store = zarr.open_group(str(contact_data), mode="a")
+    source = contact_data
+    raw = zarr.open_group(str(source), mode="a")
     groups = ["a", "b", "c"]
-    store.attrs.update(format="dexmani.real.canonical", source_episodes=groups)
-    source = tmp_path / "source.zarr"
-    shutil.copytree(contact_data, source)
+    raw.attrs.update(format="dexmani.real.canonical", source_episodes=groups)
+    derived = source.parent / "cordvip" / source.name
+    derived.parent.mkdir()
+    shutil.copytree(source, derived)
+    del raw["data/contact_map"]
+    store = zarr.open_group(str(derived), mode="a")
     store.attrs["source_zarr_path"] = str(source)
     policy = tmp_path / "policy.yaml"
     OmegaConf.save(OmegaConf.create(dict(
@@ -1729,7 +1808,7 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
         dataset=dict(seed=42, val_episodes=1, max_train_episodes=1),
     )), policy)
     args = [
-        "--output-dir", value, "--policy-config", str(policy), "--zarr-path", str(contact_data),
+        "--output-dir", value, "--policy-config", str(policy),
         "--device", "cpu", "--no-wandb", "--max-updates", "1",
         "normalization.joint_state=mean_std", "n_obs_steps=1", "dataloader.num_workers=0", "dataloader.batch_size=2",
         "training.loop.total_train_steps=3", "training.loop.gradient_accumulation_steps=2",
@@ -1742,6 +1821,7 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     assert torch.get_float32_matmul_precision() == "medium"
     saved = load_checkpoint(directory / "checkpoints/latest.pt")
     assert saved.global_step == 1
+    assert saved.effective_config["dataset"]["zarr_path"] == str(derived)
     betas = saved.optimizer_state["param_groups"][0]["betas"]
     assert isinstance(betas, tuple) and betas == (0.95, 0.999)
     assert saved.effective_config["workspace"]["output_dir"] == str(directory)
@@ -1791,13 +1871,13 @@ def test_observation_artifacts(output_path, contact_data, tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="Resume validation source groups mismatch"):
         obs_training.train("cordvip", CordViP, resume_args)
     store.attrs["source_episodes"] = groups
-    store.attrs["source_zarr_path"] = str(contact_data)
+    store.attrs["source_zarr_path"] = str(derived)
     with pytest.raises(ValueError, match="Resume data source mismatch"):
         obs_training.train("cordvip", CordViP, resume_args)
     assert [path.read_bytes() for path in artifacts] == before
 
 
-def test_contact_requires_1024_aligned_points(contact_data, tmp_path):
+def test_contact_requires_aligned_points(contact_data):
     store = zarr.open_group(str(contact_data), mode="a")
     del store["data/contact_map"]
     store.create_dataset("data/contact_map", data=np.zeros((12, 1024), dtype=np.int64))
@@ -1805,19 +1885,36 @@ def test_contact_requires_1024_aligned_points(contact_data, tmp_path):
         CordViPPretrainDataset(contact_data, contact_loss_weight=1)
 
     del store["data/contact_map"]
-    store.create_dataset("data/contact_map", data=np.zeros((12, 1023), dtype=np.float32))
-    with pytest.raises(ValueError, match="Contact labels must match the 1024 object point slots"):
+    store.create_dataset("data/contact_map", data=np.zeros((12, 63), dtype=np.float32))
+    with pytest.raises(ValueError, match="Contact labels must match the object point slots"):
         CordViPPretrainDataset(contact_data, contact_loss_weight=1)
 
-    points = store["data/object_pointcloud"][:, :-1]
+    points = store["data/object_pointcloud"][:, :63]
+    hand = store["data/hand_pointcloud"][:]
+    points[1] = points[0, ::-1]
+    hand[1] = hand[0]
     del store["data/object_pointcloud"]
     store.create_dataset("data/object_pointcloud", data=points)
-    with pytest.raises(ValueError, match="requires 1024 object point slots"):
-        CordViPPretrainDataset(contact_data, contact_loss_weight=1)
-    output = tmp_path / "invalid.zarr"
-    with pytest.raises(ValueError, match="requires 1024 object point slots"):
-        generate_contacts(contact_data, output)
-    assert not output.exists()
+    store["data/hand_pointcloud"][:] = hand
+    output = contact_data.parent / "cordvip" / contact_data.name
+    generate_contacts(contact_data)
+    labelled = zarr.open_group(str(output), mode="r")
+    labels = labelled["data/contact_map"][:]
+    assert labels.shape == (12, 63)
+    np.testing.assert_array_equal(labelled["data/object_pointcloud"][:], points)
+    np.testing.assert_allclose(labels[1], labels[0, ::-1], rtol=1e-6)
+
+    dataset = CordViPPretrainDataset(output, contact_loss_weight=1, obs_horizon=1)
+    sample = dataset[1]
+    torch.testing.assert_close(sample["contact_map"], torch.from_numpy(labels[1:2]))
+    model = CordViP(dict.fromkeys(dataset.sensor_modalities, "identity"), n_obs_steps=1)
+    batch = {
+        "obs": {key: value.unsqueeze(0) for key, value in sample["obs"].items()},
+        "contact_map": sample["contact_map"].unsqueeze(0),
+    }
+    loss, _ = model(batch)
+    loss.backward()
+    assert torch.isfinite(loss)
 
 
 def test_contact_matches_dense_formula():
@@ -1836,6 +1933,13 @@ def test_contact_matches_dense_formula():
     contacts = compute_contact_map(objects, normals, hand, point_chunk_size=7)
     np.testing.assert_allclose(contacts, expected, atol=1e-15)
     np.testing.assert_allclose(contacts[-1], expected[-1], rtol=1e-12, atol=0)
+    batched = batched_contact_maps(
+        np.stack((objects, objects[::-1])),
+        np.stack((normals, normals[::-1])),
+        np.stack((hand, hand)),
+        "cpu",
+    )
+    np.testing.assert_array_equal(batched, np.stack((contacts, contacts[::-1])).astype(np.float32))
 
 
 def test_contact_reads_metadata_and_points_from_same_resolved_source(contact_data, tmp_path, monkeypatch):
@@ -2201,6 +2305,37 @@ def test_stopping_rollout_iteration_closes_env(environments):
     assert environments[0].close_count == 1
 
 
+def test_fast_rollout_preserves_history_and_stops_in_skipped_steps(monkeypatch):
+    monkeypatch.setitem(sys.modules, "dexmani_sim", SimpleNamespace(TACTILE_OBSERVATION_KEYS=("finger_tactile_force",)))
+
+    class CountingEnv(SmallEnv):
+        def __init__(self):
+            super().__init__()
+            self.captured_steps = []
+
+        def step(self, action):
+            self.captured_steps.append(self.action_cnt + 1)
+            return super().step(action)
+
+        def step_physics(self, action, *, collect_tactile):
+            assert not collect_tactile
+            _, reward, done, truncated, info = super().step(action)
+            return None, reward, done, truncated, info
+
+    calls = []
+    for skip in (False, True):
+        env = CountingEnv()
+        runner = SimRunner("test", 1, ["joint_state"], {}, 0.05, skip_intermediate_observations=skip)
+        monkeypatch.setattr(runner, "make_env", lambda *, record_video: env)
+        agent = SmallPolicy()
+        result, = runner.run(agent, seeds=[7], inference_steps=2, action_steps=2)
+        assert result["success"] and result["steps"] == 2 and result["total_steps"] == 3
+        assert env.captured_steps == ([2] if skip else [1, 2, 3])
+        assert env.close_count == 1
+        calls.append(agent.calls)
+    torch.testing.assert_close(calls[0], calls[1], rtol=0, atol=0)
+
+
 def test_step_error_closes_env(environments):
     results = make_runner().run(SmallPolicy(), seeds=[7, 8], inference_steps=2, action_steps=2)
     next(results)
@@ -2242,24 +2377,29 @@ def checkpoints(tmp_path, monkeypatch, environments):
     cfg = {
         "eval": {"use_ema": False, "inference_steps": 2},
         "env_runner": {"_target_": "dexmani_policy.env_runner.sim_runner.SimRunner", "task_name": "test", "env_kwargs": {}},
-        "control_dt_s": 0.05, "normalization_dims": SmallPolicy.normalization_dims, "dataset": {},
+        "control_dt_s": 0.05, "normalization_dims": SmallPolicy.normalization_dims, "dataset": {}, "action_key": "action",
     }
     return [save_checkpoint(tmp_path / f"{step}.pt", Checkpoint(step, {}, {}, {}, cfg)) for step in (1, 2)]
 
 
-def test_selection_and_independent_test(checkpoints, tmp_path):
+@pytest.mark.parametrize("skip_intermediate_observations", [False, True])
+def test_selection_and_independent_test(checkpoints, tmp_path, skip_intermediate_observations):
     path = selection.run_pipeline(
         checkpoints, selection_episodes=2, test_episodes=3, seed=5, device="cpu", output_dir=tmp_path / "eval",
+        skip_intermediate_observations=skip_intermediate_observations,
     )
     record = json.loads(path.read_text())
     assert record["global_step"] == 2
+    assert record["skip_intermediate_observations"] is skip_intermediate_observations
     assert set(record["selection_seeds"]).isdisjoint(record["test_seeds"])
     for candidate in record["candidates"]:
         result = json.loads((path.parent / candidate["result"]).read_text())
         assert result["seeds"] == record["selection_seeds"]
+        assert result["skip_intermediate_observations"] is skip_intermediate_observations
         assert result["completed"] and result["statistics"]["n_success"] == 2
     result = json.loads((path.parent / record["test_result"]).read_text())
     assert result["seeds"] == record["test_seeds"] and result["completed"]
+    assert result["skip_intermediate_observations"] is skip_intermediate_observations
     assert (result["weights"], result["inference_steps"], result["action_steps"]) == ("raw", 2, 2)
     candidates = [
         {"global_step": step, "statistics": {"success_rate": rate, "avg_steps": steps}}
@@ -2270,14 +2410,26 @@ def test_selection_and_independent_test(checkpoints, tmp_path):
 
 def test_fixed_checkpoint_uses_only_test_seeds(checkpoints, tmp_path):
     output = tmp_path / "fixed_eval"
-    path = selection.run_pipeline(
-        checkpoints[:1], selection_episodes=25, test_episodes=3, seed=5, device="cpu", output_dir=output,
-    )
+    with pytest.raises(ValueError, match="at least two distinct checkpoints"):
+        selection.run_pipeline(checkpoints[:1], output_dir=output)
+    _, path = rollout.evaluate_policy(checkpoints[0], episodes=3, seed=5, device="cpu", output_dir=output)
     assert path == output / "result_details.json"
     result = json.loads(path.read_text())
     test_seeds, _ = selection.split_evaluation_seeds(range(100, 110), 5, 3, 2)
     assert [row["seed"] for row in result["episodes"]] == test_seeds
     assert result["completed"] and not (output / "candidates").exists()
+
+
+def test_eval_rejects_unsupported_action_before_loading_environment(checkpoints, tmp_path):
+    checkpoint = load_checkpoint(checkpoints[0])
+    checkpoint.effective_config["action_key"] = "action_rotvec"
+    source = save_checkpoint(tmp_path / "rotvec.pt", checkpoint)
+    output = tmp_path / "eval"
+    with pytest.raises(ValueError, match="SimRunner does not support action_rotvec"):
+        rollout.evaluate_policy(source, device="cpu", output_dir=output)
+    with pytest.raises(ValueError, match="SimRunner does not support action_rotvec"):
+        selection.run_pipeline([checkpoints[0], source], device="cpu", output_dir=output)
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("failure", ["video", "write"])

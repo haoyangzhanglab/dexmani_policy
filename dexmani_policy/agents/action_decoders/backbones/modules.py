@@ -32,10 +32,6 @@ def initialize_linear(module):
             nn.init.zeros_(module.bias)
 
 
-def approximate_gelu():
-    return nn.GELU(approximate="tanh")
-
-
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
@@ -58,13 +54,14 @@ class SinusoidalTimestepEmbedding(nn.Module):
 
 
 class TimestepMLP(nn.Module):
-    def __init__(self, pos_emb_dim: int, output_dim: int, expansion: int = 4):
+    def __init__(self, pos_emb_dim: int, output_dim: int):
         super().__init__()
+        hidden_dim = pos_emb_dim * 4
         self.net = nn.Sequential(
             SinusoidalTimestepEmbedding(pos_emb_dim),
-            nn.Linear(pos_emb_dim, pos_emb_dim * expansion),
+            nn.Linear(pos_emb_dim, hidden_dim),
             nn.Mish(),
-            nn.Linear(pos_emb_dim * expansion, output_dim),
+            nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:

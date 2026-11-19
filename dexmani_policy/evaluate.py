@@ -16,6 +16,8 @@ def main(argv=None):
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--skip-intermediate-observations", action="store_true",
+                        help="Only read frames used for inference (built-in simulation, without video)")
     parser.add_argument("--output-dir")
     args = parser.parse_args(argv)
     evaluate_policy(**vars(args))

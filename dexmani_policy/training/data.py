@@ -14,9 +14,10 @@ from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 
 
-def use_policy_split(cfg, policy_config, *, zarr_path=None):
+def use_policy_split(cfg, policy_config, *, zarr_path=None) -> Path:
     policy = OmegaConf.load(Path(policy_config).expanduser())
-    source = str(Path(policy.zarr_path).expanduser().resolve())
+    source_path = Path(policy.zarr_path).expanduser().absolute()
+    source = str(source_path.resolve())
     cfg.task_name = policy.task_name
     cfg.zarr_path = source if zarr_path is None else zarr_path
     cfg.dataset.zarr_path = cfg.zarr_path
@@ -24,6 +25,7 @@ def use_policy_split(cfg, policy_config, *, zarr_path=None):
         cfg.dataset[key] = policy.dataset[key]
     with open_dict(cfg):
         cfg.policy_zarr_path = source
+    return source_path
 
 
 def _episode_layout(store):
@@ -95,10 +97,8 @@ def restore_data_records(cfg, store, train, val=None, *, saved: dict):
             cfg.pop("prior_data", None)
 
 
-def record_prior_data(cfg, dataset, asset, record: dict | None = None, *, from_policy=False):
+def record_prior_data(cfg, dataset, asset, record: dict, *, from_policy=False):
     store = dataset.episode_store
-    if record is None:
-        record = {"source": None}
     source = record["source"]
     same_source = source is not None and source == store.source_path
     if same_source:
@@ -149,7 +149,6 @@ def fit_action_normalizer(dataset, normalizer: LinearNormalizer, *, hand_affine=
         arm_dim = normalizer["action"].scale.numel() - hand_affine["scale"].numel()
         normalizer.fit_field(
             "action", (values[..., :arm_dim] for values in iter_validated_actions(dataset)),
-            check_values=False,
         )
         arm = normalizer["action"]
         normalizer.fields["action"] = FieldNormalizer(

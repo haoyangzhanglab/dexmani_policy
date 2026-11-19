@@ -7,14 +7,6 @@ import torch.nn.functional as F
 from .modules import TimestepMLP, batch_timesteps
 
 
-def validate_unet_horizon(horizon: int, down_dims) -> None:
-    if not down_dims:
-        raise ValueError("UNet down_dims must be nonempty")
-    divisor = 2 ** (len(down_dims) - 1)
-    if horizon % divisor:
-        raise ValueError(f"UNet horizon must be divisible by {divisor}, got {horizon}")
-
-
 class ConvBlock1D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, n_groups=8):
         super().__init__()
@@ -81,9 +73,16 @@ class ConditionalUNet1D(nn.Module):
         kernel_size=5,
         n_groups=8,
         cond_predict_scale=True,
+        *,
+        horizon: int,
     ):
         super().__init__()
 
+        if not down_dims:
+            raise ValueError("UNet down_dims must be nonempty")
+        divisor = 2 ** (len(down_dims) - 1)
+        if horizon % divisor:
+            raise ValueError(f"UNet horizon must be divisible by {divisor}, got {horizon}")
         if type(kernel_size) is not int or kernel_size <= 0 or kernel_size % 2 == 0:
             raise ValueError("UNet kernel_size must be a positive odd integer")
 

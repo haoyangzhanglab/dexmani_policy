@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import numpy as np
 import torch
 import zarr
 
@@ -24,17 +23,16 @@ class ODEDataset(DemonstrationDataset):
 
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
-        rows = self.sampler.sample_source_rows(idx)
-        row = int(rows[self.action_start_index])
-        ends = self.episode_store.episode_ends
-        episode = int(np.searchsorted(ends, row, side="right"))
-        start = int(ends[episode - 1]) if episode else 0
-        if row == start:
-            previous = self.episode_store.read("joint_state", row)
+        start, _, sample_start = self.sampler.indices[idx]
+        row = self.sampler.sample_source_row(idx, self.action_start_index)
+        if row > start:
+            slot = 0 if row - 1 == start else sample_start + row - 1 - start
+            previous = data["action"][slot]
         else:
-            slot = int(np.searchsorted(rows, row - 1))
-            previous = data["action"][slot] if rows[slot] == row - 1 else self.episode_store.read(
-                self.action_key, row - 1,
-            )
+            ends = self.episode_store.episode_ends
+            if row == 0 or row == ends[ends.searchsorted(row)]:
+                previous = self.episode_store.read("joint_state", row)
+            else:
+                previous = self.episode_store.read(self.action_key, row - 1)
         data["prev_action"] = torch.as_tensor(previous, dtype=torch.float32)
         return data

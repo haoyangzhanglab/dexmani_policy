@@ -17,6 +17,7 @@ from dexmani_policy.common.pytorch_util import (
     set_rng_state,
     set_seed,
 )
+from dexmani_policy.datasets.preprocess.contact_map import contact_zarr_path
 from dexmani_policy.training.config import check_fresh_output, load_config, normalize_output_dir
 from dexmani_policy.training.data import (
     build_train_loader,
@@ -33,7 +34,7 @@ from dexmani_policy.training.logging import (
     to_log_scalars,
 )
 from dexmani_policy.training.optimization import (
-    build_scheduler, clip_gradients, normalize_gradients, restore_optimizer,
+    backward_microbatches, build_scheduler, clip_gradients, restore_optimizer,
 )
 from dexmani_policy.training.runtime import training_signals
 
@@ -80,7 +81,9 @@ def load_run(method, argv=None):
     if args.log_interval is not None:
         cfg.training.loop.log_interval_steps = args.log_interval
     if args.policy_config is not None:
-        use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
+        source = use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
+        if method == "cordvip" and args.zarr_path is None and cfg.model.contact_loss_weight > 0:
+            cfg.zarr_path = cfg.dataset.zarr_path = str(contact_zarr_path(source))
     elif args.zarr_path is not None:
         cfg.zarr_path = args.zarr_path
         cfg.dataset.zarr_path = cfg.zarr_path
@@ -110,8 +113,14 @@ def export_encoder(checkpoint, output_path):
 def evaluate(model, dataset, batch_size, device, *, stop):
     if stop.requested:
         return None
+    device = torch.device(device)
     rng_state, training = get_rng_state(device), model.training
     try:
+        # Reuse the same diffusion noise across validations without seeding other GPUs.
+        validation_seed = 0
+        torch.set_rng_state(torch.Generator().manual_seed(validation_seed).get_state())
+        if device.type == "cuda":
+            torch.cuda.set_rng_state(torch.Generator(device=device).manual_seed(validation_seed).get_state(), device)
         model.eval()
         totals: dict[str, torch.Tensor | float] = {}
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -121,8 +130,8 @@ def evaluate(model, dataset, batch_size, device, *, stop):
             count = next(iter(batch["obs"].values())).shape[0]
             _, metrics = model(dict_apply(batch, lambda x: x.to(device)))
             accumulate_metrics(totals, metrics, weight=count)
-            if stop.requested:
-                return None
+        if stop.requested:
+            return None
         metrics = to_log_scalars({f"val/{key}": value / len(dataset) for key, value in totals.items()})
         invalid = {key: value for key, value in metrics.items() if not isfinite(value)}
         if invalid:
@@ -211,6 +220,13 @@ def train(method, model_class, argv=None):
     logger = ExperimentLogger(cfg, resuming=resuming)
     print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
+
+    def forward(batch):
+        count = next(iter(batch["obs"].values())).shape[0]
+        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+        loss, metrics = model(batch)
+        return loss, metrics, count
+
     iterator = None
     try:
         with training_signals() as stop:
@@ -226,22 +242,10 @@ def train(method, model_class, argv=None):
                         or (step + 1) % cfg.training.loop.log_interval_steps == 0
                         or step + 1 == stop_step
                     )
-                    totals: dict[str, torch.Tensor | float] = {}
                     optimizer.zero_grad(set_to_none=True)
-                    finite_loss = torch.ones((), dtype=torch.bool, device=device)
-                    sample_count = 0
-                    for _ in range(group_size):
-                        batch = next(iterator)
-                        count = next(iter(batch["obs"].values())).shape[0]
-                        sample_count += count
-                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                        loss, metrics = model(batch)
-                        finite_loss.logical_and_(torch.isfinite(loss.detach()))
-                        (loss * count if group_size > 1 else loss).backward()
-                        if record:
-                            accumulate_metrics(totals, metrics, weight=count)
-                    if group_size > 1:
-                        normalize_gradients(parameters, sample_count)
+                    finite_loss, group_metrics = backward_microbatches(
+                        iterator, group_size, parameters, forward, device=device, log_metrics=record,
+                    )
                     clip_gradients(parameters, finite_loss, step=step)
                     if is_afro:
                         # AFRO updates the independent teacher before the online optimizer step.
@@ -251,7 +255,7 @@ def train(method, model_class, argv=None):
                     scheduler.step()
                     step += 1
                     if record:
-                        metrics = {f"train/{key}": value / sample_count for key, value in totals.items()}
+                        metrics = {f"train/{key}": value for key, value in group_metrics.items()}
                         metrics.update({"train/lr": lr, "train/epoch": current_epoch})
                         logger.log(to_log_scalars(metrics), step)
                     epoch = step // updates_per_epoch

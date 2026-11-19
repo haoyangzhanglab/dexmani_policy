@@ -83,12 +83,11 @@ def print_param_count(agent) -> None:
     print(f"[{type(agent).__name__}] parameters={total / 1e6:.2f} M, trainable={trainable / 1e6:.2f} M")
 
 
-def print_training_recipe(cfg, *, batches_per_epoch):
+def print_training_recipe(cfg, *, updates_per_epoch):
     batch = cfg.dataloader.batch_size
     accumulation = cfg.training.loop.gradient_accumulation_steps
-    updates = (batches_per_epoch + accumulation - 1) // accumulation
     print(
         f"[Training] batch={batch}, accumulation={accumulation}, "
-        f"updates/epoch={updates}, "
+        f"updates/epoch={updates_per_epoch}, "
         f"total updates={cfg.training.loop.total_train_steps}"
     )

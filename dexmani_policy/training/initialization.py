@@ -73,16 +73,16 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = No
         if method in {"dp", "sat", "dqrise", "dexlatent"}:
             model.obs_encoder.rgb_encoder.initialize_weights(initialization.rgb)
             if initialization.rgb is not None:
-                record_prior_data(cfg, dataset, initialization.rgb)
+                record_prior_data(cfg, dataset, initialization.rgb, {"source": None})
         elif method == "r3d":
             model.obs_encoder.pc_encoder.initialize_weights(initialization.uni3d)
             if initialization.uni3d is not None:
-                record_prior_data(cfg, dataset, initialization.uni3d)
+                record_prior_data(cfg, dataset, initialization.uni3d, {"source": None})
         elif method in {"afro", "cordvip"} and initialization.encoder is not None:
             payload = torch.load(
                 Path(initialization.encoder).expanduser(), map_location="cpu", weights_only=True,
             )
-            record_prior_data(cfg, dataset, initialization.encoder, payload.get("training_data"))
+            record_prior_data(cfg, dataset, initialization.encoder, payload["training_data"])
             fields: tuple[str, ...]
             if method == "afro":
                 encoder, fields = model.obs_encoder.pc_encoder, ("point_cloud",)
@@ -100,7 +100,7 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = No
             model.hand_codebook = codebook
         elif method == "dexlatent":
             hand_affine = model.hand_prior.initialize_weights(initialization.dexlatent)
-            record_prior_data(cfg, dataset, initialization.dexlatent)
+            record_prior_data(cfg, dataset, initialization.dexlatent, {"source": None})
 
     feature_shapes = normalization_feature_shapes(
         field_dims, cfg.normalization, required_identity_fields=model.required_identity_fields,

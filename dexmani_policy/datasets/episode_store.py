@@ -63,12 +63,27 @@ class EpisodeStore:
         dtype = np.float32 if np.issubdtype(arr.dtype, np.floating) else arr.dtype
         return np.asarray(arr[selection], dtype=dtype)
 
-    def iter_chunks(self, key, *, columns=None, episode_mask=None):
+    def read_rows_by_chunk(self, key, rows, *, columns=None):
+        # A single Zarr selection would load every requested compressed chunk before decoding.
         step = self[key].chunks[0]
-        mask = np.ones(self.n_episodes, dtype=bool) if episode_mask is None else episode_mask
+        order = rows.argsort()
+        chunks = rows[order] // step
+        splits = np.flatnonzero(chunks[1:] != chunks[:-1]) + 1
+        output = None
+        for positions in np.split(order, splits):
+            selected = rows[positions]
+            start = selected[0]
+            block = self.read(key, slice(start, selected[-1] + 1), columns=columns)
+            if output is None:
+                output = np.empty((len(rows), *block.shape[1:]), dtype=block.dtype)
+            output[positions] = block[selected - start]
+        return output
+
+    def iter_chunks(self, key, *, episode_mask, columns=None):
+        step = self[key].chunks[0]
         # Merge adjacent episodes, then bound reads by both selected spans and chunks.
-        first = np.flatnonzero(mask & ~np.r_[False, mask[:-1]])
-        last = np.flatnonzero(mask & ~np.r_[mask[1:], False])
+        first = np.flatnonzero(episode_mask & ~np.r_[False, episode_mask[:-1]])
+        last = np.flatnonzero(episode_mask & ~np.r_[episode_mask[1:], False])
         starts = np.r_[0, self.episode_ends[:-1]]
         for left, right in zip(starts[first], self.episode_ends[last]):
             start = int(left)

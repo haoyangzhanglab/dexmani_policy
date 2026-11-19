@@ -3,7 +3,6 @@ import tempfile
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import torch
 from hydra.utils import get_class
@@ -14,14 +13,18 @@ from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.inference import resolve_inference_settings, restore_policy
 from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.metrics import summarize_episodes
 from dexmani_policy.evaluation.seeds import (
     split_evaluation_seeds, validate_seed_pool, validate_evaluation_seed,
 )
 
 
-if TYPE_CHECKING:
-    from dexmani_policy.env_runner.sim_runner import SimRunner
+def validate_runner_options(runner_class, action_key, *, skip_intermediate_observations, video):
+    if runner_class is SimRunner and action_key == "action_rotvec":
+        raise ValueError("The built-in SimRunner does not support action_rotvec; use a compatible custom runner")
+    if skip_intermediate_observations and (runner_class is not SimRunner or video):
+        raise ValueError("--skip-intermediate-observations requires the built-in SimRunner and video=False")
 
 
 def create_run_directory(root, directory=None):
@@ -37,7 +40,8 @@ def create_run_directory(root, directory=None):
 
 
 def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_steps=None,
-                    seeds=None, episodes=100, seed=1024, device="cuda:0", video=False, output_dir=None):
+                    seeds=None, episodes=100, seed=1024, device="cuda:0", video=False,
+                    output_dir=None, skip_intermediate_observations=False):
     """Run one checkpoint with explicit or deterministically sampled evaluation seeds."""
     checkpoint = Path(checkpoint).expanduser().resolve()
     loaded = load_checkpoint(checkpoint)
@@ -48,6 +52,9 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     del loaded
     options = dict(cfg["env_runner"])
     runner_class: type[SimRunner] = get_class(options.pop("_target_"))
+    validate_runner_options(
+        runner_class, cfg["action_key"], skip_intermediate_observations=skip_intermediate_observations, video=video,
+    )
     if seeds is None:
         seeds, _ = split_evaluation_seeds(runner_class.load_seed_pool(cfg["env_runner"]["task_name"]), seed, episodes)
     else:
@@ -73,10 +80,12 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                    n_obs_steps=agent.n_obs_steps,
                    sensor_modalities=[key for key in cfg["normalization_dims"] if key != "action"],
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
+    if runner_class is SimRunner:
+        options["skip_intermediate_observations"] = skip_intermediate_observations
     runner = runner_class(**options)
     record = dict(checkpoint=os.path.relpath(checkpoint, path.parent), global_step=global_step, weights=weights,
                   inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
-                  seed=seed, device=str(device), video=video,
+                  seed=seed, device=str(device), video=video, skip_intermediate_observations=skip_intermediate_observations,
                   episodes=[], statistics=None, completed=False)
     if hasattr(agent, "force_predictor"):
         record["force_inference_steps"] = agent.force_predictor.num_inference_steps

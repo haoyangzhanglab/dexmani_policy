@@ -30,11 +30,11 @@ def normalization_feature_shapes(dims, spec, *, required_identity_fields=(), req
 
 
 class FieldNormalizer(nn.Module):
-    def __init__(self, scale, offset):
+    def __init__(self, scale, offset, *, key="field"):
         super().__init__()
         self.register_buffer("scale", torch.as_tensor(scale, dtype=torch.float32))
         self.register_buffer("offset", torch.as_tensor(offset, dtype=torch.float32))
-        self.validate()
+        self.validate(key)
 
     def validate(self, key="field") -> None:
         if self.scale.shape != self.offset.shape:
@@ -54,14 +54,12 @@ class FieldNormalizer(nn.Module):
         return (value - offset).div_(scale)
 
 
-def _feature_chunks(key, chunks, check_values):
+def _feature_chunks(key, chunks):
     feature_shape = None
     for chunk in chunks:
         values = torch.as_tensor(chunk)
         if not values.numel():
             continue
-        if check_values and not torch.isfinite(values).all():
-            raise ValueError(f"Nonfinite normalization data for {key}")
         if feature_shape is None:
             feature_shape = FIXED_OBSERVATION_SHAPES.get(key, values.shape[-1:])
         if values.shape[-len(feature_shape):] != feature_shape:
@@ -115,15 +113,15 @@ class LinearNormalizer(nn.Module):
             self.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
 
     @torch.no_grad()
-    def fit_field(self, key: str, chunks: Iterable, *, mode: str = "limits", check_values: bool = True) -> None:
-        samples = _feature_chunks(key, chunks, check_values)
+    def fit_field(self, key: str, chunks: Iterable, *, mode: str = "limits") -> None:
+        samples = _feature_chunks(key, chunks)
         if mode == "limits":
             scale, offset = _fit_limits(samples)
         elif mode == "mean_std":
             scale, offset = _fit_mean_std(samples)
         else:
             raise ValueError(f"Cannot fit {key} with mode={mode!r}")
-        self.fields[key] = FieldNormalizer(scale, offset)
+        self.fields[key] = FieldNormalizer(scale, offset, key=key)
 
     def __getitem__(self, key) -> FieldNormalizer:
         return self.fields[key]

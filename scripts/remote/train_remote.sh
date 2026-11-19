@@ -50,13 +50,7 @@ if $DRY_RUN; then
     exit 0
 fi
 if ! $RESUME; then
-    printf -v setup_args '%q ' "$REPO" "$SOURCE"
-    ssh "$HOST" "bash -s -- $setup_args" <<'BASH'
-set -euo pipefail
-mkdir -p "$1/outputs/remote_sources"
-mkdir "$2"
-BASH
-    bash "$SCRIPT_DIR/sync_code.sh" --host "$HOST" --dest "$SOURCE"
+    bash "$SCRIPT_DIR/sync_code.sh" "$HOST" "$SOURCE"
 fi
 printf -v launch_args '%q ' "$SOURCE" "$DATA_ROOT" "$REPO" "$PYTHON" "$GPU" "$SESSION" "$FOREGROUND" "$REMOTE_SOURCE" "$RUN" "${COMMAND[@]}"
 ssh "$HOST" "bash -s -- $launch_args" <<'BASH'

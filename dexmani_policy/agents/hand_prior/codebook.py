@@ -53,14 +53,14 @@ class HandStateCodebook(nn.Module):
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}"
 
 
-def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor], dict | None]:
+def load_codebook(path: str | Path) -> tuple[HandStateCodebook, dict[str, Tensor], dict]:
     with np.load(Path(path).expanduser(), allow_pickle=False) as data:
         poses = torch.from_numpy(data["sorted_hand_poses"])
         affine = {
             key: torch.from_numpy(data[f"hand_normalizer_{key}"])
             for key in ("scale", "offset")
         }
-        training_data = json.loads(data["training_data"].item()) if "training_data" in data else None
+        training_data = json.loads(data["training_data"].item())
     if poses.ndim != 2 or poses.shape[1] != 12:
         raise ValueError("Hand codebook requires sorted_hand_poses shape [K,12]")
     if any(value.is_complex() or value.dtype == torch.bool for value in (poses, *affine.values())):

@@ -8,7 +8,7 @@ from hydra.utils import get_class
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import write_json
-from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy
+from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy, validate_runner_options
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
 
@@ -24,16 +24,10 @@ def candidate_score(candidate):
 
 def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_steps=None,
                  selection_episodes=25, test_episodes=100, seed=1024, device="cuda:0",
-                 video=False, output_dir=None):
+                 video=False, output_dir=None, skip_intermediate_observations=False):
     checkpoints = [Path(path).expanduser().resolve() for path in checkpoints]
-    if not checkpoints or len(set(checkpoints)) != len(checkpoints):
-        raise ValueError("Candidates must be a nonempty list of distinct checkpoint files")
-    if len(checkpoints) == 1:
-        _, path = evaluate_policy(
-            checkpoints[0], weights=weights, inference_steps=inference_steps, action_steps=action_steps,
-            episodes=test_episodes, seed=seed, device=device, video=video, output_dir=output_dir,
-        )
-        return path
+    if len(checkpoints) < 2 or len(set(checkpoints)) != len(checkpoints):
+        raise ValueError("Selection requires at least two distinct checkpoints. Use evaluate for a single checkpoint.")
     root = checkpoints[0].parent.parent
     loaded = load_checkpoint(checkpoints[0])
     cfg = loaded.effective_config
@@ -42,11 +36,19 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     reference_env_kwargs = cfg["env_runner"]["env_kwargs"]
     reference_control_dt_s = cfg["control_dt_s"]
     del loaded
+    runner_class: type[SimRunner] = get_class(reference_runner)
+    validate_runner_options(
+        runner_class, cfg["action_key"], skip_intermediate_observations=skip_intermediate_observations, video=video,
+    )
     for checkpoint in checkpoints[1:]:
         loaded = load_checkpoint(checkpoint)
         cfg = loaded.effective_config
         if cfg["env_runner"]["_target_"] != reference_runner:
             raise ValueError("Candidates must use the same environment runner")
+        validate_runner_options(
+            runner_class, cfg["action_key"],
+            skip_intermediate_observations=skip_intermediate_observations, video=video,
+        )
         if cfg["env_runner"]["task_name"] != reference_task_name:
             raise ValueError("Candidates must use the same task_name")
         if cfg["env_runner"]["env_kwargs"] != reference_env_kwargs:
@@ -58,7 +60,6 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
                 f"reference={reference_control_dt_s}, candidate={control_dt_s} ({checkpoint})"
             )
         del loaded
-    runner_class: type[SimRunner] = get_class(reference_runner)
     seed_pool = runner_class.load_seed_pool(reference_task_name)
     test, selection = split_evaluation_seeds(
         seed_pool, seed, test_episodes, positive_int(selection_episodes, "selection_episodes"),
@@ -67,11 +68,13 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     path = directory / "selection_result.json"
     record = dict(selection_seeds=selection, test_seeds=test, seed=seed,
                   overrides=dict(weights=weights, inference_steps=inference_steps, action_steps=action_steps),
-                  device=str(device), test_video=video, candidates=[])
+                  device=str(device), test_video=video, candidates=[],
+                  skip_intermediate_observations=skip_intermediate_observations)
     for index, checkpoint in enumerate(checkpoints):
         result, result_path = evaluate_policy(
             checkpoint, weights=weights, inference_steps=inference_steps,
             action_steps=action_steps, seeds=selection, seed=seed, device=device, video=False,
+            skip_intermediate_observations=skip_intermediate_observations,
             output_dir=directory / "candidates" / str(index))
         record["candidates"].append(dict(
             checkpoint=os.path.relpath(checkpoint, directory),
@@ -85,7 +88,9 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     checkpoint = directory / winner["checkpoint"]
     _, result_path = evaluate_policy(
         checkpoint, weights=winner["weights"], inference_steps=winner["inference_steps"], action_steps=winner["action_steps"],
-        seeds=test, seed=seed, device=device, video=video, output_dir=directory / "test")
+        seeds=test, seed=seed, device=device, video=video, output_dir=directory / "test",
+        skip_intermediate_observations=skip_intermediate_observations,
+    )
     record["test_result"] = os.path.relpath(result_path, directory)
     write_json(path, record)
     return path

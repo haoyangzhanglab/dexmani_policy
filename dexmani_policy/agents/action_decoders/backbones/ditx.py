@@ -3,13 +3,12 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from timm.models.vision_transformer import Mlp, RmsNorm
+from timm.layers import GELUTanh, Mlp, RmsNorm
 
 from .modules import (
     TimestepMLP,
     WEIGHT_INIT_STD,
     add_temporal_embedding,
-    approximate_gelu,
     batch_timesteps,
     initialize_linear,
     modulate,
@@ -75,7 +74,7 @@ class DiTXBlock(nn.Module):
         self.mlp = Mlp(
             in_features=hidden_size,
             hidden_features=int(hidden_size * mlp_ratio),
-            act_layer=approximate_gelu,
+            act_layer=GELUTanh,
             drop=0.0,
         )
 
@@ -127,7 +126,7 @@ class DiTXOutput(nn.Module):
             in_features=hidden_size,
             hidden_features=hidden_size,
             out_features=output_dim,
-            act_layer=approximate_gelu,
+            act_layer=GELUTanh,
             drop=0,
         )
 
@@ -212,14 +211,6 @@ class DiTX(nn.Module):
     def forward(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
     ) -> torch.Tensor:
-        hidden = self._forward_hidden(x, timestep, context, context_kv=context_kv)
-        if self.action_io is None:
-            return self.final_layer(hidden)
-        return self.action_io.decode_velocity(hidden)
-
-    def _forward_hidden(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
-    ) -> torch.Tensor:
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
         context_c = self.embed_context(context) if context_kv is None else None
@@ -236,7 +227,9 @@ class DiTX(nn.Module):
                 x, time_c, context_c,
                 context_kv=None if context_kv is None else context_kv[index],
             )
-        return x
+        if self.action_io is None:
+            return self.final_layer(x)
+        return self.action_io.decode_velocity(x)
 
 
 class ConsistencyDiTX(nn.Module):

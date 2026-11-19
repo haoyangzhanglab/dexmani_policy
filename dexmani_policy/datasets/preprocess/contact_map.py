@@ -15,14 +15,12 @@ from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 
 
 CHUNK_ROWS = 16
-CONTACT_POINT_COUNT = 1024
+CUDA_FRAME_BATCH = 4
+CUDA_POINT_TILE = 1024
 
 
-def require_contact_point_count(buffer):
-    if buffer["object_pointcloud"].shape[1] != CONTACT_POINT_COUNT:
-        raise ValueError(
-            f"{buffer.path}: CordViP contact supervision requires {CONTACT_POINT_COUNT} object point slots"
-        )
+def contact_zarr_path(source: Path) -> Path:
+    return source.parent / "cordvip" / source.name
 
 
 def estimate_normals(points):
@@ -61,15 +59,49 @@ def frame_contact_map(object_points, hand_points):
     return compute_contact_map(object_points, estimate_normals(object_points), hand_points).astype(np.float32)
 
 
-def generate(zarr_path, output, num_workers=1):
+def batched_contact_maps(object_points, object_normals, hand_points, device):
+    import torch
+
+    objects, normals, hand = (
+        torch.as_tensor(values, dtype=torch.float64, device=device)
+        for values in (object_points, object_normals, hand_points)
+    )
+    contacts = torch.empty(objects.shape[:2], dtype=torch.float32, device=device)
+    # Bound the dense pairwise tensors independently of the point counts.
+    for frame_start in range(0, len(objects), CUDA_FRAME_BATCH):
+        batch = slice(frame_start, frame_start + CUDA_FRAME_BATCH)
+        for start in range(0, objects.shape[1], CUDA_POINT_TILE):
+            columns = slice(start, start + CUDA_POINT_TILE)
+            points = objects[batch, columns]
+            nx, ny, nz = normals[batch, columns].unbind(dim=-1)
+            minimum = points.new_full(points.shape[:2], torch.inf)
+            for hand_tile in hand[batch].split(CUDA_POINT_TILE, dim=1):
+                dx, dy, dz = (hand_tile[:, None] - points[:, :, None]).unbind(dim=-1)
+                distance = (dx.square() + dy.square() + dz.square()).sqrt()
+                projection = dx * nx[..., None] + dy * ny[..., None] + dz * nz[..., None]
+                projection.abs_().div_(distance + 1e-8)
+                score = (1 - projection).exp_().mul_(distance)
+                minimum = torch.minimum(minimum, score.amin(dim=-1))
+            decay = (-10 * minimum).exp()
+            contacts[batch, columns] = 2 * decay / (1 + decay)
+    return contacts.cpu().numpy()
+
+
+def generate(zarr_path, output=None, num_workers=1, *, device="cpu"):
+    import torch
+
     positive_int(num_workers, "num_workers")
-    output = Path(output).expanduser()
+    device = torch.device(device)
+    if device.type not in {"cpu", "cuda"}:
+        raise ValueError("Contact generation supports device=cpu or cuda")
+    source = Path(zarr_path).expanduser().absolute()
+    output = contact_zarr_path(source) if output is None else Path(output).expanduser()
     if output.exists():
         raise FileExistsError(f"Contact output already exists: {output}")
     fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None}
-    buffer = EpisodeStore(zarr_path, keys=fields, pc_dim=3)
-    require_contact_point_count(buffer)
+    buffer = EpisodeStore(source, keys=fields, pc_dim=3)
     rows = int(buffer.episode_ends[-1])
+    point_count = buffer["object_pointcloud"].shape[1]
     attrs = dict(buffer.attrs)
     attrs["source_zarr_path"] = buffer.source_path
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -86,8 +118,8 @@ def generate(zarr_path, output, num_workers=1):
                 key, shape=shape, chunks=(CHUNK_ROWS, *shape[1:]), dtype="float32",
             )
         labels = data.create_dataset(
-            "contact_map", shape=(rows, CONTACT_POINT_COUNT),
-            chunks=(CHUNK_ROWS, CONTACT_POINT_COUNT), dtype="float32",
+            "contact_map", shape=(rows, point_count),
+            chunks=(CHUNK_ROWS, point_count), dtype="float32",
         )
         # Open3D's OpenMP runtime cannot safely be inherited by forked workers.
         workers = (
@@ -105,9 +137,13 @@ def generate(zarr_path, output, num_workers=1):
                         check_finite(buffer, key, start, values, columns)
                         points[key] = values
                     data[key][start:stop] = values
-                labels[start:stop] = np.stack(list(map_frames(
-                    frame_contact_map, points["object_pointcloud"], points["hand_pointcloud"],
-                )))
+                objects, hand = points["object_pointcloud"], points["hand_pointcloud"]
+                if device.type == "cpu":
+                    contacts = np.stack(list(map_frames(frame_contact_map, objects, hand)))
+                else:
+                    normals = np.stack(list(map_frames(estimate_normals, objects)))
+                    contacts = batched_contact_maps(objects, normals, hand, device)
+                labels[start:stop] = contacts
                 print(f"Contact rows {stop}/{rows}", flush=True)
         temporary.rename(output)
     print(f"Saved {output}")
@@ -116,10 +152,11 @@ def generate(zarr_path, output, num_workers=1):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zarr-path", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", help="Defaults to cordvip/<input name> alongside the input Zarr")
     parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--device", default="cpu", help="Point-pair computation device, e.g. cuda:0")
     args = parser.parse_args()
-    generate(args.zarr_path, args.output, args.num_workers)
+    generate(args.zarr_path, args.output, args.num_workers, device=args.device)
 
 
 if __name__ == "__main__":

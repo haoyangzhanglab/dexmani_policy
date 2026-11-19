@@ -30,17 +30,16 @@ class RMSNorm(nn.Module):
 
 
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim, min_period=4e-3, max_period=4.0):
+    def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.min_period = min_period
-        self.max_period = max_period
         self.register_buffer("indices", torch.arange(dim // 2), persistent=False)
 
     def forward(self, timestep):
         # Integer indices retain precision even when the model is cast to BF16.
         fraction = self.indices.double() / max(self.dim // 2 - 1, 1)
-        periods = self.min_period * (self.max_period / self.min_period) ** fraction
+        min_period, max_period = 4e-3, 4.0
+        periods = min_period * (max_period / min_period) ** fraction
         angles = timestep.double()[:, None] * (2 * math.pi / periods)[None]
         return torch.cat((angles.sin(), angles.cos()), dim=-1).float()
 

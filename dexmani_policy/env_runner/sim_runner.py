@@ -27,6 +27,8 @@ class SimRunner:
         control_dt_s: float,
         env_kwargs: dict[str, Any] | None = None,
         env_rebuild_interval: int = 25,
+        *,
+        skip_intermediate_observations: bool = False,
     ):
         self.task_name = task_name
         self.control_dt_s = control_dt_s
@@ -35,6 +37,7 @@ class SimRunner:
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = list(sensor_modalities)
         self.rgb_preprocessing = rgb_preprocessing
+        self.skip_intermediate_observations = skip_intermediate_observations
 
         self.obs_buffer: deque[dict[str, np.ndarray]] = deque(maxlen=n_obs_steps)
 
@@ -88,6 +91,11 @@ class SimRunner:
 
         task_done_step = None
         prev_action = None
+        skip_observations = self.skip_intermediate_observations and action_steps > self.n_obs_steps
+        if skip_observations:
+            from dexmani_sim import TACTILE_OBSERVATION_KEYS
+
+            collect_tactile = not set(self.sensor_modalities).isdisjoint(TACTILE_OBSERVATION_KEYS)
 
         while True:
             obs_batch = self.get_obs_batch(device=device, normalization_dims=agent.normalization_dims)
@@ -95,11 +103,15 @@ class SimRunner:
                 obs_batch, agent, inference_steps=inference_steps,
                 action_steps=action_steps, generator=generator, prev_action=prev_action,
             )
-            for action in action_chunk:
-                obs, _, done, truncated, info = env.step(action)
+            skip_steps = len(action_chunk) - self.n_obs_steps if skip_observations else 0
+            for index, action in enumerate(action_chunk):
+                if index < skip_steps:
+                    _, _, done, truncated, info = env.step_physics(action, collect_tactile=collect_tactile)
+                else:
+                    obs, _, done, truncated, info = env.step(action)
+                    self.update_obs(obs)
                 if agent.requires_prev_action:
-                    prev_action = info["executed_joint_action"].copy()
-                self.update_obs(obs)
+                    prev_action = info["executed_joint_action"]
 
                 if info["success_condition"] and task_done_step is None:
                     task_done_step = env.action_cnt
@@ -108,6 +120,8 @@ class SimRunner:
                     return bool(info["success"]), task_done_step
 
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
+        if self.skip_intermediate_observations and video_save_dir is not None:
+            raise ValueError("Skipping intermediate observations requires video=False")
         if agent.requires_prev_action and action_steps != agent.n_action_steps:
             raise ValueError("ODE execution requires action_steps == n_action_steps")
         unsupported = (TACTILE_FEATURE_SHAPES.keys() & set(self.sensor_modalities)) - {"finger_tactile_force"}

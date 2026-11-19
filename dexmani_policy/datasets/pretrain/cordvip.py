@@ -1,7 +1,6 @@
 import torch
 
 from dexmani_policy.datasets.episode_store import EpisodeStore
-from dexmani_policy.datasets.preprocess.contact_map import require_contact_point_count
 from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 from dexmani_policy.datasets.sampler import SequenceSampler
 
@@ -17,10 +16,9 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
         self.pad_before = obs_horizon - 1 if pad_before is None else pad_before
         self.pad_after = pad_after
         if "contact_map" in keys:
-            require_contact_point_count(buffer)
             contact_map = buffer["contact_map"]
-            if contact_map.shape[1:] != buffer["object_pointcloud"].shape[1:2]:
-                raise ValueError("Contact labels must match the 1024 object point slots")
+            if contact_map.shape != buffer["object_pointcloud"].shape[:2]:
+                raise ValueError("Contact labels must match the object point slots in every frame")
             if contact_map.dtype.kind != "f":
                 raise ValueError(f"{buffer.path}: contact_map must be floating point")
         super().__init__(

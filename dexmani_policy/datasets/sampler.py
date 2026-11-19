@@ -42,13 +42,8 @@ class SequenceSampler:
         if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
 
-        episode_ends = episode_store.episode_ends
-        episode_mask = np.asarray(episode_mask, dtype=bool)
-        if episode_mask.shape != episode_ends.shape:
-            raise ValueError("episode_mask must have one entry per episode")
-
         self.indices = window_indices(
-            episode_ends,
+            episode_store.episode_ends,
             sequence_length=sequence_length,
             pad_before=pad_before,
             pad_after=pad_after,
@@ -58,20 +53,36 @@ class SequenceSampler:
         self.sequence_length = sequence_length
         self.fields = dict.fromkeys(episode_store.keys()) if fields is None else dict(fields)
         self.field_horizons = dict(field_horizons or {})
-        if any(key not in self.fields or not 1 <= k <= sequence_length for key, k in self.field_horizons.items()):
-            raise ValueError("field_horizons requires selected keys and 1 <= K <= sequence_length")
 
     def __len__(self):
         return len(self.indices)
 
+    def sample_source_row(self, idx, offset):
+        start, end, sample_start = self.indices[idx]
+        return int(min(max(start + offset - sample_start, start), end - 1))
+
     def sample_source_rows(self, idx):
         """Original source rows, including repeated boundary rows used by padding."""
-        start, end, sample_start = self.indices[idx]
+        start, end, sample_start = self.indices[idx].T[..., None]
         return np.clip(
             start + np.arange(self.sequence_length) - sample_start,
             start,
             end - 1,
         )
+
+    def sample_batch(self, indices: list[int]) -> list[dict[str, np.ndarray]]:
+        samples: list[dict[str, np.ndarray]] = [{} for _ in indices]
+        if not samples:
+            return samples
+
+        source_rows = self.sample_source_rows(indices)
+        for key, columns in self.fields.items():
+            length = self.field_horizons.get(key, self.sequence_length)
+            rows = source_rows[:, :length]
+            values = self.episode_store.read_rows_by_chunk(key, rows.ravel(), columns=columns)
+            for sample, value in zip(samples, values.reshape(*rows.shape, *values.shape[1:])):
+                sample[key] = value
+        return samples
 
     def sample_sequence(self, idx):
         result = {}

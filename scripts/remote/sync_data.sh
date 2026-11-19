@@ -13,9 +13,8 @@ while [[ $# -gt 0 ]]; do
         --local) LOCAL="${2:?--local requires a directory}"; shift 2 ;;
         --remote) REMOTE="${2:?--remote requires an absolute directory}"; shift 2 ;;
         --pull) PULL=true; shift ;;
-        --checksum) OPTIONS+=(--checksum); shift ;;
         --dry-run) OPTIONS+=(--dry-run); shift ;;
-        *) echo "Usage: sync_data.sh --host HOST --local DIR --remote ABSOLUTE_DIR [--pull] [--checksum] [--dry-run]" >&2; exit 1 ;;
+        *) echo "Usage: sync_data.sh --host HOST --local DIR --remote ABSOLUTE_DIR [--pull] [--dry-run]" >&2; exit 1 ;;
     esac
 done
 [[ -n "$HOST" && -n "$LOCAL" && "$REMOTE" == /* && "$REMOTE" != / ]] || { echo "Explicit --host, --local and absolute --remote are required" >&2; exit 1; }
