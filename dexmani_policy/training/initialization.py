@@ -125,7 +125,9 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = No
         dataset, model.normalizer, cfg.normalization,
         initial_state=pretrained_state, inherited_fields=inherited_fields,
     )
-    fit_action_normalizer(dataset, model.normalizer, hand_affine=hand_affine)
+    fit_action_normalizer(
+        dataset, model.normalizer, hand_affine=hand_affine, center_rotvec=model.center_rotvec,
+    )
     if method == "dexlatent":
         # Latent limits depend on the hand affine inherited from its prior.
         latents = (model._encode_action_parts(chunk)[1] for chunk in dataset.iter_normalization_data("action"))

@@ -11,7 +11,9 @@ from dexmani_policy.common.config import (
     POINT_CLOUD_FIELDS,
 )
 from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer
+from dexmani_policy.common.pytorch_util import rebase_eef_rotvec
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
+from dexmani_policy.env_runner.dexjoco_runner import observation_processing
 
 
 def use_policy_split(cfg, policy_config, *, zarr_path=None) -> Path:
@@ -65,8 +67,6 @@ def record_training_data(cfg, store, train, val=None):
 
 
 def restore_data_records(cfg, store, train, val=None, *, saved: dict):
-    if "episode_layout" not in saved:
-        raise ValueError("Resume checkpoint is missing episode_layout. Start a new training run.")
     saved_path = saved["dataset"]["zarr_path"]
     if store.path != saved_path:
         raise ValueError(f"Resume Zarr path mismatch (dataset={store.path!r}, checkpoint={saved_path!r})")
@@ -141,9 +141,14 @@ def iter_validated_actions(dataset):
         yield values
 
 
-def fit_action_normalizer(dataset, normalizer: LinearNormalizer, *, hand_affine=None) -> None:
+def fit_action_normalizer(
+    dataset, normalizer: LinearNormalizer, *, hand_affine=None, center_rotvec=False,
+) -> None:
     if hand_affine is None:
-        normalizer.fit_field("action", dataset.iter_normalization_data("action"))
+        chunks = dataset.iter_normalization_data("action")
+        if center_rotvec:
+            chunks = (rebase_eef_rotvec(torch.as_tensor(values)) for values in chunks)
+        normalizer.fit_field("action", chunks)
     else:
         # The hand representation must retain the coordinate system of its prior.
         arm_dim = normalizer["action"].scale.numel() - hand_affine["scale"].numel()
@@ -214,11 +219,12 @@ def build_train_loader(cfg, dataset):
     return loader
 
 
-def record_data_processing(cfg, dataset):
+def record_data_processing(cfg, dataset, *, dexjoco=False):
     """记录实际读取字段的处理参数。"""
     processing = dataset.episode_store.attrs.get("data_processing")
-    metadata = None if processing is None else {
-        key: processing[key] for key in dataset.episode_store.keys() if key in processing
-    }
+    if dexjoco:
+        metadata = observation_processing(processing, dataset.sensor_modalities)
+    else:
+        metadata = {key: processing[key] for key in dataset.episode_store.keys() if key in (processing or {})}
     with open_dict(cfg):
         cfg.data_processing = metadata or None

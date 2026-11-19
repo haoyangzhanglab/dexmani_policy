@@ -46,6 +46,7 @@ from dexmani_policy.datasets.variants.ode import ODEDataset
 from dexmani_policy.datasets.variants.r3d import R3DDataset
 from dexmani_policy.datasets.variants.tactile import AdapTacDataset
 from dexmani_policy.deployment import load_policy
+from dexmani_policy.env_runner.dexjoco_runner import DexJoCoRunner
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation import rollout, selection
 from dexmani_policy.training import resume, trainer as policy_training
@@ -305,6 +306,35 @@ def test_ddim_rtc_matches_two_step_reference():
         )
         reference[:, 1:] += scale * soft_weight * strength * residual
     torch.testing.assert_close(actual, reference)
+
+
+@pytest.mark.parametrize("action_dim", [22, 44])
+def test_centered_rotvec_action_coordinates(action_dim):
+    actions = torch.linspace(0, 1, 3 * action_dim).view(3, action_dim)
+    arms = actions.unflatten(-1, (action_dim // 22, 22))
+    arms[..., 3] = torch.tensor([math.pi - 0.1, 0.3 - math.pi, 0.15 - math.pi])[:, None]
+    arms[..., 4:6] = 0
+    expected = torch.tensor([-1.0, 1.0, 0.25])[:, None].expand(-1, action_dim // 22)
+
+    class Decoder(nn.Module):
+        def compute_loss(self, condition, target, **kwargs):
+            torch.testing.assert_close(target[0].unflatten(-1, (-1, 22))[..., 3], expected)
+            return target.sum(), {}
+
+        def predict_action(self, condition, action_shape, *, rtc_prefix, **kwargs):
+            assert rtc_prefix.shape == (1, 3, action_dim)
+            torch.testing.assert_close(rtc_prefix[0].unflatten(-1, (-1, 22))[..., 3], expected)
+            return rtc_prefix
+
+    dataset = SimpleNamespace(
+        action_key="action_rotvec", iter_normalization_data=lambda key: iter((actions[:1], actions[1:])),
+    )
+    policy = Policy(nn.Identity(), Decoder(), 3, 1, 3, action_dim, center_rotvec=True)
+    policy.supports_rtc = True
+    fit_action_normalizer(dataset, policy.normalizer, center_rotvec=True)
+    policy.compute_loss({"obs": {}, "action": actions[None]})
+    output = policy._predict_from_condition(torch.zeros(1, 1), rtc_prefix=actions[None])
+    torch.testing.assert_close(output["future_actions"][0], actions)
 
 
 @pytest.mark.parametrize("pc_dim", [3, 6])
@@ -2061,9 +2091,10 @@ def test_resume_uses_saved_zarr_and_groups(tmp_path, small_dp3_checkpoint, make_
     ends[:] = [12]
     assert load_checkpoint(small_dp3_checkpoint).global_step == 1
 
-    layout = saved.effective_config.pop("episode_layout")
+    layout = saved.effective_config["episode_layout"]
+    saved.effective_config["episode_layout"] = {**layout, "episode_ends": [11]}
     save_checkpoint(small_dp3_checkpoint, saved)
-    with pytest.raises(ValueError, match="Resume checkpoint is missing episode_layout"):
+    with pytest.raises(ValueError, match="Resume episode layout mismatch"):
         resume.main(["--run", "dp3_run", "--max-updates", "1"])
     assert load_checkpoint(small_dp3_checkpoint).global_step == 1
 
@@ -2355,10 +2386,31 @@ def test_control_period_mismatch_closes_env(monkeypatch):
             created.append(self)
             self.dt = 0.1
 
-    monkeypatch.setattr(SimRunner, "_environment_class", lambda self: WrongPeriodEnv)
+    monkeypatch.setitem(sys.modules, "dexmani_sim", SimpleNamespace(resolve_env_class=lambda task: WrongPeriodEnv))
     with pytest.raises(ValueError, match="Control period mismatch"):
         make_runner().make_env(record_video=False)
     assert created[0].close_count == 1
+
+
+@pytest.mark.parametrize("change", [None, "num_points", "size"])
+def test_dexjoco_point_cloud_observation_processing(monkeypatch, change):
+    processing = {"proprio": {"layout": "wxyz"}, "rgb": {"size": [224, 224]}, "point_cloud": {"num_points": 4096}}
+    actual = copy.deepcopy(processing)
+    if change == "num_points":
+        actual["point_cloud"]["num_points"] = 1024
+    elif change == "size":
+        actual["rgb"]["size"] = [128, 128]
+    env = SmallEnv()
+    env.data_processing = actual
+    monkeypatch.setitem(sys.modules, "dexjoco.policy_env", SimpleNamespace(DexJoCoEnv=lambda *args, **kwargs: env))
+    runner = DexJoCoRunner("test", 1, ["proprio", "point_cloud"], {}, env.dt, data_processing=processing)
+    if change is None:
+        assert runner.make_env(record_video=False) is env
+        env.close()
+    else:
+        with pytest.raises(ValueError, match=f"DexJoCo observation processing mismatch.*{change}"):
+            runner.make_env(record_video=False)
+    assert env.close_count == 1
 
 
 @pytest.fixture
@@ -2439,17 +2491,23 @@ def test_fixed_checkpoint_uses_only_test_seeds(checkpoints, tmp_path):
     result = json.loads(path.read_text())
     test_seeds, _ = selection.split_evaluation_seeds(range(100, 110), 5, 3, 2)
     assert [row["seed"] for row in result["episodes"]] == test_seeds
+    assert result["control_dt_s"] == SmallEnv.dt
     assert result["completed"] and not (output / "candidates").exists()
 
 
-def test_eval_rejects_unsupported_action_before_loading_environment(checkpoints, tmp_path):
+@pytest.mark.parametrize("runner,action_key", [(SimRunner, "action_rotvec"), (DexJoCoRunner, "action")])
+def test_eval_rejects_unsupported_action_before_loading_environment(checkpoints, tmp_path, runner, action_key):
     checkpoint = load_checkpoint(checkpoints[0])
-    checkpoint.effective_config["action_key"] = "action_rotvec"
-    source = save_checkpoint(tmp_path / "rotvec.pt", checkpoint)
+    checkpoint.effective_config["env_runner"]["_target_"] = f"{runner.__module__}.{runner.__name__}"
+    checkpoint.effective_config["action_key"] = "action_rotvec" if runner is DexJoCoRunner else "action"
+    save_checkpoint(checkpoints[0], checkpoint)
+    checkpoint.effective_config["action_key"] = action_key
+    source = save_checkpoint(tmp_path / "wrong_action.pt", checkpoint)
     output = tmp_path / "eval"
-    with pytest.raises(ValueError, match="SimRunner does not support action_rotvec"):
+    error = f"{runner.__name__} does not support {action_key}"
+    with pytest.raises(ValueError, match=error):
         rollout.evaluate_policy(source, device="cpu", output_dir=output)
-    with pytest.raises(ValueError, match="SimRunner does not support action_rotvec"):
+    with pytest.raises(ValueError, match=error):
         selection.run_pipeline([checkpoints[0], source], device="cpu", output_dir=output)
     assert not output.exists()
 
@@ -2481,3 +2539,5 @@ def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints,
     assert not record["completed"]
     assert record["statistics"]["n_success"] == 1
     assert [row["seed"] for row in record["episodes"]] == [7]
+    expected_video = str(Path("videos/test/episode_7.mp4")) if failure == "video" else None
+    assert record["episodes"][0]["video"] == expected_video

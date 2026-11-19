@@ -81,3 +81,5 @@ def validate_config(cfg):
     cls = cast("type[Policy]", hydra.utils.get_class(cfg.agent._target_))
     if cfg.action_key not in cls.supported_action_keys:
         raise ValueError(f"{cls.__name__} does not support {cfg.action_key}")
+    if cfg.agent.get("center_rotvec", False) and cfg.action_key != "action_rotvec":
+        raise ValueError("agent.center_rotvec requires action_rotvec")

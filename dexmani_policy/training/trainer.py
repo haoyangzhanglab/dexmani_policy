@@ -16,6 +16,7 @@ from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
+from dexmani_policy.env_runner.dexjoco_runner import DexJoCoRunner
 from dexmani_policy.training import initialization
 from dexmani_policy.training.config import check_fresh_output, normalize_output_dir, validate_config
 from dexmani_policy.training.data import (
@@ -48,6 +49,8 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
         saved = model_checkpoint.effective_config
         if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
             raise ValueError("Policy initialization requires the same policy and action semantics")
+        if cfg.agent.get("center_rotvec", False) != saved["agent"].get("center_rotvec", False):
+            raise ValueError("Policy initialization requires the same agent.center_rotvec setting")
         with open_dict(cfg):
             cfg.normalization = saved["normalization"]
             cfg.normalization_dims = saved["normalization_dims"]
@@ -63,7 +66,8 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
     dataset, data_description = build_dataset(cfg)
     store = dataset.episode_store
     data_dt = data_description["control_dt_s"]
-    record_data_processing(cfg, dataset)
+    dexjoco = cfg.env_runner._target_ == f"{DexJoCoRunner.__module__}.{DexJoCoRunner.__name__}"
+    record_data_processing(cfg, dataset, dexjoco=dexjoco)
     if checkpoint is None:
         record_training_data(cfg, store, dataset.train_mask)
         policy_dt = data_dt
@@ -72,6 +76,11 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
     else:
         saved = checkpoint.effective_config
         restore_data_records(cfg, store, dataset.train_mask, saved=saved)
+        if dexjoco and cfg.data_processing != saved["data_processing"]:
+            raise ValueError(
+                f"Resume DexJoCo observation processing mismatch: "
+                f"checkpoint={saved['data_processing']}, dataset={cfg.data_processing}"
+            )
         if cfg.policy_name == "ode":
             current = (cfg.data_processing or {}).get("action_ode")
             previous = (saved["data_processing"] or {}).get("action_ode")

@@ -23,7 +23,7 @@ dataloader:
 
 dataset:
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  sensor_modalities: ["joint_state", "rgb"]
+  sensor_modalities: ["${agent.state_key}", "rgb"]
   rgb_preprocess_size: [84, 84]
   rgb_random_crop_size: [76, 76]
 

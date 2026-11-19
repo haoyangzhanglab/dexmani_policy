@@ -75,6 +75,7 @@ class DP(Policy):
         prediction_type: str = "sample",
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
+        center_rotvec: bool = False,
     ) -> None:
         obs_encoder = DPEncoder(
             rgb_backbone_name,
@@ -111,4 +112,5 @@ class DP(Policy):
             n_obs_steps,
             n_action_steps,
             action_dim,
+            center_rotvec=center_rotvec,
         )

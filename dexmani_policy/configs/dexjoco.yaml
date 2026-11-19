@@ -1,0 +1,20 @@
+task_name: water_plant
+zarr_path: robot_data/dexjoco/${task_name}.zarr
+action_key: action_rotvec
+
+normalization:
+  proprio: limits
+
+dataset:
+  augmentation_cfg:
+    state: null
+
+agent:
+  state_key: proprio
+  state_dim: null
+  center_rotvec: true
+  clip_sample: false
+
+env_runner:
+  _target_: dexmani_policy.env_runner.dexjoco_runner.DexJoCoRunner
+  env_kwargs: null

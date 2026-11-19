@@ -13,6 +13,7 @@ from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.inference import resolve_inference_settings, restore_policy
 from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.env_runner.dexjoco_runner import DexJoCoRunner
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.metrics import summarize_episodes
 from dexmani_policy.evaluation.seeds import (
@@ -23,6 +24,8 @@ from dexmani_policy.evaluation.seeds import (
 def validate_runner_options(runner_class, action_key, *, skip_intermediate_observations, video):
     if runner_class is SimRunner and action_key == "action_rotvec":
         raise ValueError("The built-in SimRunner does not support action_rotvec; use a compatible custom runner")
+    if runner_class is DexJoCoRunner and action_key != "action_rotvec":
+        raise ValueError(f"DexJoCoRunner does not support {action_key}; use action_rotvec")
     if skip_intermediate_observations and (runner_class is not SimRunner or video):
         raise ValueError("--skip-intermediate-observations requires the built-in SimRunner and video=False")
 
@@ -82,8 +85,11 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
                    rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
     if runner_class is SimRunner:
         options["skip_intermediate_observations"] = skip_intermediate_observations
+    elif runner_class is DexJoCoRunner:
+        options["data_processing"] = cfg["data_processing"]
     runner = runner_class(**options)
     record = dict(checkpoint=os.path.relpath(checkpoint, path.parent), global_step=global_step, weights=weights,
+                  control_dt_s=cfg["control_dt_s"],
                   inference_steps=inference_steps, action_steps=action_steps, seeds=seeds,
                   seed=seed, device=str(device), video=video, skip_intermediate_observations=skip_intermediate_observations,
                   episodes=[], statistics=None, completed=False)
@@ -94,6 +100,9 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     with closing(runner.run(agent, seeds=seeds, inference_steps=inference_steps,
                             action_steps=action_steps, video_save_dir=video_directory)) as results:
         for episode in results:
+            video_path = episode.get("video")
+            if video_path is not None:
+                episode["video"] = os.path.relpath(video_path, directory)
             record["episodes"].append(episode)
             record["statistics"] = summarize_episodes(record["episodes"])
             write_json(path, record)

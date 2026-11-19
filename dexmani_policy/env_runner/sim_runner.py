@@ -162,18 +162,18 @@ class SimRunner:
             if env is not None:
                 env.close()
 
-    def _environment_class(self):
+    def _make_env(self, *, record_video: bool):
         from dexmani_sim import resolve_env_class
 
-        return resolve_env_class(self.task_name)
-
-    def make_env(self, *, record_video: bool):
-        env_class = self._environment_class()
+        env_class = resolve_env_class(self.task_name)
         kwargs = {
             "render_mode": "rgb_array", **self.env_kwargs,
             "observation_keys": tuple(self.sensor_modalities),
         }
-        env = env_class(record_video=record_video, **kwargs)
+        return env_class(record_video=record_video, **kwargs)
+
+    def make_env(self, *, record_video: bool):
+        env = self._make_env(record_video=record_video)
         dt = env.dt
         if not np.isclose(dt, self.control_dt_s, rtol=1e-6, atol=1e-9):
             env.close()

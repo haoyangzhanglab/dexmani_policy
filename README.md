@@ -18,7 +18,7 @@ python -m pip install -r requirements.txt
 python -m pip install -e . --no-deps
 ```
 
-点云策略需要与 PyTorch 和 CUDA 匹配的 PyTorch3D。仿真评测需要安装 `dexmani_sim`。
+点云策略需要与 PyTorch 和 CUDA 匹配的 PyTorch3D。下例评测需要安装 `dexmani_sim`。
 
 用 `dexmani_sim` 生成 `pick_apple_messy` 的示教和评测种子，将转换后的 Zarr 放在 `robot_data/pick_apple_messy.zarr`。 [仿真数据准备](https://github.com/haoyangzhanglab/dexmani_sim) · [示教数据格式](docs/仿真数据集格式.md)
 
@@ -29,6 +29,10 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 ```
 
 新实验使用新目录。训练中断后，沿用原目录和示教数据，运行 `python -m dexmani_policy.training.resume --run "$RUN"`。
+
+### DexJoCo
+
+在 DexJoCo 导出示教后，将整个 Zarr 目录移到本仓库的 `robot_data/dexjoco/<task>.zarr`。实验配方组合 `dp` 或 `dp3` 与共用的 `dexjoco` 配置。评测环境安装导出时使用的 DexJoCo 提交，并在评测命令前设置 `MUJOCO_GL=egl`。 [DexJoCo 导出、训练和评测说明](https://github.com/haoyangzhanglab/dexjoco/blob/main/docs/dexmani_policy.md)
 
 ## 策略方向
 

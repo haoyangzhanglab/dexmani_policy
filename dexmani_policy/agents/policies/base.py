@@ -7,6 +7,7 @@ from torch import nn
 
 from dexmani_policy.common.config import positive_int, validate_action_window
 from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.pytorch_util import rebase_eef_rotvec
 
 
 def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> list[dict]:
@@ -57,10 +58,14 @@ class Policy(nn.Module):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
+        *,
+        center_rotvec: bool = False,
     ) -> None:
         super().__init__()
         validate_action_window(horizon, n_obs_steps, n_action_steps)
         positive_int(action_dim, "action_dim")
+        if center_rotvec and action_dim not in (22, 44):
+            raise ValueError("agent.center_rotvec requires a 22- or 44-component action_rotvec")
 
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
@@ -68,6 +73,7 @@ class Policy(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.n_action_steps = n_action_steps
         self.action_dim = action_dim
+        self.center_rotvec = center_rotvec
 
         self.normalizer = LinearNormalizer()
         self.normalization_dims: dict[str, int] = {}
@@ -126,10 +132,13 @@ class Policy(nn.Module):
         return self.action_dim
 
     def _encode_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        if self.center_rotvec:
+            actions = rebase_eef_rotvec(actions)
         return self.normalizer["action"].normalize(actions)
 
     def _decode_actions(self, prediction: torch.Tensor) -> torch.Tensor:
-        return self.normalizer["action"].unnormalize(prediction)
+        actions = self.normalizer["action"].unnormalize(prediction)
+        return rebase_eef_rotvec(actions) if self.center_rotvec else actions
 
     def forward(
         self, batch: dict, *, log_metrics: bool = True, **kwargs
@@ -186,9 +195,11 @@ class Policy(nn.Module):
             field = self.normalizer["action"]
             scale = field.scale[: self.control_action_dim]
             offset = field.offset[: self.control_action_dim]
-            normalized = rtc_prefix.to(device=condition.device, dtype=torch.float32) * scale + offset
+            rtc_prefix = rtc_prefix.to(device=condition.device, dtype=torch.float32)
+            if self.center_rotvec:
+                rtc_prefix = rebase_eef_rotvec(rtc_prefix)
             kwargs = dict(
-                rtc_prefix=normalized,
+                rtc_prefix=rtc_prefix * scale + offset,
                 delay_steps=delay_steps,
                 history_offset=self.action_start_index,
                 rtc_guidance_cap=rtc_guidance_cap,

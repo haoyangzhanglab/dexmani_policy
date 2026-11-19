@@ -5,6 +5,22 @@ from typing import Any
 import numpy as np
 
 
+def rebase_eef_rotvec(actions):
+    """Change the rotation reference by Rx(pi), its own inverse in SO(3)."""
+    import torch
+
+    arms = actions.unflatten(-1, (actions.shape[-1] // 22, 22))
+    rotvec = arms[..., 3:6].float()
+    half_angle = 0.5 * rotvec.norm(dim=-1, keepdim=True)
+    x, y, z = (0.5 * torch.sinc(half_angle / torch.pi) * rotvec).split(1, dim=-1)
+    # Left multiplication by the reference sends (w, x, y, z) to (-x, w, -z, y).
+    vector = torch.cat((half_angle.cos(), -z, y), dim=-1)
+    half_angle = torch.atan2(vector.norm(dim=-1, keepdim=True), x.abs())
+    gain = 2 / torch.sinc(half_angle / torch.pi)
+    rotvec = torch.where(x > 0, -gain, gain) * vector
+    return torch.cat((arms[..., :3], rotvec, arms[..., 6:]), dim=-1).flatten(-2)
+
+
 def set_seed(seed: int) -> None:
     import torch
 

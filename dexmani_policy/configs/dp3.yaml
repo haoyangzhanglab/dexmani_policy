@@ -20,7 +20,7 @@ dataloader:
 
 dataset:
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  sensor_modalities: ["joint_state", "point_cloud"]
+  sensor_modalities: ["${agent.state_key}", "point_cloud"]
 
   # 点 dropout 在 Dataset 中执行。
   augmentation_cfg:
