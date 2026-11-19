@@ -57,6 +57,12 @@ class MultimodalInteractionEncoder(nn.Module):
         self.relative_attention = Relative3DCrossAttention(geometry_scale=relative_geometry_scale)
         self.tactile_fusion = TactileGatedFusion()
 
+    def initialize_weights(self, source: str | None) -> None:
+        """Load RGB backbone weights from a local or supported pretrained source."""
+        if source is None:
+            return
+        self.rgb_encoder.initialize_weights(source)
+
     @property
     def effective_config(self) -> dict:
         return {

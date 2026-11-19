@@ -13,41 +13,58 @@ from dexmani_policy.training.data import (
 
 
 def resolve_rgb_architecture(agent, source):
-    name = agent.rgb_backbone_name
+    name = agent.get("rgb_backbone_name")
     if name not in ("dino", "siglip"):
         return
     rgb = dict(agent.get("rgb_backbone_config") or {})
-    if rgb.get("architecture") is None:
-        if source is None:
-            raise ValueError("Fresh HF RGB requires initialization.rgb or an explicit architecture")
-        from transformers import AutoConfig, SiglipVisionConfig
+    if rgb.get("architecture") is not None:
+        return
+    if source is None:
+        raise ValueError("Fresh HF RGB requires initialization.rgb or an explicit architecture")
+    from transformers import AutoConfig, SiglipVisionConfig
 
-        config_class = SiglipVisionConfig if name == "siglip" else AutoConfig
-        rgb["architecture"] = config_class.from_pretrained(source).to_dict()
+    config_class = SiglipVisionConfig if name == "siglip" else AutoConfig
+    rgb["architecture"] = config_class.from_pretrained(source).to_dict()
     with open_dict(agent):
         agent.rgb_backbone_config = rgb
 
 
 def inherit_rgb_architecture(agent, saved_agent):
-    if agent.rgb_backbone_name != saved_agent["rgb_backbone_name"]:
-        raise ValueError("RGB backbone differs from initialization policy")
+    name = agent.get("rgb_backbone_name")
+    saved_name = saved_agent.get("rgb_backbone_name")
+    if name is None and saved_name is None:
+        return
+    if name is not None and name != saved_name:
+        raise ValueError(f"RGB backbone differs from initialization policy: current={name!r}, checkpoint={saved_name!r}")
     rgb = dict(agent.get("rgb_backbone_config") or {})
     if rgb.get("architecture") is None:
-        architecture = saved_agent["rgb_backbone_config"].get("architecture")
+        architecture = (saved_agent.get("rgb_backbone_config") or {}).get("architecture")
         if architecture is not None:
             rgb["architecture"] = architecture
     with open_dict(agent):
+        agent.rgb_backbone_name = saved_name
         agent.rgb_backbone_config = rgb
 
 
 def prepare_warm_start(method, agent, saved_agent):
-    if method in {"dp", "sat", "dqrise", "dexlatent"}:
-        inherit_rgb_architecture(agent, saved_agent)
+    inherit_rgb_architecture(agent, saved_agent)
     if method == "dqrise" and agent.get("num_codes") is None:
         with open_dict(agent):
             agent.num_codes = saved_agent["num_codes"]
     if method == "adaptac" and agent.tactile_encoder._target_ != saved_agent["tactile_encoder"]["_target_"]:
         raise ValueError("Tactile encoder differs from initialization policy")
+
+
+def _initialize_rgb_encoder(obs_encoder, source):
+    rgb_encoder = getattr(obs_encoder, "rgb_encoder", None)
+    if source is None or rgb_encoder is None:
+        return False
+    # On RGB observation encoders, initialize_weights is an optional RGB-only hook.
+    initialize_weights = getattr(obs_encoder, "initialize_weights", None)
+    if initialize_weights is None:
+        initialize_weights = rgb_encoder.initialize_weights
+    initialize_weights(source)
+    return True
 
 
 def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = None, resuming: bool = False):
@@ -70,11 +87,10 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = No
     if dataset.episode_store[dataset.action_key].shape[-1] != model.control_action_dim:
         raise ValueError("Dataset primary action width must match policy control output")
     if checkpoint is None:
-        if method in {"dp", "sat", "dqrise", "dexlatent"}:
-            model.obs_encoder.rgb_encoder.initialize_weights(initialization.rgb)
-            if initialization.rgb is not None:
-                record_prior_data(cfg, dataset, initialization.rgb, {"source": None})
-        elif method == "r3d":
+        rgb_source = initialization.get("rgb")
+        if _initialize_rgb_encoder(model.obs_encoder, rgb_source):
+            record_prior_data(cfg, dataset, rgb_source, {"source": None})
+        if method == "r3d":
             model.obs_encoder.pc_encoder.initialize_weights(initialization.uni3d)
             if initialization.uni3d is not None:
                 record_prior_data(cfg, dataset, initialization.uni3d, {"source": None})

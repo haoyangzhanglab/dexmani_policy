@@ -58,8 +58,8 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
         initialization.prepare_warm_start(cfg.policy_name, cfg.agent, saved["agent"])
     if checkpoint is None:
         check_fresh_output(cfg.workspace.output_dir)
-    if model_checkpoint is None and cfg.policy_name in {"dp", "sat", "dqrise", "dexlatent"}:
-        initialization.resolve_rgb_architecture(cfg.agent, cfg.initialization.rgb)
+    if model_checkpoint is None:
+        initialization.resolve_rgb_architecture(cfg.agent, cfg.initialization.get("rgb"))
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = cfg.training.cudnn_benchmark
@@ -81,11 +81,6 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
                 f"Resume DexJoCo observation processing mismatch: "
                 f"checkpoint={saved['data_processing']}, dataset={cfg.data_processing}"
             )
-        if cfg.policy_name == "ode":
-            current = (cfg.data_processing or {}).get("action_ode")
-            previous = (saved["data_processing"] or {}).get("action_ode")
-            if (current or {}).get("semantics") != (previous or {}).get("semantics"):
-                raise ValueError("Resume ODE action target semantics mismatch; use a fresh or warm-start run")
         policy_dt = saved["control_dt_s"]
         if not np.isclose(data_dt, policy_dt, rtol=1e-6, atol=1e-9):
             raise ValueError(

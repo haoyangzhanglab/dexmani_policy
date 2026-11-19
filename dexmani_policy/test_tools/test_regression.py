@@ -1,5 +1,4 @@
 import copy
-import importlib
 import json
 import math
 import random
@@ -8,13 +7,14 @@ import sys
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import hydra
 import numpy as np
 import pytest
 import torch
 import zarr
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, default_collate
@@ -25,9 +25,11 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiff
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
 from dexmani_policy.agents.action_decoders.ode import ODE
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
+from dexmani_policy.agents.obs_encoder import multimodal_interaction, rgb_point
 from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer
+from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.resnet import convert_group_norm
-from dexmani_policy.agents.policies import r3d
+from dexmani_policy.agents.policies import dp, r3d
 from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.common import config as common_config, io_util
@@ -427,13 +429,22 @@ def test_bn_to_gn_copies_learned_affines():
     assert set(model[0].state_dict()) == {"weight", "bias"}
 
 
-def test_ode_refuses_real_attempt_only_store(make_demo):
-    path = make_demo()
-    zarr.open_group(str(path), mode="a").attrs.update(
-        format="dexmani.real.canonical", source_episodes=["capture"], source_row_ranges=[[0, 12]],
+def test_ode_reads_real_held_joint_targets_from_action(make_demo):
+    path = make_demo(episode_ends=(4, 12))
+    root = zarr.open_group(str(path), mode="a")
+    root.attrs.update(
+        format="dexmani.real.canonical", action_semantics="held_accepted_joint_target",
+        source_episodes=["capture", "capture"], source_row_ranges=[[0, 4], [4, 12]],
     )
-    with pytest.raises(ValueError, match="Real ODE requires action_ode"):
-        ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
+    action = root["data/action"]
+    joint_state = root["data/joint_state"]
+    action[1] = action[0]
+    dataset = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
+
+    np.testing.assert_array_equal(dataset[0]["prev_action"], joint_state[0])
+    np.testing.assert_array_equal(dataset[1]["action"][0], action[0])
+    np.testing.assert_array_equal(dataset[2]["prev_action"], action[1])
+    np.testing.assert_array_equal(dataset[4]["prev_action"], joint_state[4])
 
 
 def test_afro_default_frames_use_only_complete_windows(segments):
@@ -988,31 +999,74 @@ def test_r3d_group_loss_and_gradients(monkeypatch, auxiliary, weight, log_metric
 # Policy initialization
 
 
-class SmallRGBEncoder(nn.Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.rgb_encoder = SmallRGBWeights()
-        self.out_dim = 8
-        self.n_obs_steps = kwargs["n_obs_steps"]
-
-    def forward(self, obs):
-        features = self.rgb_encoder(obs["joint_state"][:, :2]).repeat(1, 4)
-        return features.unflatten(0, (-1, self.n_obs_steps))
-
-
 class SmallRGBWeights(nn.Linear):
+    out_dim = 2
+
     def __init__(self):
         super().__init__(2, 2)
+        self.effective_config = {}
 
     def initialize_weights(self, source):
         if source is not None:
             self.load_state_dict(torch.load(source, weights_only=True))
 
 
+def build_small_rgb(name, config):
+    return SmallRGBWeights(), ImageProcessor.from_preset(name, config)
+
+
+@pytest.mark.parametrize("source", [None, "test-rgb"])
+def test_multimodal_rgb_initialization(monkeypatch, source):
+    rgb = SmallRGBWeights()
+    rgb.initialize_weights = Mock()
+    monkeypatch.setattr(multimodal_interaction, "build_rgb_encoder", lambda *args: (rgb, None))
+    encoder = multimodal_interaction.MultimodalInteractionEncoder()
+    rgb.initialize_weights.assert_not_called()
+
+    encoder.initialize_weights(source)
+    if source is None:
+        rgb.initialize_weights.assert_not_called()
+    else:
+        rgb.initialize_weights.assert_called_once_with(source)
+
+
+@pytest.mark.parametrize("method,module", [("dp", dp), ("sat", rgb_point)])
+def test_rgb_initialization_in_dp_and_sat(tmp_path, make_demo, monkeypatch, method, module):
+    monkeypatch.setattr(module, "build_rgb_encoder", build_small_rgb)
+    dataset = DemonstrationDataset(make_demo(), sensor_modalities=["joint_state"], horizon=4, obs_horizon=1)
+    source = tmp_path / "rgb.pt"
+    rgb = SmallRGBWeights()
+    torch.save(rgb.state_dict(), source)
+    model_config = ["agent.down_dims=[16,32]"] if method == "dp" else [
+        "agent.hidden_dim=16", "agent.n_layers=1", "agent.n_head=2", "agent.pc_encoder_config.channels=24",
+    ]
+    cfg = load_config(method, [
+        "training.device=cpu", "agent.action_dim=19", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
+        f"initialization.rgb={source}", *model_config,
+    ])
+    with patch.object(SmallRGBWeights, "initialize_weights", autospec=True,
+                      side_effect=SmallRGBWeights.initialize_weights) as initialize:
+        model = build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+    assert isinstance(model.obs_encoder, dp.DPEncoder if method == "dp" else rgb_point.RGBPointObservationEncoder)
+    initialize.assert_called_once_with(model.obs_encoder.rgb_encoder, str(source))
+    torch.testing.assert_close(model.obs_encoder.rgb_encoder.state_dict(), rgb.state_dict())
+
+
+def test_non_rgb_training_ignores_rgb_source(tmp_path, small_dp3_config):
+    cfg = small_dp3_config(tmp_path / "non_rgb", "+initialization.rgb=unused")
+    with closing(build_trainer(cfg)) as trainer:
+        assert not hasattr(trainer.model.obs_encoder, "rgb_encoder")
+        assert "prior_data" not in trainer.cfg
+
+
 @pytest.mark.parametrize("method", ["dqrise", "dexlatent"])
 def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
-    module = importlib.import_module(f"dexmani_policy.agents.policies.{method}")
-    monkeypatch.setattr(module, "RGBPointObservationEncoder", SmallRGBEncoder)
+    def encode_joint_state(self, obs):
+        features = self.rgb_encoder(obs["joint_state"][:, :2]).repeat(1, self.out_dim // 2)
+        return features.unflatten(0, (-1, self.n_obs_steps))
+
+    monkeypatch.setattr(rgb_point, "build_rgb_encoder", build_small_rgb)
+    monkeypatch.setattr(rgb_point.RGBPointObservationEncoder, "forward", encode_joint_state)
     data_path = make_demo()
     dataset = DemonstrationDataset(data_path, sensor_modalities=["joint_state"], horizon=4, obs_horizon=1)
     directory = tmp_path / "run"
@@ -1020,7 +1074,7 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         f"zarr_path={data_path}", "task_name=test", f"workspace.output_dir={directory}",
         "workspace.wandb_cfg=null", "dataset.sensor_modalities=[joint_state]", "dataset.augmentation_cfg=null",
         "training.device=cpu", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
-        "agent.hidden_dim=16", "agent.n_layers=1", "agent.n_head=2",
+        "agent.hidden_dim=16", "agent.n_layers=1", "agent.n_head=2", "agent.pc_encoder_config.channels=24",
         "training.use_compile=false", "training.loop.total_train_steps=3",
         "dataloader.num_workers=0", "dataloader.batch_size=2",
     ])
@@ -1059,7 +1113,11 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         cfg.initialization.dexlatent = str(path)
         affine = prior.initialize_weights(path)
         scale, offset = affine["scale"], affine["offset"]
-    model = build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+    with patch.object(SmallRGBWeights, "initialize_weights", autospec=True,
+                      side_effect=SmallRGBWeights.initialize_weights) as initialize:
+        model = build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+    assert isinstance(model.obs_encoder, rgb_point.RGBPointObservationEncoder)
+    initialize.assert_called_once_with(model.obs_encoder.rgb_encoder, str(rgb_path))
     torch.testing.assert_close(model.obs_encoder.rgb_encoder.state_dict(), rgb.state_dict())
     torch.testing.assert_close(model.normalizer["action"].scale[7:], scale)
     torch.testing.assert_close(model.normalizer["action"].offset[7:], offset)
@@ -1078,11 +1136,9 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         assert normalized.shape[-1] == 39
     before = copy.deepcopy(model.state_dict())
     before_config = copy.deepcopy(cfg.agent)
-    sat_module = importlib.import_module("dexmani_policy.agents.policies.sat")
-    monkeypatch.setattr(sat_module, "RGBPointObservationEncoder", SmallRGBEncoder)
     sat_cfg = load_config("sat", [
         "training.device=cpu", "agent.action_dim=19", "agent.hidden_dim=16",
-        "agent.n_layers=1", "agent.n_head=2", "initialization.rgb=null",
+        "agent.n_layers=1", "agent.n_head=2", "initialization.rgb=null", "agent.pc_encoder_config.channels=24",
     ])
     sat = build_policy(sat_cfg, dataset, {"action": 19, "joint_state": 19})
     with torch.no_grad():
@@ -1255,11 +1311,8 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, make
         assert resumed.cfg.prior_data == warm_saved.effective_config["prior_data"]
 
 
-@pytest.mark.parametrize("kind", ["dino", "siglip"])
-def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
-    from transformers import AutoConfig, AutoModel, Dinov2Config, SiglipVisionConfig, SiglipVisionModel
-    from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
-    from dexmani_policy.training.initialization import inherit_rgb_architecture, resolve_rgb_architecture
+def save_tiny_hf_rgb(directory, kind):
+    from transformers import AutoModel, Dinov2Config, SiglipVisionConfig, SiglipVisionModel
 
     config_class = Dinov2Config if kind == "dino" else SiglipVisionConfig
     architecture = config_class(hidden_size=16, intermediate_size=32, num_hidden_layers=1,
@@ -1267,17 +1320,96 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     if kind == "siglip":
         architecture.vision_use_head = False
     source = AutoModel.from_config(architecture) if kind == "dino" else SiglipVisionModel(architecture)
-    directory = tmp_path / "rgb"
     source.save_pretrained(directory)
-    agent = OmegaConf.create({"rgb_backbone_name": kind, "rgb_backbone_config": {"tune_mode": "full"}})
+    return source
+
+
+class MultimodalPolicyForTest(Policy):
+    def __init__(self, horizon, n_obs_steps, n_action_steps, action_dim, **obs_config):
+        encoder = multimodal_interaction.MultimodalInteractionEncoder(**obs_config)
+        super().__init__(encoder, nn.Identity(), horizon, n_obs_steps, n_action_steps, action_dim)
+
+
+def test_multimodal_rgb_training_lifecycle(tmp_path, small_dp3_config, monkeypatch):
+    from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
+
+    directory, source = tmp_path / "fresh", tmp_path / "rgb"
+    pretrained = save_tiny_hf_rgb(source, "dino")
+    cfg = small_dp3_config(directory, "dataset.sensor_modalities=[joint_state]", "eval.inference_steps=2")
+    cfg.policy_name = "multimodal_test"
+    with open_dict(cfg):
+        cfg.initialization.rgb = str(source)
+        cfg.agent = {
+            "_target_": f"{__name__}.MultimodalPolicyForTest",
+            "horizon": 4, "n_obs_steps": 1, "n_action_steps": 4, "action_dim": 19,
+            "rgb_backbone_name": "dino", "rgb_backbone_config": {"tune_mode": "full", "image_size": [8, 8]},
+        }
+
+    encoder_type = multimodal_interaction.MultimodalInteractionEncoder
+    with (
+        patch.object(encoder_type, "initialize_weights", autospec=True,
+                     side_effect=encoder_type.initialize_weights) as initialize_obs,
+        patch.object(ViTEncoder, "initialize_weights", autospec=True,
+                     side_effect=ViTEncoder.initialize_weights) as initialize_rgb,
+        closing(build_trainer(cfg)) as fresh,
+    ):
+        initialize_obs.assert_called_once_with(fresh.model.obs_encoder, str(source))
+        initialize_rgb.assert_called_once_with(fresh.model.obs_encoder.rgb_encoder, str(source))
+        for model in (fresh.model, fresh.ema_model):
+            torch.testing.assert_close(model.obs_encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
+        prior, = fresh.cfg.prior_data
+        assert prior == {"source": None, "artifact": str(source), "budget_verified": False}
+        assert fresh.cfg.agent.rgb_backbone_config.architecture.hidden_size == 16
+        with torch.no_grad():
+            next(fresh.model.obs_encoder.rgb_encoder.parameters()).fill_(2)
+            next(fresh.ema_model.obs_encoder.rgb_encoder.parameters()).fill_(3)
+        fresh.save_checkpoint()
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("Checkpoint restoration must use the saved RGB architecture")
+
+        monkeypatch.setattr(policy_training.initialization, "resolve_rgb_architecture", forbidden)
+        latest = directory / "checkpoints/latest.pt"
+        saved = load_checkpoint(latest)
+        with closing(prepare_resume(directory)) as resumed:
+            torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
+            torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
+        warm_cfg = copy.deepcopy(cfg)
+        warm_cfg.initialization.policy = str(latest)
+        warm_cfg.workspace.output_dir = str(tmp_path / "warm")
+        with open_dict(warm_cfg.agent):
+            del warm_cfg.agent.rgb_backbone_name
+        with closing(build_trainer(warm_cfg)) as warm:
+            saved_rgb = saved.effective_config["agent"]["rgb_backbone_config"]
+            assert warm.cfg.agent.rgb_backbone_name == "dino"
+            assert warm.cfg.agent.rgb_backbone_config.architecture == saved_rgb["architecture"]
+            torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
+            torch.testing.assert_close(warm.ema_model.state_dict(), saved.model_state)
+        assert initialize_obs.call_count == initialize_rgb.call_count == 1
+
+
+@pytest.mark.parametrize("kind", ["dino", "siglip"])
+def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
+    from transformers import AutoConfig, SiglipVisionConfig
+    from dexmani_policy.training.initialization import prepare_warm_start, resolve_rgb_architecture
+
+    directory = tmp_path / "rgb"
+    source = save_tiny_hf_rgb(directory, kind)
+    agent = OmegaConf.create({
+        "rgb_backbone_name": kind, "rgb_backbone_config": {"tune_mode": "full", "image_size": 8},
+    })
     resolve_rgb_architecture(agent, str(directory))
     assert agent.rgb_backbone_config.architecture.hidden_size == 16
-    encoder = ViTEncoder(kind, tune_mode="full", architecture=OmegaConf.to_container(agent.rgb_backbone_config.architecture))
+    encoder = multimodal_interaction.MultimodalInteractionEncoder(**OmegaConf.to_container(agent))
+    config = copy.deepcopy(encoder.effective_config)
     encoder.initialize_weights(str(directory))
-    torch.testing.assert_close(encoder.backbone.state_dict(), source.state_dict())
-    result = encoder(torch.randn(2, 3, 8, 8))
+    torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), source.state_dict())
+    assert config == encoder.effective_config
+    assert config["rgb_backbone_config"]["architecture"]["hidden_size"] == 16
+    assert config["rgb_backbone_config"]["image_size"] == (8, 8)
+    result = encoder.rgb_encoder(torch.randn(2, 3, 8, 8))
     result["patch_tokens"].square().mean().backward()
-    assert any(parameter.grad is not None for parameter in encoder.backbone.parameters())
+    assert any(parameter.grad is not None for parameter in encoder.rgb_encoder.backbone.parameters())
 
     def forbidden(*args, **kwargs):
         raise AssertionError("resolved or inherited architecture must not read a source")
@@ -1286,11 +1418,45 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(SiglipVisionConfig, "from_pretrained", forbidden)
     resolve_rgb_architecture(agent, "missing-source")
     warm = OmegaConf.create({"rgb_backbone_name": kind, "rgb_backbone_config": {}})
-    inherit_rgb_architecture(warm, OmegaConf.to_container(agent))
+    prepare_warm_start("multimodal_test", warm, OmegaConf.to_container(agent))
     assert warm.rgb_backbone_config.architecture == agent.rgb_backbone_config.architecture
+    warm.rgb_backbone_config.architecture.hidden_size = 32
+    prepare_warm_start("multimodal_test", warm, OmegaConf.to_container(agent))
+    assert warm.rgb_backbone_config.architecture.hidden_size == 32
     warm.rgb_backbone_name = "resnet"
     with pytest.raises(ValueError, match="RGB backbone"):
-        inherit_rgb_architecture(warm, OmegaConf.to_container(agent))
+        prepare_warm_start("multimodal_test", warm, OmegaConf.to_container(agent))
+
+
+def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
+    import timm
+    from safetensors.torch import save_file
+    from transformers import AutoConfig, SiglipVisionConfig
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("DINOv3 uses a timm architecture")
+
+    monkeypatch.setattr(AutoConfig, "from_pretrained", forbidden)
+    monkeypatch.setattr(SiglipVisionConfig, "from_pretrained", forbidden)
+    agent = OmegaConf.create({"rgb_backbone_name": "dinov3"})
+    policy_training.initialization.resolve_rgb_architecture(agent, str(tmp_path))
+    assert "rgb_backbone_config" not in agent
+
+    overrides = {"img_size": 32, "embed_dim": 24, "depth": 1, "num_heads": 3}
+    architecture = {"model_name": "vit_small_patch16_dinov3", **overrides}
+    source = timm.create_model(**architecture, pretrained=False)
+    save_file(source.state_dict(), tmp_path / "model.safetensors")
+    with patch.object(timm, "create_model", wraps=timm.create_model) as create_model:
+        encoder = multimodal_interaction.MultimodalInteractionEncoder(rgb_backbone_config={
+            "architecture": overrides, "image_size": 32, "tune_mode": "full",
+        })
+    create_model.assert_called_once_with(**architecture, pretrained=False)
+    config = copy.deepcopy(encoder.effective_config)
+    encoder.initialize_weights(str(tmp_path))
+    torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), source.state_dict())
+    assert config == encoder.effective_config
+    assert config["rgb_backbone_config"]["architecture"] == architecture
+    assert config["rgb_backbone_config"]["image_size"] == (32, 32)
 
 
 def test_method_owned_warm_checks():
