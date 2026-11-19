@@ -2383,7 +2383,19 @@ def checkpoints(tmp_path, monkeypatch, environments):
 
 
 @pytest.mark.parametrize("skip_intermediate_observations", [False, True])
-def test_selection_and_independent_test(checkpoints, tmp_path, skip_intermediate_observations):
+@pytest.mark.parametrize("default_kwargs_index", [0, 1])
+@pytest.mark.parametrize("omit_env_kwargs", [False, True])
+def test_selection_and_independent_test(
+    checkpoints, tmp_path, skip_intermediate_observations, default_kwargs_index, omit_env_kwargs,
+):
+    checkpoint_path = checkpoints[default_kwargs_index]
+    checkpoint = load_checkpoint(checkpoint_path)
+    env_runner = checkpoint.effective_config["env_runner"]
+    if omit_env_kwargs:
+        del env_runner["env_kwargs"]
+    else:
+        env_runner["env_kwargs"] = None
+    save_checkpoint(checkpoint_path, checkpoint)
     path = selection.run_pipeline(
         checkpoints, selection_episodes=2, test_episodes=3, seed=5, device="cpu", output_dir=tmp_path / "eval",
         skip_intermediate_observations=skip_intermediate_observations,
@@ -2406,6 +2418,16 @@ def test_selection_and_independent_test(checkpoints, tmp_path, skip_intermediate
         for rate, steps, step in [(0, None, 100), (0.5, 1, 100), (1, 5, 100), (1, 2, 1), (1, 2, 2)]
     ]
     assert sorted(candidates, key=selection.candidate_score) == candidates
+
+
+def test_selection_rejects_different_env_kwargs(checkpoints, tmp_path):
+    checkpoint = load_checkpoint(checkpoints[1])
+    checkpoint.effective_config["env_runner"]["env_kwargs"] = {"randomize": True}
+    save_checkpoint(checkpoints[1], checkpoint)
+    output = tmp_path / "different_env"
+    with pytest.raises(ValueError, match="Candidates must use the same env_kwargs"):
+        selection.run_pipeline(checkpoints, device="cpu", output_dir=output)
+    assert not output.exists()
 
 
 def test_fixed_checkpoint_uses_only_test_seeds(checkpoints, tmp_path):
