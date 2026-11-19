@@ -1,3 +1,4 @@
+# @package _global_
 task_name: water_plant
 zarr_path: robot_data/dexjoco/${task_name}.zarr
 action_key: action_rotvec

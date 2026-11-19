@@ -1,4 +1,8 @@
 # 供主策略继承；独立预训练使用各自的配方。
+defaults:
+  - eval/dexmani_sim@_here_
+  - _self_
+
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 action_key: action
@@ -46,12 +50,6 @@ training:
 
 eval:
   use_ema: ${training.use_ema}
-
-env_runner:
-  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
-  env_kwargs:
-    randomize_model_id: false
-    randomize_table_height: true
 
 workspace:
   output_dir: ${hydra:runtime.output_dir}
