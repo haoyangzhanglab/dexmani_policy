@@ -1,4 +1,4 @@
-"""Single-frame visuotactile encoding around six anatomical hand landmarks."""
+"""Hand-object interaction encoding from RGB-D geometry, kinematics and tactile force."""
 
 from __future__ import annotations
 
@@ -109,9 +109,9 @@ class HandObjectInteractionEncoder(nn.Module):
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Return six wrist-first interaction tokens [B, 6, 192]."""
-        return self.encode_with_diagnostics(obs)["tokens"]
+        return self.forward_with_aux(obs)["tokens"]
 
-    def encode_with_diagnostics(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Return tokens and intermediate tensors for geometry/projection diagnostics."""
         scene_tokens, scene_points_base, projection_valid = self._encode_scene_memory(obs)
         hand_tokens, hand_landmarks_base = self.hand_encoder(obs["eef_pose"], obs["fingertip_xyz"])
