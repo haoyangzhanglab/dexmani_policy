@@ -1008,23 +1008,46 @@ def test_r3d_group_loss_and_gradients(monkeypatch, auxiliary, weight, log_metric
 
 def test_hand_token_construction():
     encoder = HandTokenEncoder()
-    wrist_xyz = torch.tensor([[0.10, 0.20, 0.30], [-0.20, 0.10, 0.40]])
-    rotation_6d = torch.tensor([[0.0, 1.0, 0.0, -1.0, 0.0, 0.0]]).expand(2, -1)
-    fingertip_xyz = wrist_xyz[:, None] + torch.arange(30, dtype=torch.float32).reshape(2, 5, 3) / 300
-    eef_pose = torch.cat((wrist_xyz, rotation_6d), dim=-1)
-    hand_tokens, hand_landmarks_base = encoder(eef_pose, fingertip_xyz)
+    fingertips_wrist = torch.arange(1, 31, dtype=torch.float32).reshape(2, 5, 3) / 256
+    wrist_xyz_1 = torch.tensor([[0.125, 0.25, 0.375], [-0.25, 0.125, 0.5]])
+    wrist_xyz_2 = torch.tensor([[-0.125, 0.375, 0.25], [0.25, -0.125, 0.375]])
+    rotation_1 = torch.eye(3).expand(2, -1, -1)
+    rotation_2 = torch.tensor([
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+    ])
+    capture_wrist, capture_fingers = Mock(return_value=None), Mock(return_value=None)
+    finger_token_sets = []
+    for wrist_xyz_base, rotation in ((wrist_xyz_1, rotation_1), (wrist_xyz_2, rotation_2)):
+        rotation_6d = torch.cat((rotation[:, :, 0], rotation[:, :, 1]), dim=-1)
+        eef_pose = torch.cat((wrist_xyz_base, rotation_6d), dim=-1).requires_grad_()
+        fingertips_base = (fingertips_wrist @ rotation.transpose(-1, -2) + wrist_xyz_base[:, None]).requires_grad_()
+        with (
+            encoder.wrist_mlp.register_forward_pre_hook(capture_wrist),
+            encoder.finger_mlp.register_forward_pre_hook(capture_fingers),
+            torch.autocast("cpu", dtype=torch.bfloat16),
+        ):
+            hand_tokens, hand_landmarks_base = encoder(eef_pose, fingertips_base)
 
-    assert hand_tokens.shape == (2, 6, 192)
-    assert hand_landmarks_base.shape == (2, 6, 3)
-    assert torch.equal(hand_landmarks_base[:, 0], wrist_xyz)
-    assert torch.equal(hand_landmarks_base[:, 1:], fingertip_xyz)
+        assert hand_tokens.shape == (2, 6, 192)
+        assert hand_landmarks_base.shape == (2, 6, 3)
+        expected_landmarks = torch.cat((wrist_xyz_base[:, None], fingertips_base), dim=1)
+        assert torch.equal(hand_landmarks_base, expected_landmarks)
+        _, (wrist_input,) = capture_wrist.call_args.args
+        _, (finger_inputs,) = capture_fingers.call_args.args
+        expected_wrist_input = torch.cat((wrist_xyz_base / 0.25, rotation_6d), dim=-1)
+        torch.testing.assert_close(wrist_input, expected_wrist_input)
+        torch.testing.assert_close(finger_inputs, fingertips_wrist / 0.10)
+        finger_token_sets.append(hand_tokens[:, 1:])
 
-    identity_6d = torch.tensor([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]]).expand_as(rotation_6d)
-    rotated_tokens, _ = encoder(torch.cat((wrist_xyz, identity_6d), dim=-1), fingertip_xyz)
-    assert torch.equal(hand_tokens[:, 1:], rotated_tokens[:, 1:])
+        pose_grad, fingertips_grad = torch.autograd.grad(finger_inputs.sum(), (eef_pose, fingertips_base))
+        assert pose_grad.isfinite().all() and torch.count_nonzero(pose_grad[:, 3:]) > 0
+        assert fingertips_grad.isfinite().all() and torch.count_nonzero(fingertips_grad) > 0
+
+    torch.testing.assert_close(finger_token_sets[0], finger_token_sets[1])
 
     with pytest.raises(ValueError, match="fingertip_xyz"):
-        encoder(eef_pose, fingertip_xyz[:, :0])
+        encoder(eef_pose, fingertips_base[:, :0])
 
 
 def test_multi_finger_tactile_encoding():
@@ -1059,6 +1082,37 @@ def test_tactile_fusion_zero_force_invariance():
     with pytest.raises(ValueError, match="Tactile"):
         fusion(hand_tokens, {**features, "local_tokens": features["local_tokens"][:, :1]})
 
+    fixed_features = {key: torch.ones_like(value) for key, value in features.items()}
+    hand_states = torch.zeros_like(hand_tokens)
+    hand_states[1, 0, 0] = 4
+    hand_states[1, 3, 0] = 2
+    with torch.no_grad():
+        for gate in (fusion.local_gate, fusion.global_gate):
+            torch.testing.assert_close(gate.bias, torch.full_like(gate.bias, -1.5))
+            gate.weight.zero_()
+            gate.weight[:, [0, 64]] = 1
+
+    capture_local, capture_global = Mock(return_value=None), Mock(return_value=None)
+    with (
+        fusion.local_gate.register_forward_hook(capture_local),
+        fusion.global_gate.register_forward_hook(capture_global),
+    ):
+        fused = fusion(hand_states, fixed_features)
+
+    _, (local_input,), local_logits = capture_local.call_args.args
+    _, (global_input,), global_logits = capture_global.call_args.args
+    torch.testing.assert_close(local_input, torch.cat((fixed_features["local_tokens"], hand_states[:, 1:]), dim=-1))
+    torch.testing.assert_close(global_input, torch.cat((fixed_features["global_token"], hand_states.mean(dim=1)), dim=-1))
+    expected_local_logits = torch.full((2, 5, 1), -0.5)
+    expected_local_logits[1, 2] = 1.5
+    expected_global_logits = torch.tensor([[-0.5], [0.5]])
+    torch.testing.assert_close(local_logits, expected_local_logits)
+    torch.testing.assert_close(global_logits, expected_global_logits)
+    expected = hand_states.clone()
+    expected[:, 1:] += expected_local_logits.sigmoid() * fusion.local_projection(fixed_features["local_tokens"])
+    expected += (expected_global_logits.sigmoid() * fusion.global_projection(fixed_features["global_token"]))[:, None]
+    torch.testing.assert_close(fused, expected)
+
     optimizer = torch.optim.SGD([*encoder.parameters(), *fusion.parameters()], lr=0.1)
     fusion(hand_tokens, features).square().mean().backward()
     optimizer.step()
@@ -1069,8 +1123,8 @@ def test_hand_scene_attention_geometry_bias():
     attention = HandSceneAttention()
     hand_tokens = torch.randn(2, 6, 192)
     scene_tokens = torch.randn(2, 128, 192)
-    hand_landmarks_base = torch.randn(2, 6, 3)
-    scene_points_base = torch.randn(2, 128, 3)
+    hand_landmarks_base = torch.randn(2, 6, 3, dtype=torch.bfloat16)
+    scene_points_base = torch.randn(2, 128, 3, dtype=torch.bfloat16)
     assert torch.count_nonzero(attention.geometry_bias[-1].weight) == 0
     assert torch.count_nonzero(attention.geometry_bias[-1].bias) == 0
     with torch.no_grad():
@@ -1086,8 +1140,17 @@ def test_hand_scene_attention_geometry_bias():
 
     assert tokens.shape == (2, 6, 192)
     _, (geometry_input,), geometry_output = capture_geometry.call_args.args
+    assert geometry_input.shape == geometry_output.shape == (2, 6, 128, 4)
     assert geometry_input.dtype == geometry_output.dtype == torch.float32
-    torch.testing.assert_close(geometry_input, (scene_points_base[:, None] - hand_landmarks_base[:, :, None]) / 0.10)
+    relative_xyz = scene_points_base.float()[:, None] - hand_landmarks_base.float()[:, :, None]
+    expected_geometry = torch.cat(
+        (
+            relative_xyz / 0.10,
+            torch.linalg.vector_norm(relative_xyz, dim=-1, keepdim=True) / 0.10,
+        ),
+        dim=-1,
+    )
+    torch.testing.assert_close(geometry_input, expected_geometry)
     query, key, value = sdpa.call_args.args[:3]
     bias = sdpa.call_args.kwargs["attn_mask"]
     assert query.shape == (2, 4, 6, 48)
@@ -1169,7 +1232,8 @@ def test_hand_scene_encoder_backward():
         rgb_backbone_name="dino",
         rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
     )
-    tokens = encoder(make_hand_scene_observation())
+    obs = make_hand_scene_observation()
+    tokens = encoder(obs)
     assert tokens.shape == (2, 6, 192)
     probe = torch.randn_like(tokens)
     (tokens * probe).mean().backward()
@@ -1185,6 +1249,10 @@ def test_hand_scene_encoder_backward():
         "tactile_encoder.force_encoder.0.weight",
         "tactile_fusion.local_projection.weight",
         "tactile_fusion.global_projection.weight",
+        "tactile_fusion.local_gate.weight",
+        "tactile_fusion.local_gate.bias",
+        "tactile_fusion.global_gate.weight",
+        "tactile_fusion.global_gate.bias",
         "hand_scene_attention.hand_attention.in_proj_weight",
         "hand_scene_attention.query_projection.weight",
         "hand_scene_attention.scene_kv.weight",
@@ -1195,6 +1263,17 @@ def test_hand_scene_encoder_backward():
         assert grad is not None, name
         assert grad.isfinite().all(), name
         assert grad.count_nonzero() > 0, name
+
+    geometry_bias = encoder.hand_scene_attention.geometry_bias
+    # The zero-initialized final layer blocks gradients to the first layer until an update.
+    optimizer = torch.optim.SGD(geometry_bias.parameters(), lr=0.1)
+    optimizer.step()
+    encoder.zero_grad(set_to_none=True)
+    (encoder(obs) * probe).mean().backward()
+
+    distance_grad = geometry_bias[0].weight.grad[:, 3]
+    assert distance_grad.isfinite().all()
+    assert distance_grad.count_nonzero() > 0
 
 
 # Policy initialization
@@ -1598,13 +1677,12 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     encoder = HandSceneEncoder(**OmegaConf.to_container(agent))
     config = copy.deepcopy(encoder.effective_config)
     assert config["geometry_scales"] == {
-        "wrist_position": 0.25,
-        "finger_position": 0.25,
-        "finger_offset": 0.10,
-        "hand_scene_relative_position": 0.10,
+        "wrist_position_base": 0.25,
+        "finger_position_wrist": 0.10,
+        "hand_scene_relative_position_base": 0.10,
     }
     encoder = HandSceneEncoder(**config)
-    mismatched_scales = {**config["geometry_scales"], "wrist_position": 0.50}
+    mismatched_scales = {**config["geometry_scales"], "wrist_position_base": 0.50}
     with pytest.raises(ValueError, match="geometry_scales"):
         HandSceneEncoder(**{**config, "geometry_scales": mismatched_scales})
     initial_weights = copy.deepcopy(encoder.rgb_encoder.state_dict())

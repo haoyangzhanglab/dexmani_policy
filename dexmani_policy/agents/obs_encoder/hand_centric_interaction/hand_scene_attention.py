@@ -19,7 +19,7 @@ class HandSceneAttention(nn.Module):
         self.scene_norm = nn.LayerNorm(self.embed_dim)
         self.query_projection = nn.Linear(self.embed_dim, self.embed_dim)
         self.scene_kv = nn.Linear(self.embed_dim, 2 * self.embed_dim)
-        self.geometry_bias = nn.Sequential(nn.Linear(3, 32), nn.SiLU(), nn.Linear(32, self.num_heads))
+        self.geometry_bias = nn.Sequential(nn.Linear(4, 32), nn.SiLU(), nn.Linear(32, self.num_heads))
         nn.init.zeros_(self.geometry_bias[-1].weight)
         nn.init.zeros_(self.geometry_bias[-1].bias)
         self.context_projection = nn.Linear(self.embed_dim, self.embed_dim)
@@ -56,7 +56,15 @@ class HandSceneAttention(nn.Module):
 
         with torch.autocast(device_type=hand_landmarks_base.device.type, enabled=False):
             relative_xyz_base = scene_points_base.float()[:, None] - hand_landmarks_base.float()[:, :, None]
-            geometry_bias = self.geometry_bias(relative_xyz_base / self.relative_position_scale)
+            relative_distance = torch.linalg.vector_norm(relative_xyz_base, dim=-1, keepdim=True)
+            geometry_input = torch.cat(
+                (
+                    relative_xyz_base / self.relative_position_scale,
+                    relative_distance / self.relative_position_scale,
+                ),
+                dim=-1,
+            )
+            geometry_bias = self.geometry_bias(geometry_input)
         geometry_bias = geometry_bias.permute(0, 3, 1, 2).to(
             dtype=query.dtype, memory_format=torch.contiguous_format,
         )

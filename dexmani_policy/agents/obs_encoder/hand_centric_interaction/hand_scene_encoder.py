@@ -87,10 +87,9 @@ class HandSceneEncoder(nn.Module):
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
             },
             "geometry_scales": {
-                "wrist_position": self.hand_token_encoder.wrist_position_scale,
-                "finger_position": self.hand_token_encoder.finger_position_scale,
-                "finger_offset": self.hand_token_encoder.finger_offset_scale,
-                "hand_scene_relative_position": self.hand_scene_attention.relative_position_scale,
+                "wrist_position_base": self.hand_token_encoder.wrist_position_scale,
+                "finger_position_wrist": self.hand_token_encoder.finger_position_wrist_scale,
+                "hand_scene_relative_position_base": self.hand_scene_attention.relative_position_scale,
             },
         }
 
