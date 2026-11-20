@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class HandObjectRelationAttention(nn.Module):
+class GeoAwareRelationAttention(nn.Module):
     """Update hand tokens with geometry-biased attention to Base-frame scene tokens."""
 
     embed_dim = 192
