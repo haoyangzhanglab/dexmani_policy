@@ -1100,6 +1100,23 @@ def test_hand_scene_attention_geometry_bias():
         attention(hand_tokens, scene_tokens, hand_landmarks_base[:, :1], scene_points_base)
 
 
+def make_hand_scene_observation(point_channels=3):
+    point_cloud = torch.rand(2, 160, point_channels)
+    point_cloud[..., :3] = 0.20 * point_cloud[..., :3] - 0.1
+    point_cloud[..., 2] -= 0.2
+    camera_extrinsic = torch.eye(4)[:3].repeat(2, 1, 1)
+    camera_extrinsic[0, 2, 3] = 1
+    return {
+        "point_cloud": point_cloud,
+        "rgb": torch.randint(256, (2, 3, 8, 8), dtype=torch.uint8),
+        "camera_intrinsic": torch.tensor([[4.0, 0.0, 3.5], [0.0, 4.0, 3.5], [0.0, 0.0, 1.0]]).expand(2, -1, -1),
+        "camera_extrinsic": camera_extrinsic,
+        "eef_pose": torch.tensor([[0.1, 0.1, 0.2, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]]).expand(2, -1),
+        "fingertip_xyz": torch.rand(2, 5, 3) * 0.20,
+        "finger_tactile_force": torch.randn(2, 5, 3),
+    }
+
+
 @pytest.mark.parametrize("scene_config,point_channels,samples_per_patch", [
     pytest.param({}, 3, 1, id="center-xyz"),
     pytest.param({"rgb_semantic_sampling": "group_mean", "pc_dim": 6}, 6, 32, id="group-mean-xyzrgb"),
@@ -1111,20 +1128,9 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
         **scene_config,
     ).eval()
 
-    point_cloud = torch.rand(2, 160, point_channels)
-    point_cloud[..., :3] = 0.20 * point_cloud[..., :3] - 0.1
-    point_cloud[..., 2] -= 0.2
-    camera_extrinsic = torch.eye(4)[:3].repeat(2, 1, 1)
-    camera_extrinsic[0, 2, 3] = 1
-    obs = {
-        "point_cloud": point_cloud,
-        "rgb": torch.randint(256, (2, 3, 8, 8), dtype=torch.uint8),
-        "camera_intrinsic": torch.tensor([[4.0, 0.0, 3.5], [0.0, 4.0, 3.5], [0.0, 0.0, 1.0]]).expand(2, -1, -1),
-        "camera_extrinsic": camera_extrinsic,
-        "eef_pose": torch.tensor([[0.1, 0.1, 0.2, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]]).expand(2, -1),
-        "fingertip_xyz": torch.rand(2, 5, 3) * 0.20,
-        "finger_tactile_force": torch.randn(2, 5, 3),
-    }
+    obs = make_hand_scene_observation(point_channels)
+    point_cloud = obs["point_cloud"]
+    camera_extrinsic = obs["camera_extrinsic"]
     tokens = encoder(obs)
     assert tokens.shape == (2, 6, 192)
     result = encoder.forward_with_aux({
@@ -1152,6 +1158,40 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
     assert valid[0].all() and not valid[1].any()
     with pytest.raises(ValueError, match="extrinsics"):
         encoder({**obs, "camera_extrinsic": camera_extrinsic.transpose(-1, -2)})
+
+
+def test_hand_scene_encoder_backward():
+    torch.manual_seed(0)
+    encoder = HandSceneEncoder(
+        rgb_backbone_name="dino",
+        rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
+    )
+    tokens = encoder(make_hand_scene_observation())
+    assert tokens.shape == (2, 6, 192)
+    probe = torch.randn_like(tokens)
+    (tokens * probe).mean().backward()
+
+    for name in (
+        "patch_encoder.geometry_embedding.point_mlp.0.weight",
+        "rgb_fusion.semantic_projection.weight",
+        "spatial_encoder.blocks.0.qkv.weight",
+        "scene_projection.weight",
+        "hand_token_encoder.wrist_mlp.0.weight",
+        "hand_token_encoder.finger_mlp.0.weight",
+        "hand_token_encoder.slot_embeddings",
+        "tactile_encoder.force_encoder.0.weight",
+        "tactile_fusion.local_projection.weight",
+        "tactile_fusion.global_projection.weight",
+        "hand_scene_attention.hand_attention.in_proj_weight",
+        "hand_scene_attention.query_projection.weight",
+        "hand_scene_attention.scene_kv.weight",
+        "hand_scene_attention.geometry_bias.2.weight",
+        "hand_scene_attention.ffn.0.weight",
+    ):
+        grad = encoder.get_parameter(name).grad
+        assert grad is not None, name
+        assert grad.isfinite().all(), name
+        assert grad.count_nonzero() > 0, name
 
 
 # Policy initialization
@@ -1480,7 +1520,7 @@ class HandScenePolicyForTest(Policy):
         super().__init__(encoder, nn.Identity(), horizon, n_obs_steps, n_action_steps, action_dim)
 
 
-def test_hand_scene_rgb_training_lifecycle(tmp_path, small_dp3_config, monkeypatch):
+def test_hand_scene_rgb_initialization_and_checkpoint_lifecycle(tmp_path, small_dp3_config, monkeypatch):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
@@ -1520,9 +1560,12 @@ def test_hand_scene_rgb_training_lifecycle(tmp_path, small_dp3_config, monkeypat
         monkeypatch.setattr(policy_training.initialization, "resolve_rgb_architecture", forbidden)
         latest = directory / "checkpoints/latest.pt"
         saved = load_checkpoint(latest)
+        assert saved.effective_config["agent"]["geometry_scales"] == fresh.model.effective_config["geometry_scales"]
         with closing(prepare_resume(directory)) as resumed:
             torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
             torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
+        with closing(load_policy(latest, weights="raw", device="cpu")) as runtime:
+            torch.testing.assert_close(runtime.agent.state_dict(), saved.model_state)
         warm_cfg = copy.deepcopy(cfg)
         warm_cfg.initialization.policy = str(latest)
         warm_cfg.workspace.output_dir = str(tmp_path / "warm")
@@ -1551,6 +1594,16 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     assert agent.rgb_backbone_config.architecture.hidden_size == 16
     encoder = HandSceneEncoder(**OmegaConf.to_container(agent))
     config = copy.deepcopy(encoder.effective_config)
+    assert config["geometry_scales"] == {
+        "wrist_position": 0.25,
+        "finger_position": 0.25,
+        "finger_offset": 0.10,
+        "hand_scene_relative_position": 0.10,
+    }
+    encoder = HandSceneEncoder(**config)
+    mismatched_scales = {**config["geometry_scales"], "wrist_position": 0.50}
+    with pytest.raises(ValueError, match="geometry_scales"):
+        HandSceneEncoder(**{**config, "geometry_scales": mismatched_scales})
     initial_weights = copy.deepcopy(encoder.rgb_encoder.state_dict())
     encoder.initialize_weights(None)
     torch.testing.assert_close(encoder.rgb_encoder.state_dict(), initial_weights, rtol=0, atol=0)

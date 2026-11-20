@@ -5,6 +5,10 @@ from torch import nn
 class HandTokenEncoder(nn.Module):
     """Encode the wrist and five fingertips in anatomical order."""
 
+    wrist_position_scale = 0.25
+    finger_position_scale = 0.25
+    finger_offset_scale = 0.10
+
     def __init__(self) -> None:
         super().__init__()
         self.wrist_mlp = nn.Sequential(nn.Linear(9, 128), nn.GELU(), nn.Linear(128, 192))
@@ -23,8 +27,10 @@ class HandTokenEncoder(nn.Module):
         fingertips_base = fingertip_xyz.float()
         wrist_xyz_base = eef_pose[:, :3]
         relative_xyz_base = fingertips_base - wrist_xyz_base.unsqueeze(1)
-        wrist_input = torch.cat((wrist_xyz_base / 0.25, eef_pose[:, 3:]), dim=-1)
-        finger_inputs = torch.cat((fingertips_base / 0.25, relative_xyz_base / 0.10), dim=-1)
+        wrist_input = torch.cat((wrist_xyz_base / self.wrist_position_scale, eef_pose[:, 3:]), dim=-1)
+        finger_inputs = torch.cat(
+            (fingertips_base / self.finger_position_scale, relative_xyz_base / self.finger_offset_scale), dim=-1,
+        )
 
         wrist_token = self.wrist_mlp(wrist_input).unsqueeze(1)
         finger_tokens = self.finger_mlp(finger_inputs)

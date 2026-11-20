@@ -29,6 +29,8 @@ class HandSceneEncoder(nn.Module):
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
         rgb_backbone_config: dict | None = None,
         rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
+        *,
+        geometry_scales: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
         if rgb_backbone_name not in ("dino", "dinov3", "siglip"):
@@ -54,10 +56,12 @@ class HandSceneEncoder(nn.Module):
         self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, scene_channels)
         self.spatial_encoder = SpatialContextEncoder(channels=2 * scene_channels, **(spatial_config or {}))
         self.scene_projection = nn.Linear(self.spatial_encoder.out_dim, scene_channels)
-        self.hand_encoder = HandTokenEncoder()
+        self.hand_token_encoder = HandTokenEncoder()
         self.tactile_encoder = MultiFingerTactileEncoder()
         self.tactile_fusion = TactileFusion()
         self.hand_scene_attention = HandSceneAttention()
+        if geometry_scales is not None and geometry_scales != self.effective_config["geometry_scales"]:
+            raise ValueError("Recorded geometry_scales must match the fixed Base-frame scales")
 
     def initialize_weights(self, source: str | None) -> None:
         """Load RGB backbone weights from a local or supported pretrained source."""
@@ -81,6 +85,12 @@ class HandSceneEncoder(nn.Module):
             "rgb_semantic_sampling": self.rgb_semantic_sampling,
             "rgb_backbone_config": {
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
+            },
+            "geometry_scales": {
+                "wrist_position": self.hand_token_encoder.wrist_position_scale,
+                "finger_position": self.hand_token_encoder.finger_position_scale,
+                "finger_offset": self.hand_token_encoder.finger_offset_scale,
+                "hand_scene_relative_position": self.hand_scene_attention.relative_position_scale,
             },
         }
 
@@ -106,7 +116,7 @@ class HandSceneEncoder(nn.Module):
         self, obs: dict[str, torch.Tensor], *, aux: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         scene_tokens, scene_points_base, projection_valid = self._encode_scene(obs)
-        hand_tokens, hand_landmarks_base = self.hand_encoder(obs["eef_pose"], obs["fingertip_xyz"])
+        hand_tokens, hand_landmarks_base = self.hand_token_encoder(obs["eef_pose"], obs["fingertip_xyz"])
         tactile_features = self.tactile_encoder(obs["finger_tactile_force"])
         hand_tokens = self.tactile_fusion(hand_tokens, tactile_features)
         interaction_tokens = self.hand_scene_attention(

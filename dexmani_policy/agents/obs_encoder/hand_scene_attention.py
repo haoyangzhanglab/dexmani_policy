@@ -9,6 +9,7 @@ class HandSceneAttention(nn.Module):
     embed_dim = 192
     num_heads = 4
     head_dim = embed_dim // num_heads
+    relative_position_scale = 0.10
 
     def __init__(self) -> None:
         super().__init__()
@@ -55,7 +56,7 @@ class HandSceneAttention(nn.Module):
 
         with torch.autocast(device_type=hand_landmarks_base.device.type, enabled=False):
             relative_xyz_base = scene_points_base.float()[:, None] - hand_landmarks_base.float()[:, :, None]
-            geometry_bias = self.geometry_bias(relative_xyz_base / 0.10)
+            geometry_bias = self.geometry_bias(relative_xyz_base / self.relative_position_scale)
         geometry_bias = geometry_bias.permute(0, 3, 1, 2).to(
             dtype=query.dtype, memory_format=torch.contiguous_format,
         )
