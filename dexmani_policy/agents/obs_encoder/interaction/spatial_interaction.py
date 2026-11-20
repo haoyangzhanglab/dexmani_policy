@@ -130,7 +130,4 @@ class HandObjectInteractionEncoder(nn.Module):
             "rgb_projection_valid": projection_valid,
         }
 
-    def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Backward-compatible alias for encode_with_diagnostics."""
-        return self.encode_with_diagnostics(obs)
 
