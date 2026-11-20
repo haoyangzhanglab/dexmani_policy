@@ -25,10 +25,14 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiff
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
 from dexmani_policy.agents.action_decoders.ode import ODE
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
-from dexmani_policy.agents.obs_encoder import multimodal_interaction, rgb_point
+from dexmani_policy.agents.obs_encoder import rgb_point
+from dexmani_policy.agents.obs_encoder.hand_scene_attention import HandSceneAttention
+from dexmani_policy.agents.obs_encoder.hand_scene_encoder import HandSceneEncoder
+from dexmani_policy.agents.obs_encoder.hand_token_encoder import HandTokenEncoder
 from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.resnet import convert_group_norm
+from dexmani_policy.agents.obs_encoder.tactile_encoder import MultiFingerTactileEncoder, TactileFusion
 from dexmani_policy.agents.policies import dp, r3d
 from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.agents.policies.base import Policy
@@ -996,6 +1000,160 @@ def test_r3d_group_loss_and_gradients(monkeypatch, auxiliary, weight, log_metric
     assert model.predict_action(batch["obs"])["future_actions"].shape == (2, 4, 19)
 
 
+# Hand-centric interaction encoder
+
+
+def test_hand_token_construction():
+    encoder = HandTokenEncoder()
+    wrist_xyz = torch.tensor([[0.10, 0.20, 0.30], [-0.20, 0.10, 0.40]])
+    rotation_6d = torch.tensor([[0.0, 1.0, 0.0, -1.0, 0.0, 0.0]]).expand(2, -1)
+    fingertip_xyz = wrist_xyz[:, None] + torch.arange(30, dtype=torch.float32).reshape(2, 5, 3) / 300
+    eef_pose = torch.cat((wrist_xyz, rotation_6d), dim=-1)
+    hand_tokens, hand_landmarks_base = encoder(eef_pose, fingertip_xyz)
+
+    assert hand_tokens.shape == (2, 6, 192)
+    assert hand_landmarks_base.shape == (2, 6, 3)
+    assert torch.equal(hand_landmarks_base[:, 0], wrist_xyz)
+    assert torch.equal(hand_landmarks_base[:, 1:], fingertip_xyz)
+
+    identity_6d = torch.tensor([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]]).expand_as(rotation_6d)
+    rotated_tokens, _ = encoder(torch.cat((wrist_xyz, identity_6d), dim=-1), fingertip_xyz)
+    assert torch.equal(hand_tokens[:, 1:], rotated_tokens[:, 1:])
+
+    with pytest.raises(ValueError, match="fingertip_xyz"):
+        encoder(eef_pose, fingertip_xyz[:, :0])
+
+
+def test_multi_finger_tactile_encoding():
+    encoder = MultiFingerTactileEncoder()
+    force = torch.randn(2, 5, 3)
+    features = encoder(force)
+    assert features["local_tokens"].shape == (2, 5, 64)
+    assert features["global_token"].shape == (2, 64)
+    assert torch.equal(features["global_token"], features["local_tokens"].mean(dim=1))
+    torch.testing.assert_close(encoder(force.double()), features)
+
+    zero_features = encoder(torch.zeros_like(force))
+    assert torch.count_nonzero(zero_features["local_tokens"]) == 0
+    assert torch.count_nonzero(zero_features["global_token"]) == 0
+
+
+def test_tactile_fusion_zero_force_invariance():
+    encoder, fusion = MultiFingerTactileEncoder(), TactileFusion()
+    hand_tokens = torch.randn(2, 6, 192)
+    force = torch.zeros(2, 5, 3)
+    assert torch.equal(fusion(hand_tokens, encoder(force)), hand_tokens)
+
+    force[:, 2, 0] = 1
+    features = encoder(force)
+    residual = fusion(torch.zeros_like(hand_tokens), features)
+    assert torch.equal(residual[:, [1, 2, 4, 5]], residual[:, :1].expand(-1, 4, -1))
+    assert torch.count_nonzero(residual[:, 0]) > 0
+    assert torch.count_nonzero(residual[:, 3] - residual[:, 0]) > 0
+
+    with pytest.raises(ValueError, match="Tactile"):
+        fusion(hand_tokens, {**features, "global_token": features["global_token"][:1]})
+    with pytest.raises(ValueError, match="Tactile"):
+        fusion(hand_tokens, {**features, "local_tokens": features["local_tokens"][:, :1]})
+
+    optimizer = torch.optim.SGD([*encoder.parameters(), *fusion.parameters()], lr=0.1)
+    fusion(hand_tokens, features).square().mean().backward()
+    optimizer.step()
+    assert torch.equal(fusion(hand_tokens, encoder(torch.zeros_like(force))), hand_tokens)
+
+
+def test_hand_scene_attention_geometry_bias():
+    attention = HandSceneAttention()
+    hand_tokens = torch.randn(2, 6, 192)
+    scene_tokens = torch.randn(2, 128, 192)
+    hand_landmarks_base = torch.randn(2, 6, 3)
+    scene_points_base = torch.randn(2, 128, 3)
+    assert torch.count_nonzero(attention.geometry_bias[-1].weight) == 0
+    assert torch.count_nonzero(attention.geometry_bias[-1].bias) == 0
+    with torch.no_grad():
+        attention.geometry_bias[-1].weight[:, :4].copy_(torch.eye(4))
+
+    capture_geometry = Mock(return_value=None)
+    with (
+        attention.geometry_bias.register_forward_hook(capture_geometry),
+        patch.object(F, "scaled_dot_product_attention", wraps=F.scaled_dot_product_attention) as sdpa,
+        torch.autocast("cpu", dtype=torch.bfloat16),
+    ):
+        tokens = attention(hand_tokens, scene_tokens, hand_landmarks_base, scene_points_base)
+
+    assert tokens.shape == (2, 6, 192)
+    _, (geometry_input,), geometry_output = capture_geometry.call_args.args
+    assert geometry_input.dtype == geometry_output.dtype == torch.float32
+    torch.testing.assert_close(geometry_input, (scene_points_base[:, None] - hand_landmarks_base[:, :, None]) / 0.10)
+    query, key, value = sdpa.call_args.args[:3]
+    bias = sdpa.call_args.kwargs["attn_mask"]
+    assert query.shape == (2, 4, 6, 48)
+    assert key.shape == value.shape == (2, 4, 128, 48)
+    assert bias.shape == (2, 4, 6, 128)
+    assert bias.dtype == query.dtype == torch.bfloat16
+    assert torch.count_nonzero(bias) > 0
+    torch.testing.assert_close(bias, geometry_output.permute(0, 3, 1, 2).to(query.dtype))
+
+    with pytest.raises(ValueError, match="batch"):
+        attention(hand_tokens, scene_tokens[:1], hand_landmarks_base, scene_points_base[:1])
+    with pytest.raises(ValueError, match="batch"):
+        attention(hand_tokens, scene_tokens, hand_landmarks_base[:, :1], scene_points_base)
+
+
+@pytest.mark.parametrize("scene_config,point_channels,samples_per_patch", [
+    pytest.param({}, 3, 1, id="center-xyz"),
+    pytest.param({"rgb_semantic_sampling": "group_mean", "pc_dim": 6}, 6, 32, id="group-mean-xyzrgb"),
+])
+def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
+    encoder = HandSceneEncoder(
+        rgb_backbone_name="dino",
+        rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
+        **scene_config,
+    ).eval()
+
+    point_cloud = torch.rand(2, 160, point_channels)
+    point_cloud[..., :3] = 0.20 * point_cloud[..., :3] - 0.1
+    point_cloud[..., 2] -= 0.2
+    camera_extrinsic = torch.eye(4)[:3].repeat(2, 1, 1)
+    camera_extrinsic[0, 2, 3] = 1
+    obs = {
+        "point_cloud": point_cloud,
+        "rgb": torch.randint(256, (2, 3, 8, 8), dtype=torch.uint8),
+        "camera_intrinsic": torch.tensor([[4.0, 0.0, 3.5], [0.0, 4.0, 3.5], [0.0, 0.0, 1.0]]).expand(2, -1, -1),
+        "camera_extrinsic": camera_extrinsic,
+        "eef_pose": torch.tensor([[0.1, 0.1, 0.2, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]]).expand(2, -1),
+        "fingertip_xyz": torch.rand(2, 5, 3) * 0.20,
+        "finger_tactile_force": torch.randn(2, 5, 3),
+    }
+    tokens = encoder(obs)
+    assert tokens.shape == (2, 6, 192)
+    result = encoder.forward_with_aux({
+        **obs,
+        "camera_intrinsic": obs["camera_intrinsic"].flatten(1),
+        "camera_extrinsic": camera_extrinsic.flatten(1),
+    })
+    assert {key: tuple(value.shape) for key, value in result.items()} == {
+        "tokens": (2, 6, 192),
+        "scene_tokens": (2, 128, 192),
+        "scene_points_base": (2, 128, 3),
+        "hand_landmarks_base": (2, 6, 3),
+        "local_tokens": (2, 5, 64),
+        "global_token": (2, 64),
+        "rgb_projection_valid": (2, 128, samples_per_patch),
+    }
+    torch.testing.assert_close(result["tokens"], tokens)
+    expected_landmarks = torch.cat((obs["eef_pose"][:, None, :3], obs["fingertip_xyz"]), dim=1)
+    assert torch.equal(result["hand_landmarks_base"], expected_landmarks)
+    patch_center_in_cloud = (result["scene_points_base"][:, :, None] == point_cloud[:, None, :, :3]).all(dim=-1)
+    assert patch_center_in_cloud.any(dim=-1).all()
+    assert all(result[key].requires_grad for key in ("tokens", "scene_tokens", "local_tokens", "global_token"))
+    valid = result["rgb_projection_valid"]
+    assert valid.dtype == torch.bool
+    assert valid[0].all() and not valid[1].any()
+    with pytest.raises(ValueError, match="extrinsics"):
+        encoder({**obs, "camera_extrinsic": camera_extrinsic.transpose(-1, -2)})
+
+
 # Policy initialization
 
 
@@ -1013,21 +1171,6 @@ class SmallRGBWeights(nn.Linear):
 
 def build_small_rgb(name, config):
     return SmallRGBWeights(), ImageProcessor.from_preset(name, config)
-
-
-@pytest.mark.parametrize("source", [None, "test-rgb"])
-def test_multimodal_rgb_initialization(monkeypatch, source):
-    rgb = SmallRGBWeights()
-    rgb.initialize_weights = Mock()
-    monkeypatch.setattr(multimodal_interaction, "build_rgb_encoder", lambda *args: (rgb, None))
-    encoder = multimodal_interaction.MultimodalInteractionEncoder()
-    rgb.initialize_weights.assert_not_called()
-
-    encoder.initialize_weights(source)
-    if source is None:
-        rgb.initialize_weights.assert_not_called()
-    else:
-        rgb.initialize_weights.assert_called_once_with(source)
 
 
 @pytest.mark.parametrize("method,module", [("dp", dp), ("sat", rgb_point)])
@@ -1311,44 +1454,50 @@ def test_resume_and_warm_start_state_boundaries(tmp_path, small_dp3_config, make
         assert resumed.cfg.prior_data == warm_saved.effective_config["prior_data"]
 
 
-def save_tiny_hf_rgb(directory, kind):
-    from transformers import AutoModel, Dinov2Config, SiglipVisionConfig, SiglipVisionModel
+def tiny_hf_rgb_config(kind):
+    from transformers import Dinov2Config, SiglipVisionConfig
 
     config_class = Dinov2Config if kind == "dino" else SiglipVisionConfig
     architecture = config_class(hidden_size=16, intermediate_size=32, num_hidden_layers=1,
                                 num_attention_heads=2, image_size=8, patch_size=4)
     if kind == "siglip":
         architecture.vision_use_head = False
+    return architecture
+
+
+def save_tiny_hf_rgb(directory, kind):
+    from transformers import AutoModel, SiglipVisionModel
+
+    architecture = tiny_hf_rgb_config(kind)
     source = AutoModel.from_config(architecture) if kind == "dino" else SiglipVisionModel(architecture)
     source.save_pretrained(directory)
     return source
 
 
-class MultimodalPolicyForTest(Policy):
+class HandScenePolicyForTest(Policy):
     def __init__(self, horizon, n_obs_steps, n_action_steps, action_dim, **obs_config):
-        encoder = multimodal_interaction.MultimodalInteractionEncoder(**obs_config)
+        encoder = HandSceneEncoder(**obs_config)
         super().__init__(encoder, nn.Identity(), horizon, n_obs_steps, n_action_steps, action_dim)
 
 
-def test_multimodal_rgb_training_lifecycle(tmp_path, small_dp3_config, monkeypatch):
+def test_hand_scene_rgb_training_lifecycle(tmp_path, small_dp3_config, monkeypatch):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
     pretrained = save_tiny_hf_rgb(source, "dino")
     cfg = small_dp3_config(directory, "dataset.sensor_modalities=[joint_state]", "eval.inference_steps=2")
-    cfg.policy_name = "multimodal_test"
+    cfg.policy_name = "hand_scene_test"
     with open_dict(cfg):
         cfg.initialization.rgb = str(source)
         cfg.agent = {
-            "_target_": f"{__name__}.MultimodalPolicyForTest",
+            "_target_": f"{__name__}.HandScenePolicyForTest",
             "horizon": 4, "n_obs_steps": 1, "n_action_steps": 4, "action_dim": 19,
             "rgb_backbone_name": "dino", "rgb_backbone_config": {"tune_mode": "full", "image_size": [8, 8]},
         }
 
-    encoder_type = multimodal_interaction.MultimodalInteractionEncoder
     with (
-        patch.object(encoder_type, "initialize_weights", autospec=True,
-                     side_effect=encoder_type.initialize_weights) as initialize_obs,
+        patch.object(HandSceneEncoder, "initialize_weights", autospec=True,
+                     side_effect=HandSceneEncoder.initialize_weights) as initialize_obs,
         patch.object(ViTEncoder, "initialize_weights", autospec=True,
                      side_effect=ViTEncoder.initialize_weights) as initialize_rgb,
         closing(build_trainer(cfg)) as fresh,
@@ -1400,8 +1549,11 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     })
     resolve_rgb_architecture(agent, str(directory))
     assert agent.rgb_backbone_config.architecture.hidden_size == 16
-    encoder = multimodal_interaction.MultimodalInteractionEncoder(**OmegaConf.to_container(agent))
+    encoder = HandSceneEncoder(**OmegaConf.to_container(agent))
     config = copy.deepcopy(encoder.effective_config)
+    initial_weights = copy.deepcopy(encoder.rgb_encoder.state_dict())
+    encoder.initialize_weights(None)
+    torch.testing.assert_close(encoder.rgb_encoder.state_dict(), initial_weights, rtol=0, atol=0)
     encoder.initialize_weights(str(directory))
     torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), source.state_dict())
     assert config == encoder.effective_config
@@ -1418,14 +1570,14 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(SiglipVisionConfig, "from_pretrained", forbidden)
     resolve_rgb_architecture(agent, "missing-source")
     warm = OmegaConf.create({"rgb_backbone_name": kind, "rgb_backbone_config": {}})
-    prepare_warm_start("multimodal_test", warm, OmegaConf.to_container(agent))
+    prepare_warm_start("hand_scene_test", warm, OmegaConf.to_container(agent))
     assert warm.rgb_backbone_config.architecture == agent.rgb_backbone_config.architecture
     warm.rgb_backbone_config.architecture.hidden_size = 32
-    prepare_warm_start("multimodal_test", warm, OmegaConf.to_container(agent))
+    prepare_warm_start("hand_scene_test", warm, OmegaConf.to_container(agent))
     assert warm.rgb_backbone_config.architecture.hidden_size == 32
     warm.rgb_backbone_name = "resnet"
     with pytest.raises(ValueError, match="RGB backbone"):
-        prepare_warm_start("multimodal_test", warm, OmegaConf.to_container(agent))
+        prepare_warm_start("hand_scene_test", warm, OmegaConf.to_container(agent))
 
 
 def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
@@ -1447,7 +1599,7 @@ def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
     source = timm.create_model(**architecture, pretrained=False)
     save_file(source.state_dict(), tmp_path / "model.safetensors")
     with patch.object(timm, "create_model", wraps=timm.create_model) as create_model:
-        encoder = multimodal_interaction.MultimodalInteractionEncoder(rgb_backbone_config={
+        encoder = HandSceneEncoder(rgb_backbone_config={
             "architecture": overrides, "image_size": 32, "tune_mode": "full",
         })
     create_model.assert_called_once_with(**architecture, pretrained=False)

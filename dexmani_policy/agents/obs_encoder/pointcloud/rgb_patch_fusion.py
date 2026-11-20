@@ -21,18 +21,19 @@ def project_rgb_patches(
     if any(size % rgb_encoder.patch_size for size in image_hw):
         raise ValueError("RGB input height and width must be divisible by the encoder patch_size")
     patch_grid = tuple(size // rgb_encoder.patch_size for size in image_hw)
-    image_grid = rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
     sample_xyz = patches["xyz"].unsqueeze(2)
     if sampling == "group_mean":
         sample_xyz = index_points(points[..., :3], patches["neighbor_idx"])
-    bt = points.shape[0]
+    intrinsics = obs["camera_intrinsic"]
+    extrinsics = obs["camera_extrinsic"]
     projection = project_to_image(
         points=sample_xyz.flatten(1, 2),
-        intrinsics=obs["camera_intrinsic"].reshape(bt, 3, 3),
-        extrinsics=obs["camera_extrinsic"].reshape(bt, 3, 4),
+        intrinsics=intrinsics.unflatten(-1, (3, 3)) if intrinsics.ndim == 2 else intrinsics,
+        extrinsics=extrinsics.unflatten(-1, (3, 4)) if extrinsics.ndim == 2 else extrinsics,
         image_transform=image_transform,
         image_hw=image_hw,
     )
+    image_grid = rgb_encoder(rgb)["patch_tokens"].unflatten(1, patch_grid)
     group_shape = sample_xyz.shape[1:3]
     return image_grid, ImageProjection(
         projection.grid_xy.unflatten(1, group_shape),
