@@ -1201,7 +1201,7 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
     camera_extrinsic = obs["camera_extrinsic"]
     tokens = encoder(obs)
     assert tokens.shape == (2, 6, 192)
-    result = encoder.forward_with_aux({
+    result = encoder.encode_with_diagnostics({
         **obs,
         "camera_intrinsic": obs["camera_intrinsic"].flatten(1),
         "camera_extrinsic": camera_extrinsic.flatten(1),
