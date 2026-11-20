@@ -10,7 +10,6 @@ __all__ = [
     "FingerTactileEncoder",
     "ForceGuidedFusion",
     "HandObjectInteractionEncoder",
-    "HandObjectInteractionEncoder",
     "HandKinematicEncoder",
     "GeoAwareRelationAttention",
     "TactileFusion",
