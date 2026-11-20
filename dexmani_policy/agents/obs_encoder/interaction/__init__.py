@@ -1,17 +1,17 @@
 from .correspondence import ContactCoordinationEncoder
 from .future_tactile import ForceGuidedFusion, VisuoTactileAttention
-from .geometric_relation import HandObjectRelationAttention
+from .geometric_relation import GeoAwareRelationAttention
 from .hand_kinematics import HandKinematicEncoder
-from .spatial_interaction import HandCentricInteractionEncoder
+from .spatial_interaction import HandObjectInteractionEncoder
 from .tactile import FingerTactileEncoder, TactileFusion
 
 __all__ = [
     "ContactCoordinationEncoder",
     "FingerTactileEncoder",
     "ForceGuidedFusion",
-    "HandCentricInteractionEncoder",
+    "HandObjectInteractionEncoder",
     "HandKinematicEncoder",
-    "HandObjectRelationAttention",
+    "GeoAwareRelationAttention",
     "TactileFusion",
     "VisuoTactileAttention",
 ]

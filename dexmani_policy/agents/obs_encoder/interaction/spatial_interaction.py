@@ -11,13 +11,13 @@ from ..pointcloud.ops import preprocess_point_cloud
 from ..pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
 from ..pointcloud.rgb_patch_fusion import RGBPatchFusion, project_rgb_patches
 from ..rgb.build import build_rgb_encoder
-from .geometric_relation import HandObjectRelationAttention
+from .geometric_relation import GeoAwareRelationAttention
 from .hand_kinematics import HandKinematicEncoder
 from .tactile import FingerTactileEncoder, TactileFusion
 
 
-class HandCentricInteractionEncoder(nn.Module):
-    """Use tactile-conditioned hand tokens to query RGB-aligned scene memory."""
+class HandObjectInteractionEncoder(nn.Module):
+    """Encode six wrist-first hand landmarks against RGB-aligned 3D scene memory."""
 
     def __init__(
         self,
@@ -28,18 +28,18 @@ class HandCentricInteractionEncoder(nn.Module):
         fps_random_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
         rgb_backbone_config: dict | None = None,
-        rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
+        rgb_patch_sampling: Literal["center", "group_mean"] = "center",
         *,
         geometry_scales: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
         if rgb_backbone_name not in ("dino", "dinov3", "siglip"):
             raise ValueError("rgb_backbone_name must be 'dino', 'dinov3' or 'siglip'")
-        if rgb_semantic_sampling not in ("center", "group_mean"):
-            raise ValueError("rgb_semantic_sampling must be 'center' or 'group_mean'")
+        if rgb_patch_sampling not in ("center", "group_mean"):
+            raise ValueError("rgb_patch_sampling must be 'center' or 'group_mean'")
         self.num_points = num_points
         self.rgb_backbone_name = rgb_backbone_name
-        self.rgb_semantic_sampling = rgb_semantic_sampling
+        self.rgb_patch_sampling = rgb_patch_sampling
         fps_config = {
             "use_random": True, "use_random_start": True,
             "use_shuffle_output": False,
@@ -59,7 +59,7 @@ class HandCentricInteractionEncoder(nn.Module):
         self.hand_encoder = HandKinematicEncoder()
         self.tactile_encoder = FingerTactileEncoder()
         self.tactile_fusion = TactileFusion()
-        self.geometric_relation = HandObjectRelationAttention()
+        self.geometric_relation = GeoAwareRelationAttention()
         if geometry_scales is not None and geometry_scales != self.effective_config["geometry_scales"]:
             raise ValueError("Recorded geometry_scales must match the encoder's fixed scales")
 
@@ -78,7 +78,7 @@ class HandCentricInteractionEncoder(nn.Module):
             },
             "fps_random_config": dict(self.patch_encoder.fps_random_config),
             "rgb_backbone_name": self.rgb_backbone_name,
-            "rgb_semantic_sampling": self.rgb_semantic_sampling,
+            "rgb_patch_sampling": self.rgb_patch_sampling,
             "rgb_backbone_config": {
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
             },
@@ -89,7 +89,7 @@ class HandCentricInteractionEncoder(nn.Module):
             },
         }
 
-    def _encode_scene(
+    def _encode_scene_memory(
         self, obs: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         points = preprocess_point_cloud(
@@ -100,7 +100,7 @@ class HandCentricInteractionEncoder(nn.Module):
 
         image_grid, projection = project_rgb_patches(
             obs, points, patches, image_processor=self.image_processor,
-            rgb_encoder=self.rgb_encoder, sampling=self.rgb_semantic_sampling,
+            rgb_encoder=self.rgb_encoder, sampling=self.rgb_patch_sampling,
         )
         scene_points_base = patches["xyz"]
         scene_tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
@@ -109,11 +109,11 @@ class HandCentricInteractionEncoder(nn.Module):
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Return six wrist-first interaction tokens [B, 6, 192]."""
-        return self.forward_with_aux(obs)["tokens"]
+        return self.encode_with_diagnostics(obs)["tokens"]
 
-    def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Return interaction tokens with scene, geometry and tactile diagnostics."""
-        scene_tokens, scene_points_base, projection_valid = self._encode_scene(obs)
+    def encode_with_diagnostics(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Return tokens and intermediate tensors for geometry/projection diagnostics."""
+        scene_tokens, scene_points_base, projection_valid = self._encode_scene_memory(obs)
         hand_tokens, hand_landmarks_base = self.hand_encoder(obs["eef_pose"], obs["fingertip_xyz"])
         tactile_features = self.tactile_encoder(obs["finger_tactile_force"])
         hand_tokens = self.tactile_fusion(hand_tokens, tactile_features)
@@ -129,3 +129,8 @@ class HandCentricInteractionEncoder(nn.Module):
             "global_token": tactile_features["global_token"],
             "rgb_projection_valid": projection_valid,
         }
+
+    def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Backward-compatible alias for encode_with_diagnostics."""
+        return self.encode_with_diagnostics(obs)
+
