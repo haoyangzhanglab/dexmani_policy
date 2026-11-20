@@ -3,8 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class HandSceneAttention(nn.Module):
-    """Update the six hand tokens with metric Base-frame scene context."""
+class HandObjectRelationAttention(nn.Module):
+    """Update hand tokens with geometry-biased attention to Base-frame scene tokens."""
 
     embed_dim = 192
     num_heads = 4

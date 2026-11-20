@@ -55,18 +55,6 @@ def prepare_warm_start(method, agent, saved_agent):
         raise ValueError("Tactile encoder differs from initialization policy")
 
 
-def _initialize_rgb_encoder(obs_encoder, source):
-    rgb_encoder = getattr(obs_encoder, "rgb_encoder", None)
-    if source is None or rgb_encoder is None:
-        return False
-    # On RGB observation encoders, initialize_weights is an optional RGB-only hook.
-    initialize_weights = getattr(obs_encoder, "initialize_weights", None)
-    if initialize_weights is None:
-        initialize_weights = rgb_encoder.initialize_weights
-    initialize_weights(source)
-    return True
-
-
 def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = None, resuming: bool = False):
     method, initialization = cfg.policy_name, cfg.initialization
     pretrained_state, hand_affine = None, None
@@ -88,7 +76,9 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = No
         raise ValueError("Dataset primary action width must match policy control output")
     if checkpoint is None:
         rgb_source = initialization.get("rgb")
-        if _initialize_rgb_encoder(model.obs_encoder, rgb_source):
+        rgb_encoder = getattr(model.obs_encoder, "rgb_encoder", None)
+        if rgb_source is not None and rgb_encoder is not None:
+            rgb_encoder.initialize_weights(rgb_source)
             record_prior_data(cfg, dataset, rgb_source, {"source": None})
         if method == "r3d":
             model.obs_encoder.pc_encoder.initialize_weights(initialization.uni3d)

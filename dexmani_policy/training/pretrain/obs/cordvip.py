@@ -7,7 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.modules import build_mlp
-from dexmani_policy.agents.obs_encoder.interaction.correspondence import ContactCoordinationEncoder
+from dexmani_policy.agents.obs_encoder.interaction import ContactCoordinationEncoder
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 
 

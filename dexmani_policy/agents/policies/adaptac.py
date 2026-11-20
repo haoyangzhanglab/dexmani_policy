@@ -8,7 +8,7 @@ from torch import nn
 from dexmani_policy.agents.action_decoders.backbones.force_transformer import ForceTransformer
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
-from dexmani_policy.agents.obs_encoder.interaction.future_tactile import (
+from dexmani_policy.agents.obs_encoder.interaction import (
     ForceGuidedFusion,
     VisuoTactileAttention,
 )

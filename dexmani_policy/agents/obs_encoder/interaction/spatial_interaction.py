@@ -11,12 +11,12 @@ from ..pointcloud.ops import preprocess_point_cloud
 from ..pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
 from ..pointcloud.rgb_patch_fusion import RGBPatchFusion, project_rgb_patches
 from ..rgb.build import build_rgb_encoder
-from .hand_scene_attention import HandSceneAttention
-from .hand_token_encoder import HandTokenEncoder
-from .tactile_encoder import MultiFingerTactileEncoder, TactileFusion
+from .geometric_relation import HandObjectRelationAttention
+from .hand_kinematics import HandKinematicEncoder
+from .tactile import FingerTactileEncoder, TactileFusion
 
 
-class HandSceneEncoder(nn.Module):
+class HandCentricInteractionEncoder(nn.Module):
     """Use tactile-conditioned hand tokens to query RGB-aligned scene memory."""
 
     def __init__(
@@ -56,16 +56,12 @@ class HandSceneEncoder(nn.Module):
         self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, scene_channels)
         self.spatial_encoder = SpatialContextEncoder(channels=2 * scene_channels, **(spatial_config or {}))
         self.scene_projection = nn.Linear(self.spatial_encoder.out_dim, scene_channels)
-        self.hand_token_encoder = HandTokenEncoder()
-        self.tactile_encoder = MultiFingerTactileEncoder()
+        self.hand_encoder = HandKinematicEncoder()
+        self.tactile_encoder = FingerTactileEncoder()
         self.tactile_fusion = TactileFusion()
-        self.hand_scene_attention = HandSceneAttention()
+        self.geometric_relation = HandObjectRelationAttention()
         if geometry_scales is not None and geometry_scales != self.effective_config["geometry_scales"]:
-            raise ValueError("Recorded geometry_scales must match the fixed Base-frame scales")
-
-    def initialize_weights(self, source: str | None) -> None:
-        """Load RGB backbone weights from a local or supported pretrained source."""
-        self.rgb_encoder.initialize_weights(source)
+            raise ValueError("Recorded geometry_scales must match the encoder's fixed scales")
 
     @property
     def effective_config(self) -> dict:
@@ -87,9 +83,9 @@ class HandSceneEncoder(nn.Module):
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
             },
             "geometry_scales": {
-                "wrist_position_base": self.hand_token_encoder.wrist_position_scale,
-                "finger_position_wrist": self.hand_token_encoder.finger_position_wrist_scale,
-                "hand_scene_relative_position_base": self.hand_scene_attention.relative_position_scale,
+                "wrist_position_base": self.hand_encoder.wrist_position_scale,
+                "finger_position_wrist": self.hand_encoder.finger_position_wrist_scale,
+                "hand_scene_relative_position_base": self.geometric_relation.relative_position_scale,
             },
         }
 
@@ -111,34 +107,25 @@ class HandSceneEncoder(nn.Module):
         scene_tokens = self.spatial_encoder(scene_tokens, scene_points_base)
         return self.scene_projection(scene_tokens), scene_points_base, projection.valid
 
-    def _encode_observation(
-        self, obs: dict[str, torch.Tensor], *, aux: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        scene_tokens, scene_points_base, projection_valid = self._encode_scene(obs)
-        hand_tokens, hand_landmarks_base = self.hand_token_encoder(obs["eef_pose"], obs["fingertip_xyz"])
-        tactile_features = self.tactile_encoder(obs["finger_tactile_force"])
-        hand_tokens = self.tactile_fusion(hand_tokens, tactile_features)
-        interaction_tokens = self.hand_scene_attention(
-            hand_tokens, scene_tokens, hand_landmarks_base, scene_points_base,
-        )
-        if aux is not None:
-            aux.update(
-                tokens=interaction_tokens,
-                scene_tokens=scene_tokens,
-                scene_points_base=scene_points_base,
-                hand_landmarks_base=hand_landmarks_base,
-                local_tokens=tactile_features["local_tokens"],
-                global_token=tactile_features["global_token"],
-                rgb_projection_valid=projection_valid,
-            )
-        return interaction_tokens
-
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Return six wrist-first interaction tokens [B, 6, 192]."""
-        return self._encode_observation(obs)
+        return self.forward_with_aux(obs)["tokens"]
 
     def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Return interaction tokens with scene, geometry and tactile diagnostics."""
-        aux: dict[str, torch.Tensor] = {}
-        self._encode_observation(obs, aux=aux)
-        return aux
+        scene_tokens, scene_points_base, projection_valid = self._encode_scene(obs)
+        hand_tokens, hand_landmarks_base = self.hand_encoder(obs["eef_pose"], obs["fingertip_xyz"])
+        tactile_features = self.tactile_encoder(obs["finger_tactile_force"])
+        hand_tokens = self.tactile_fusion(hand_tokens, tactile_features)
+        interaction_tokens = self.geometric_relation(
+            hand_tokens, scene_tokens, hand_landmarks_base, scene_points_base,
+        )
+        return {
+            "tokens": interaction_tokens,
+            "scene_tokens": scene_tokens,
+            "scene_points_base": scene_points_base,
+            "hand_landmarks_base": hand_landmarks_base,
+            "local_tokens": tactile_features["local_tokens"],
+            "global_token": tactile_features["global_token"],
+            "rgb_projection_valid": projection_valid,
+        }

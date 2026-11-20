@@ -110,7 +110,11 @@ class ViTEncoder(nn.Module):
             source_state = load_file(str(weights))
         else:
             model_class = AutoModel if self.kind == "dino" else SiglipVisionModel
-            pretrained = model_class.from_pretrained(source, config=backbone.config, torch_dtype=torch.float32)
+            pretrained, loading_info = model_class.from_pretrained(
+                source, config=backbone.config, torch_dtype=torch.float32, output_loading_info=True,
+            )
+            if loading_info["missing_keys"]:
+                raise ValueError(f"Pretrained RGB weights are missing configured parameters: {loading_info['missing_keys']}")
             source_state = pretrained.state_dict()
         state = backbone.state_dict()
         # PEFT inserts base_layer around adapted Linear modules; adapters stay freshly initialized.

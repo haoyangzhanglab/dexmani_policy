@@ -5,9 +5,7 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.obs_encoder.interaction.correspondence import (
-    ContactCoordinationEncoder,
-)
+from dexmani_policy.agents.obs_encoder.interaction import ContactCoordinationEncoder
 from dexmani_policy.agents.policies.base import Policy, module_parameter_group
 
 

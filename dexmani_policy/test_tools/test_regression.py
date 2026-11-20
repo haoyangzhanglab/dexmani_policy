@@ -26,11 +26,11 @@ from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, Rectifie
 from dexmani_policy.agents.action_decoders.ode import ODE
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.obs_encoder import rgb_point
-from dexmani_policy.agents.obs_encoder.hand_centric_interaction import HandSceneEncoder
-from dexmani_policy.agents.obs_encoder.hand_centric_interaction.hand_scene_attention import HandSceneAttention
-from dexmani_policy.agents.obs_encoder.hand_centric_interaction.hand_token_encoder import HandTokenEncoder
-from dexmani_policy.agents.obs_encoder.hand_centric_interaction.tactile_encoder import (
-    MultiFingerTactileEncoder,
+from dexmani_policy.agents.obs_encoder.interaction import (
+    FingerTactileEncoder,
+    HandCentricInteractionEncoder,
+    HandKinematicEncoder,
+    HandObjectRelationAttention,
     TactileFusion,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer
@@ -1007,7 +1007,7 @@ def test_r3d_group_loss_and_gradients(monkeypatch, auxiliary, weight, log_metric
 
 
 def test_hand_token_construction():
-    encoder = HandTokenEncoder()
+    encoder = HandKinematicEncoder()
     fingertips_wrist = torch.arange(1, 31, dtype=torch.float32).reshape(2, 5, 3) / 256
     wrist_xyz_1 = torch.tensor([[0.125, 0.25, 0.375], [-0.25, 0.125, 0.5]])
     wrist_xyz_2 = torch.tensor([[-0.125, 0.375, 0.25], [0.25, -0.125, 0.375]])
@@ -1048,10 +1048,12 @@ def test_hand_token_construction():
 
     with pytest.raises(ValueError, match="fingertip_xyz"):
         encoder(eef_pose, fingertips_base[:, :0])
+    with pytest.raises(RuntimeError, match="split_sizes"):
+        encoder(torch.cat((eef_pose, eef_pose[:, :1]), dim=-1), fingertips_base)
 
 
 def test_multi_finger_tactile_encoding():
-    encoder = MultiFingerTactileEncoder()
+    encoder = FingerTactileEncoder()
     force = torch.randn(2, 5, 3)
     features = encoder(force)
     assert features["local_tokens"].shape == (2, 5, 64)
@@ -1065,7 +1067,7 @@ def test_multi_finger_tactile_encoding():
 
 
 def test_tactile_fusion_zero_force_invariance():
-    encoder, fusion = MultiFingerTactileEncoder(), TactileFusion()
+    encoder, fusion = FingerTactileEncoder(), TactileFusion()
     hand_tokens = torch.randn(2, 6, 192)
     force = torch.zeros(2, 5, 3)
     assert torch.equal(fusion(hand_tokens, encoder(force)), hand_tokens)
@@ -1077,9 +1079,9 @@ def test_tactile_fusion_zero_force_invariance():
     assert torch.count_nonzero(residual[:, 0]) > 0
     assert torch.count_nonzero(residual[:, 3] - residual[:, 0]) > 0
 
-    with pytest.raises(ValueError, match="Tactile"):
+    with pytest.raises(RuntimeError, match="Sizes of tensors must match"):
         fusion(hand_tokens, {**features, "global_token": features["global_token"][:1]})
-    with pytest.raises(ValueError, match="Tactile"):
+    with pytest.raises(RuntimeError, match="Sizes of tensors must match"):
         fusion(hand_tokens, {**features, "local_tokens": features["local_tokens"][:, :1]})
 
     fixed_features = {key: torch.ones_like(value) for key, value in features.items()}
@@ -1120,7 +1122,7 @@ def test_tactile_fusion_zero_force_invariance():
 
 
 def test_hand_scene_attention_geometry_bias():
-    attention = HandSceneAttention()
+    attention = HandObjectRelationAttention()
     hand_tokens = torch.randn(2, 6, 192)
     scene_tokens = torch.randn(2, 128, 192)
     hand_landmarks_base = torch.randn(2, 6, 3, dtype=torch.bfloat16)
@@ -1188,7 +1190,7 @@ def make_hand_scene_observation(point_channels=3):
     pytest.param({"rgb_semantic_sampling": "group_mean", "pc_dim": 6}, 6, 32, id="group-mean-xyzrgb"),
 ])
 def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
-    encoder = HandSceneEncoder(
+    encoder = HandCentricInteractionEncoder(
         rgb_backbone_name="dino",
         rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
         **scene_config,
@@ -1228,7 +1230,7 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
 
 def test_hand_scene_encoder_backward():
     torch.manual_seed(0)
-    encoder = HandSceneEncoder(
+    encoder = HandCentricInteractionEncoder(
         rgb_backbone_name="dino",
         rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
     )
@@ -1243,9 +1245,9 @@ def test_hand_scene_encoder_backward():
         "rgb_fusion.semantic_projection.weight",
         "spatial_encoder.blocks.0.qkv.weight",
         "scene_projection.weight",
-        "hand_token_encoder.wrist_mlp.0.weight",
-        "hand_token_encoder.finger_mlp.0.weight",
-        "hand_token_encoder.slot_embeddings",
+        "hand_encoder.wrist_mlp.0.weight",
+        "hand_encoder.finger_mlp.0.weight",
+        "hand_encoder.slot_embeddings",
         "tactile_encoder.force_encoder.0.weight",
         "tactile_fusion.local_projection.weight",
         "tactile_fusion.global_projection.weight",
@@ -1253,18 +1255,18 @@ def test_hand_scene_encoder_backward():
         "tactile_fusion.local_gate.bias",
         "tactile_fusion.global_gate.weight",
         "tactile_fusion.global_gate.bias",
-        "hand_scene_attention.hand_attention.in_proj_weight",
-        "hand_scene_attention.query_projection.weight",
-        "hand_scene_attention.scene_kv.weight",
-        "hand_scene_attention.geometry_bias.2.weight",
-        "hand_scene_attention.ffn.0.weight",
+        "geometric_relation.hand_attention.in_proj_weight",
+        "geometric_relation.query_projection.weight",
+        "geometric_relation.scene_kv.weight",
+        "geometric_relation.geometry_bias.2.weight",
+        "geometric_relation.ffn.0.weight",
     ):
         grad = encoder.get_parameter(name).grad
         assert grad is not None, name
         assert grad.isfinite().all(), name
         assert grad.count_nonzero() > 0, name
 
-    geometry_bias = encoder.hand_scene_attention.geometry_bias
+    geometry_bias = encoder.geometric_relation.geometry_bias
     # The zero-initialized final layer blocks gradients to the first layer until an update.
     optimizer = torch.optim.SGD(geometry_bias.parameters(), lr=0.1)
     optimizer.step()
@@ -1596,9 +1598,9 @@ def save_tiny_hf_rgb(directory, kind):
     return source
 
 
-class HandScenePolicyForTest(Policy):
+class HandCentricPolicyForTest(Policy):
     def __init__(self, horizon, n_obs_steps, n_action_steps, action_dim, **obs_config):
-        encoder = HandSceneEncoder(**obs_config)
+        encoder = HandCentricInteractionEncoder(**obs_config)
         super().__init__(encoder, nn.Identity(), horizon, n_obs_steps, n_action_steps, action_dim)
 
 
@@ -1608,23 +1610,20 @@ def test_hand_scene_rgb_initialization_and_checkpoint_lifecycle(tmp_path, small_
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
     pretrained = save_tiny_hf_rgb(source, "dino")
     cfg = small_dp3_config(directory, "dataset.sensor_modalities=[joint_state]", "eval.inference_steps=2")
-    cfg.policy_name = "hand_scene_test"
+    cfg.policy_name = "hand_centric_test"
     with open_dict(cfg):
         cfg.initialization.rgb = str(source)
         cfg.agent = {
-            "_target_": f"{__name__}.HandScenePolicyForTest",
+            "_target_": f"{__name__}.HandCentricPolicyForTest",
             "horizon": 4, "n_obs_steps": 1, "n_action_steps": 4, "action_dim": 19,
             "rgb_backbone_name": "dino", "rgb_backbone_config": {"tune_mode": "full", "image_size": [8, 8]},
         }
 
     with (
-        patch.object(HandSceneEncoder, "initialize_weights", autospec=True,
-                     side_effect=HandSceneEncoder.initialize_weights) as initialize_obs,
         patch.object(ViTEncoder, "initialize_weights", autospec=True,
                      side_effect=ViTEncoder.initialize_weights) as initialize_rgb,
         closing(build_trainer(cfg)) as fresh,
     ):
-        initialize_obs.assert_called_once_with(fresh.model.obs_encoder, str(source))
         initialize_rgb.assert_called_once_with(fresh.model.obs_encoder.rgb_encoder, str(source))
         for model in (fresh.model, fresh.ema_model):
             torch.testing.assert_close(model.obs_encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
@@ -1659,7 +1658,7 @@ def test_hand_scene_rgb_initialization_and_checkpoint_lifecycle(tmp_path, small_
             assert warm.cfg.agent.rgb_backbone_config.architecture == saved_rgb["architecture"]
             torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
             torch.testing.assert_close(warm.ema_model.state_dict(), saved.model_state)
-        assert initialize_obs.call_count == initialize_rgb.call_count == 1
+        assert initialize_rgb.call_count == 1
 
 
 @pytest.mark.parametrize("kind", ["dino", "siglip"])
@@ -1674,22 +1673,27 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     })
     resolve_rgb_architecture(agent, str(directory))
     assert agent.rgb_backbone_config.architecture.hidden_size == 16
-    encoder = HandSceneEncoder(**OmegaConf.to_container(agent))
+    encoder = HandCentricInteractionEncoder(**OmegaConf.to_container(agent))
     config = copy.deepcopy(encoder.effective_config)
     assert config["geometry_scales"] == {
         "wrist_position_base": 0.25,
         "finger_position_wrist": 0.10,
         "hand_scene_relative_position_base": 0.10,
     }
-    encoder = HandSceneEncoder(**config)
+    encoder = HandCentricInteractionEncoder(**config)
     mismatched_scales = {**config["geometry_scales"], "wrist_position_base": 0.50}
     with pytest.raises(ValueError, match="geometry_scales"):
-        HandSceneEncoder(**{**config, "geometry_scales": mismatched_scales})
+        HandCentricInteractionEncoder(**{**config, "geometry_scales": mismatched_scales})
     initial_weights = copy.deepcopy(encoder.rgb_encoder.state_dict())
-    encoder.initialize_weights(None)
+    encoder.rgb_encoder.initialize_weights(None)
     torch.testing.assert_close(encoder.rgb_encoder.state_dict(), initial_weights, rtol=0, atol=0)
-    encoder.initialize_weights(str(directory))
+    encoder.rgb_encoder.initialize_weights(str(directory))
     torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), source.state_dict())
+    larger_config = copy.deepcopy(config)
+    larger_config["rgb_backbone_config"]["architecture"]["num_hidden_layers"] += 1
+    larger_encoder = HandCentricInteractionEncoder(**larger_config)
+    with pytest.raises(ValueError, match="missing configured parameters"):
+        larger_encoder.rgb_encoder.initialize_weights(str(directory))
     assert config == encoder.effective_config
     assert config["rgb_backbone_config"]["architecture"]["hidden_size"] == 16
     assert config["rgb_backbone_config"]["image_size"] == (8, 8)
@@ -1704,14 +1708,14 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(SiglipVisionConfig, "from_pretrained", forbidden)
     resolve_rgb_architecture(agent, "missing-source")
     warm = OmegaConf.create({"rgb_backbone_name": kind, "rgb_backbone_config": {}})
-    prepare_warm_start("hand_scene_test", warm, OmegaConf.to_container(agent))
+    prepare_warm_start("hand_centric_test", warm, OmegaConf.to_container(agent))
     assert warm.rgb_backbone_config.architecture == agent.rgb_backbone_config.architecture
     warm.rgb_backbone_config.architecture.hidden_size = 32
-    prepare_warm_start("hand_scene_test", warm, OmegaConf.to_container(agent))
+    prepare_warm_start("hand_centric_test", warm, OmegaConf.to_container(agent))
     assert warm.rgb_backbone_config.architecture.hidden_size == 32
     warm.rgb_backbone_name = "resnet"
     with pytest.raises(ValueError, match="RGB backbone"):
-        prepare_warm_start("hand_scene_test", warm, OmegaConf.to_container(agent))
+        prepare_warm_start("hand_centric_test", warm, OmegaConf.to_container(agent))
 
 
 def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
@@ -1733,12 +1737,12 @@ def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
     source = timm.create_model(**architecture, pretrained=False)
     save_file(source.state_dict(), tmp_path / "model.safetensors")
     with patch.object(timm, "create_model", wraps=timm.create_model) as create_model:
-        encoder = HandSceneEncoder(rgb_backbone_config={
+        encoder = HandCentricInteractionEncoder(rgb_backbone_config={
             "architecture": overrides, "image_size": 32, "tune_mode": "full",
         })
     create_model.assert_called_once_with(**architecture, pretrained=False)
     config = copy.deepcopy(encoder.effective_config)
-    encoder.initialize_weights(str(tmp_path))
+    encoder.rgb_encoder.initialize_weights(str(tmp_path))
     torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), source.state_dict())
     assert config == encoder.effective_config
     assert config["rgb_backbone_config"]["architecture"] == architecture

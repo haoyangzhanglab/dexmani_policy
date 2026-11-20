@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 
-class MultiFingerTactileEncoder(nn.Module):
+class FingerTactileEncoder(nn.Module):
     """Encode aggregated forces in the sensor's frame and scale."""
 
     def __init__(self) -> None:
@@ -34,8 +34,6 @@ class TactileFusion(nn.Module):
         local_tokens = tactile_features["local_tokens"]
         global_token = tactile_features["global_token"]
         finger_tokens = hand_tokens[:, 1:]
-        if local_tokens.shape[:-1] != finger_tokens.shape[:2] or global_token.shape[:-1] != hand_tokens.shape[:1]:
-            raise ValueError("Tactile features must match the hand batch and finger slots")
         local_gate_input = torch.cat((local_tokens, finger_tokens), dim=-1)
         global_hand_state = hand_tokens.mean(dim=1)
         global_gate_input = torch.cat((global_token, global_hand_state), dim=-1)
