@@ -26,13 +26,16 @@ from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, Rectifie
 from dexmani_policy.agents.action_decoders.ode import ODE
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.obs_encoder import rgb_point
-from dexmani_policy.agents.obs_encoder.hand_scene_attention import HandSceneAttention
-from dexmani_policy.agents.obs_encoder.hand_scene_encoder import HandSceneEncoder
-from dexmani_policy.agents.obs_encoder.hand_token_encoder import HandTokenEncoder
+from dexmani_policy.agents.obs_encoder.hand_centric_interaction import HandSceneEncoder
+from dexmani_policy.agents.obs_encoder.hand_centric_interaction.hand_scene_attention import HandSceneAttention
+from dexmani_policy.agents.obs_encoder.hand_centric_interaction.hand_token_encoder import HandTokenEncoder
+from dexmani_policy.agents.obs_encoder.hand_centric_interaction.tactile_encoder import (
+    MultiFingerTactileEncoder,
+    TactileFusion,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud import point_transformer
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.resnet import convert_group_norm
-from dexmani_policy.agents.obs_encoder.tactile_encoder import MultiFingerTactileEncoder, TactileFusion
 from dexmani_policy.agents.policies import dp, r3d
 from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.agents.policies.base import Policy

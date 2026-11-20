@@ -7,12 +7,12 @@ from typing import Literal
 import torch
 from torch import nn
 
+from ..pointcloud.ops import preprocess_point_cloud
+from ..pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
+from ..pointcloud.rgb_patch_fusion import RGBPatchFusion, project_rgb_patches
+from ..rgb.build import build_rgb_encoder
 from .hand_scene_attention import HandSceneAttention
 from .hand_token_encoder import HandTokenEncoder
-from .pointcloud.ops import preprocess_point_cloud
-from .pointcloud.point_transformer import LocalPatchEncoder, SpatialContextEncoder
-from .pointcloud.rgb_patch_fusion import RGBPatchFusion, project_rgb_patches
-from .rgb.build import build_rgb_encoder
 from .tactile_encoder import MultiFingerTactileEncoder, TactileFusion
 
 

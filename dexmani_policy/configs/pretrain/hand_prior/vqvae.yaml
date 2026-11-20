@@ -1,7 +1,7 @@
 # @package _global_
 # 同源实验用 --policy-config 读取下游策略的数据划分。
 task_name: pick_apple_messy
-zarr_path: robot_data/${task_name}.zarr
+zarr_path: robot_data/dexmani_sim/${task_name}.zarr
 
 dataset:
   zarr_path: ${zarr_path}

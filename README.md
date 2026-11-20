@@ -22,11 +22,11 @@ python -m pip install -e . --no-deps
 
 ### dexmani_sim
 
-安装 `dexmani_sim`，生成 `pick_apple_messy` 的示教和评测种子，将转换后的数据放在 `robot_data/pick_apple_messy.zarr`。 [仿真数据准备](https://github.com/haoyangzhanglab/dexmani_sim) · [Zarr 格式](docs/仿真数据集格式.md)
+安装 `dexmani_sim`，将 `multi_grasp` 的示教 Zarr 放在 `robot_data/dexmani_sim/multi_grasp.zarr`。评测从 `dexmani_sim.DATA_DIR/eval_seeds/multi_grasp.txt` 读取该任务的种子池。 [仿真数据准备](https://github.com/haoyangzhanglab/dexmani_sim) · [Zarr 格式](docs/仿真数据集格式.md)
 
 ```bash
-RUN=experiments/train/dp3/pick_apple_messy/run01
-bash scripts/training/train.sh dp3 hydra.run.dir="$RUN"
+RUN=experiments/train/dp3/multi_grasp/run01
+bash scripts/training/train.sh dp3 task_name=multi_grasp hydra.run.dir="$RUN"
 bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episodes 100
 ```
 

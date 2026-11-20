@@ -101,9 +101,10 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
     def training_summary(self):
         store = self.episode_store
+        validation_note = "val 留出但未验证; " if self.val_mask.any() else ""
         return (
             f"{Path(store.path).name}: {format_split_summary(store, self.train_mask, self.val_mask)}; "
-            f"val 留出但未验证; train windows={len(self):,}; "
+            f"{validation_note}train windows={len(self):,}; "
             f"fields={', '.join(self.data_keys)}"
         )
 
