@@ -1111,7 +1111,10 @@ def test_tactile_fusion_zero_force_invariance():
     torch.testing.assert_close(local_logits, expected_local_logits)
     torch.testing.assert_close(global_logits, expected_global_logits)
     expected = hand_states.clone()
-    expected[:, 1:] += expected_local_logits.sigmoid() * fusion.local_projection(fixed_features["local_tokens"])
+    expected[:, 1:] += (
+        expected_global_logits.sigmoid()[:, None] * expected_local_logits.sigmoid()
+        * fusion.local_projection(fixed_features["local_tokens"])
+    )
     expected += (expected_global_logits.sigmoid() * fusion.global_projection(fixed_features["global_token"]))[:, None]
     torch.testing.assert_close(fused, expected)
 
@@ -1119,6 +1122,36 @@ def test_tactile_fusion_zero_force_invariance():
     fusion(hand_tokens, features).square().mean().backward()
     optimizer.step()
     assert torch.equal(fusion(hand_tokens, encoder(torch.zeros_like(force))), hand_tokens)
+
+
+def test_tactile_global_gate_controls_local_residual():
+    fusion = TactileFusion()
+    hand_tokens = torch.randn(2, 6, 192)
+    features = {"local_tokens": torch.ones(2, 5, 64), "global_token": torch.ones(2, 64)}
+    with torch.no_grad():
+        fusion.local_projection.weight.fill_(1 / 64)
+        fusion.global_projection.weight.zero_()
+        fusion.local_gate.weight.zero_()
+        fusion.local_gate.bias.zero_()
+        fusion.global_gate.weight.zero_()
+        fusion.global_gate.bias.fill_(-10)
+
+    closed = fusion(hand_tokens, features)
+    with torch.no_grad():
+        fusion.global_gate.bias.fill_(10)
+    opened = fusion(hand_tokens, features)
+    torch.testing.assert_close(closed[:, 0], hand_tokens[:, 0])
+    torch.testing.assert_close(opened[:, 0], hand_tokens[:, 0])
+    assert (opened[:, 1:] - hand_tokens[:, 1:]).abs().sum() > 100 * (
+        closed[:, 1:] - hand_tokens[:, 1:]
+    ).abs().sum()
+
+    with torch.no_grad():
+        fusion.global_gate.bias.zero_()
+    fusion.zero_grad(set_to_none=True)
+    fusion(hand_tokens, features).sum().backward()
+    assert fusion.global_gate.bias.grad is not None
+    assert fusion.global_gate.bias.grad.abs().sum() > 0
 
 
 def test_hand_scene_attention_geometry_bias():
