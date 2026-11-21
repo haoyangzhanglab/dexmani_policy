@@ -17,16 +17,16 @@ class FingerTactileEncoder(nn.Module):
 
 
 class TactileFusion(nn.Module):
-    """Add finger-aligned and shared tactile residuals with a zero-force reference."""
+    """Gate finger-aligned and shared tactile residuals with global contact context."""
 
     def __init__(self) -> None:
         super().__init__()
         self.local_projection = nn.Linear(64, 192, bias=False)
         self.global_projection = nn.Linear(64, 192, bias=False)
         self.local_gate = nn.Linear(256, 1)
-        self.global_gate = nn.Linear(256, 1)
+        self.contact_gate = nn.Linear(256, 1)
         nn.init.constant_(self.local_gate.bias, -1.5)
-        nn.init.constant_(self.global_gate.bias, -1.5)
+        nn.init.constant_(self.contact_gate.bias, -1.5)
 
     def forward(
         self, hand_tokens: torch.Tensor, tactile_features: dict[str, torch.Tensor],
@@ -36,8 +36,13 @@ class TactileFusion(nn.Module):
         finger_tokens = hand_tokens[:, 1:]
         local_gate_input = torch.cat((local_tokens, finger_tokens), dim=-1)
         global_hand_state = hand_tokens.mean(dim=1)
-        global_gate_input = torch.cat((global_token, global_hand_state), dim=-1)
-        local_update = self.local_gate(local_gate_input).sigmoid() * self.local_projection(local_tokens)
-        global_update = self.global_gate(global_gate_input).sigmoid() * self.global_projection(global_token)
+        contact_gate_input = torch.cat((global_token, global_hand_state), dim=-1)
+        contact_weight = self.contact_gate(contact_gate_input).sigmoid()
+        local_update = (
+            contact_weight.unsqueeze(1)
+            * self.local_gate(local_gate_input).sigmoid()
+            * self.local_projection(local_tokens)
+        )
+        global_update = contact_weight * self.global_projection(global_token)
         hand_tokens = torch.cat((hand_tokens[:, :1], finger_tokens + local_update), dim=1)
         return hand_tokens + global_update.unsqueeze(1)

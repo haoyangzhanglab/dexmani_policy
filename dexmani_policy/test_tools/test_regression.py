@@ -1089,36 +1089,61 @@ def test_tactile_fusion_zero_force_invariance():
     hand_states[1, 0, 0] = 4
     hand_states[1, 3, 0] = 2
     with torch.no_grad():
-        for gate in (fusion.local_gate, fusion.global_gate):
+        for gate in (fusion.local_gate, fusion.contact_gate):
             torch.testing.assert_close(gate.bias, torch.full_like(gate.bias, -1.5))
             gate.weight.zero_()
             gate.weight[:, [0, 64]] = 1
 
-    capture_local, capture_global = Mock(return_value=None), Mock(return_value=None)
+    capture_local, capture_contact = Mock(return_value=None), Mock(return_value=None)
     with (
         fusion.local_gate.register_forward_hook(capture_local),
-        fusion.global_gate.register_forward_hook(capture_global),
+        fusion.contact_gate.register_forward_hook(capture_contact),
     ):
         fused = fusion(hand_states, fixed_features)
 
     _, (local_input,), local_logits = capture_local.call_args.args
-    _, (global_input,), global_logits = capture_global.call_args.args
+    _, (contact_input,), contact_logits = capture_contact.call_args.args
     torch.testing.assert_close(local_input, torch.cat((fixed_features["local_tokens"], hand_states[:, 1:]), dim=-1))
-    torch.testing.assert_close(global_input, torch.cat((fixed_features["global_token"], hand_states.mean(dim=1)), dim=-1))
+    torch.testing.assert_close(contact_input, torch.cat((fixed_features["global_token"], hand_states.mean(dim=1)), dim=-1))
     expected_local_logits = torch.full((2, 5, 1), -0.5)
     expected_local_logits[1, 2] = 1.5
-    expected_global_logits = torch.tensor([[-0.5], [0.5]])
+    expected_contact_logits = torch.tensor([[-0.5], [0.5]])
     torch.testing.assert_close(local_logits, expected_local_logits)
-    torch.testing.assert_close(global_logits, expected_global_logits)
+    torch.testing.assert_close(contact_logits, expected_contact_logits)
     expected = hand_states.clone()
-    expected[:, 1:] += expected_local_logits.sigmoid() * fusion.local_projection(fixed_features["local_tokens"])
-    expected += (expected_global_logits.sigmoid() * fusion.global_projection(fixed_features["global_token"]))[:, None]
+    expected[:, 1:] += (
+        expected_contact_logits.sigmoid().unsqueeze(1)
+        * expected_local_logits.sigmoid()
+        * fusion.local_projection(fixed_features["local_tokens"])
+    )
+    expected += (expected_contact_logits.sigmoid() * fusion.global_projection(fixed_features["global_token"]))[:, None]
     torch.testing.assert_close(fused, expected)
 
     optimizer = torch.optim.SGD([*encoder.parameters(), *fusion.parameters()], lr=0.1)
     fusion(hand_tokens, features).square().mean().backward()
     optimizer.step()
     assert torch.equal(fusion(hand_tokens, encoder(torch.zeros_like(force))), hand_tokens)
+
+
+def test_tactile_contact_gate_scales_local_update():
+    fusion = TactileFusion()
+    local_tokens = torch.ones(2, 5, 64)
+    features = {"local_tokens": local_tokens, "global_token": local_tokens.mean(dim=1)}
+    hand_tokens = torch.zeros(2, 6, 192)
+    hand_tokens[1, 0, 0] = 6
+    with torch.no_grad():
+        fusion.local_gate.weight.zero_()
+        fusion.local_gate.bias.zero_()
+        fusion.contact_gate.weight.zero_()
+        fusion.contact_gate.bias.fill_(-3)
+        fusion.contact_gate.weight[:, 64] = 6
+
+    output = fusion(hand_tokens, features)
+    residual = output - hand_tokens
+    # Subtracting the wrist residual isolates the finger-local path.
+    contact_weight = torch.tensor([[-3.0], [3.0]]).sigmoid()
+    expected_local = contact_weight.unsqueeze(1) * 0.5 * fusion.local_projection(local_tokens)
+    torch.testing.assert_close(residual[:, 1:] - residual[:, :1], expected_local)
 
 
 def test_hand_scene_attention_geometry_bias():
@@ -1253,8 +1278,8 @@ def test_hand_scene_encoder_backward():
         "tactile_fusion.global_projection.weight",
         "tactile_fusion.local_gate.weight",
         "tactile_fusion.local_gate.bias",
-        "tactile_fusion.global_gate.weight",
-        "tactile_fusion.global_gate.bias",
+        "tactile_fusion.contact_gate.weight",
+        "tactile_fusion.contact_gate.bias",
         "geometric_relation.hand_attention.in_proj_weight",
         "geometric_relation.query_projection.weight",
         "geometric_relation.scene_kv.weight",
