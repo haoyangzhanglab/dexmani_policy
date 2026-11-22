@@ -9,6 +9,9 @@ def build_rgb_encoder(
     name: Literal["resnet", "dino", "dinov3", "siglip"], config: dict | None = None
 ) -> tuple[nn.Module, ImageProcessor]:
     config = config or {}
+    if name == "siglip" and config.get("image_size") is None:
+        architecture = config.get("architecture") or {}
+        config = {**config, "image_size": architecture.get("image_size")}
     processor = ImageProcessor.from_preset(name, config)
     preprocessing = processor.config
     encoder_config = {key: value for key, value in config.items() if key not in preprocessing}

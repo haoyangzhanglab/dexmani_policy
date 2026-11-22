@@ -1252,6 +1252,11 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
     with pytest.raises(ValueError, match="extrinsics"):
         encoder({**obs, "camera_extrinsic": camera_extrinsic.transpose(-1, -2)})
 
+    mixed_points = point_cloud.clone()
+    mixed_points[0, :, :3].zero_()
+    with pytest.raises(ValueError, match="empty frame"):
+        encoder({**obs, "point_cloud": mixed_points})
+
 
 def test_hand_scene_encoder_backward():
     torch.manual_seed(0)
@@ -1686,15 +1691,15 @@ def test_hand_scene_rgb_initialization_and_checkpoint_lifecycle(tmp_path, small_
         assert initialize_rgb.call_count == 1
 
 
-@pytest.mark.parametrize("kind", ["dino", "siglip"])
-def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("kind,preprocessing", [("dino", {"image_size": 8}), ("siglip", {})])
+def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind, preprocessing):
     from transformers import AutoConfig, SiglipVisionConfig
     from dexmani_policy.training.initialization import prepare_warm_start, resolve_rgb_architecture
 
     directory = tmp_path / "rgb"
     source = save_tiny_hf_rgb(directory, kind)
     agent = OmegaConf.create({
-        "rgb_backbone_name": kind, "rgb_backbone_config": {"tune_mode": "full", "image_size": 8},
+        "rgb_backbone_name": kind, "rgb_backbone_config": {"tune_mode": "full", **preprocessing},
     })
     resolve_rgb_architecture(agent, str(directory))
     assert agent.rgb_backbone_config.architecture.hidden_size == 16
@@ -1722,7 +1727,8 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind):
     assert config == encoder.effective_config
     assert config["rgb_backbone_config"]["architecture"]["hidden_size"] == 16
     assert config["rgb_backbone_config"]["image_size"] == (8, 8)
-    result = encoder.rgb_encoder(torch.randn(2, 3, 8, 8))
+    images = encoder.image_processor.process_images(torch.rand(2, 3, 16, 16))
+    result = encoder.rgb_encoder(images)
     result["patch_tokens"].square().mean().backward()
     assert any(parameter.grad is not None for parameter in encoder.rgb_encoder.backbone.parameters())
 

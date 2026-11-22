@@ -92,8 +92,11 @@ class HandObjectInteractionEncoder(nn.Module):
     def _encode_scene_memory(
         self, obs: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        point_cloud = obs["point_cloud"]
+        if point_cloud[..., :3].eq(0).all(dim=(1, 2)).any():
+            raise ValueError("point_cloud contains an empty frame (all XYZ coordinates are zero)")
         points = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points,
+            point_cloud, self.num_points,
             self.patch_encoder.fps_random_config, training=self.training,
         )
         patches = self.patch_encoder(points)
