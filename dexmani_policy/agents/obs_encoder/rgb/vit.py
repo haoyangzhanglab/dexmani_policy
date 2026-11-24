@@ -116,13 +116,18 @@ class ViTEncoder(nn.Module):
             if loading_info["missing_keys"]:
                 raise ValueError(f"Pretrained RGB weights are missing configured parameters: {loading_info['missing_keys']}")
             source_state = pretrained.state_dict()
-        state = backbone.state_dict()
-        # PEFT inserts base_layer around adapted Linear modules; adapters stay freshly initialized.
-        base_keys = {key: key.replace(".base_layer.", ".") for key in state if ".lora_" not in key}
-        if set(base_keys.values()) != set(source_state):
+        if self.tune_mode == "lora":
+            state = backbone.state_dict()
+            # PEFT wraps adapted Linear parameters in base_layer and keeps separate adapter weights.
+            base_keys = {key: key.replace(".base_layer.", ".") for key in state if ".lora_" not in key}
+            if set(base_keys.values()) != source_state.keys():
+                raise ValueError("Pretrained RGB parameters do not match the configured architecture")
+            state.update({key: source_state[source_key] for key, source_key in base_keys.items()})
+            source_state = state
+        elif self.kind == "dinov3" and source_state.keys() != backbone.state_dict().keys():
+            # Strict loading can copy matching tensors before reporting missing or unexpected keys.
             raise ValueError("Pretrained RGB parameters do not match the configured architecture")
-        state.update({key: source_state[source_key] for key, source_key in base_keys.items()})
-        backbone.load_state_dict(state, strict=True)
+        backbone.load_state_dict(source_state, strict=True)
 
     def train(self, mode: bool = True):
         super().train(mode)

@@ -29,8 +29,6 @@ class HandObjectInteractionEncoder(nn.Module):
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
         rgb_backbone_config: dict | None = None,
         rgb_patch_sampling: Literal["center", "group_mean"] = "center",
-        *,
-        geometry_scales: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
         if rgb_backbone_name not in ("dino", "dinov3", "siglip"):
@@ -60,8 +58,6 @@ class HandObjectInteractionEncoder(nn.Module):
         self.tactile_encoder = FingerTactileEncoder()
         self.tactile_fusion = TactileFusion()
         self.geometric_relation = GeoAwareRelationAttention()
-        if geometry_scales is not None and geometry_scales != self.effective_config["geometry_scales"]:
-            raise ValueError("Recorded geometry_scales must match the encoder's fixed scales")
 
     @property
     def effective_config(self) -> dict:
@@ -81,11 +77,6 @@ class HandObjectInteractionEncoder(nn.Module):
             "rgb_patch_sampling": self.rgb_patch_sampling,
             "rgb_backbone_config": {
                 **self.rgb_encoder.effective_config, **self.image_processor.config,
-            },
-            "geometry_scales": {
-                "wrist_position_base": self.hand_encoder.wrist_position_scale,
-                "finger_position_wrist": self.hand_encoder.finger_position_wrist_scale,
-                "hand_scene_relative_position_base": self.geometric_relation.relative_position_scale,
             },
         }
 
@@ -132,5 +123,3 @@ class HandObjectInteractionEncoder(nn.Module):
             "global_token": tactile_features["global_token"],
             "rgb_projection_valid": projection_valid,
         }
-
-

@@ -46,25 +46,9 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `ode` | 从上一条实际应用的关节目标积分生成轨迹 |
 | `r3d` | 用预训练三维表征生成动作 |
 | `maniflow` | 结合 Flow Matching 与一致性学习 |
-| `interflow` | 用手物交互和关节状态作为 Flow Matching 的条件 |
 | `sat` / `dqrise` / `dexlatent` | 分别使用关节轨迹、手姿码本和连续手部潜表示 |
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |
 | `adaptac` | 用未来接触力引导动作生成 |
-
-### InterFlow
-
-InterFlow（Interaction-Conditioned Flow Policy for Dexterous Manipulation）把两帧观测各自的 6 个手物交互 token 和 1 个关节状态 token 拼成 14 个条件 token。Rectified Flow 用速度 MSE 训练 DiTX，推理默认通过 8 次 Euler 更新生成长度为 16 的关节目标轨迹。策略返回其中 15 个未来动作，评测按执行窗口取前 8 个。
-
-将 `DATA` 设为包含关节目标、关节状态、RGB、点云、相机内外参、末端姿态、指尖坐标和逐指触觉力的示教 Zarr 路径。将 `DINO` 设为包含 `model.safetensors` 的 DINOv3 Small 权重目录。运行 `bash scripts/utils/download_pretrained.sh dinov3` 可将权重下载到 `data/pretrained/dinov3-small`。
-
-```bash
-DATA=/path/to/pick_apple_messy.zarr
-DINO=/path/to/dinov3-small
-RUN=experiments/train/interflow/pick_apple_messy/run01
-bash scripts/training/train.sh interflow task_name=pick_apple_messy \
-    zarr_path="$DATA" initialization.rgb="$DINO" hydra.run.dir="$RUN"
-bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episodes 100
-```
 
 ## 文档
 
