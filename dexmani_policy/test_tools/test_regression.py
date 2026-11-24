@@ -1628,40 +1628,75 @@ def save_tiny_hf_rgb(directory, kind):
     return source
 
 
-class HandCentricPolicyForTest(Policy):
-    def __init__(self, horizon, n_obs_steps, n_action_steps, action_dim, **obs_config):
-        encoder = HandObjectInteractionEncoder(**obs_config)
-        super().__init__(encoder, nn.Identity(), horizon, n_obs_steps, n_action_steps, action_dim)
-
-
-def test_hand_scene_rgb_initialization_and_checkpoint_lifecycle(tmp_path, small_dp3_config, monkeypatch):
+def test_interflow_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
     pretrained = save_tiny_hf_rgb(source, "dino")
-    cfg = small_dp3_config(directory, "dataset.sensor_modalities=[joint_state]", "eval.inference_steps=2")
-    cfg.policy_name = "hand_centric_test"
-    with open_dict(cfg):
-        cfg.initialization.rgb = str(source)
-        cfg.agent = {
-            "_target_": f"{__name__}.HandCentricPolicyForTest",
-            "horizon": 4, "n_obs_steps": 1, "n_action_steps": 4, "action_dim": 19,
-            "rgb_backbone_name": "dino", "rgb_backbone_config": {"tune_mode": "full", "image_size": [8, 8]},
-        }
+    path = make_demo()
+    data = zarr.open_group(str(path), mode="r+")["data"]
+    observations = make_hand_scene_observation()
+    observations["rgb"] = observations["rgb"].permute(0, 2, 3, 1)
+    for key in ("camera_intrinsic", "camera_extrinsic"):
+        observations[key] = observations[key].flatten(1)
+    frame_indices = torch.arange(len(data["action"])) % len(observations["rgb"])
+    for key, frames in observations.items():
+        data.create_dataset(key, data=frames[frame_indices].numpy(), overwrite=True)
+    cfg = load_config("interflow", [
+        f"zarr_path={path}", "task_name=test", f"workspace.output_dir={directory}",
+        "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
+        "dataloader.num_workers=0", "dataloader.batch_size=1", f"initialization.rgb={source}",
+        "agent.rgb_backbone_name=dino", "agent.rgb_backbone_config.tune_mode=full",
+        "agent.rgb_backbone_config.image_size=[8,8]", "agent.n_layers=1", "agent.hidden_dim=32",
+    ])
 
     with (
         patch.object(ViTEncoder, "initialize_weights", autospec=True,
                      side_effect=ViTEncoder.initialize_weights) as initialize_rgb,
         closing(build_trainer(cfg)) as fresh,
     ):
-        initialize_rgb.assert_called_once_with(fresh.model.obs_encoder.rgb_encoder, str(source))
+        agent = fresh.model
+        encoder = agent.obs_encoder
+        rgb = encoder.rgb_encoder
+        initialize_rgb.assert_called_once_with(rgb, str(source))
+        assert [name for name, module in encoder.named_modules(remove_duplicate=False) if module is rgb] == [
+            "interaction_encoder.rgb_encoder",
+        ]
         for model in (fresh.model, fresh.ema_model):
             torch.testing.assert_close(model.obs_encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
         prior, = fresh.cfg.prior_data
         assert prior == {"source": None, "artifact": str(source), "budget_verified": False}
         assert fresh.cfg.agent.rgb_backbone_config.architecture.hidden_size == 16
+
+        batch = default_collate([fresh.train_loader.dataset[1]])
+        obs = batch["obs"]
+        agent.eval()
+        with torch.inference_mode():
+            condition = agent._encode_obs(obs)
+            assert condition.shape == (1, 14, 192)
+            flat = agent._preprocess_obs(obs)
+            hand = encoder.interaction_encoder(flat) + encoder.token_type_embedding[:, :1]
+            state = encoder.state_encoder(flat["joint_state"]).unsqueeze(1) + encoder.token_type_embedding[:, 1:]
+            frames = encoder.token_norm(torch.cat((hand, state), dim=1))
+            torch.testing.assert_close(condition[0, :7], frames[0])
+            torch.testing.assert_close(condition[0, 7:], frames[1])
+            result = agent.predict_action(obs, generator=torch.Generator().manual_seed(13))["future_actions"]
+        assert result.shape == (1, 15, 19) and result.isfinite().all()
+        runner = SimRunner("test", agent.n_obs_steps, list(obs), {}, fresh.cfg.control_dt_s)
+        chunk = runner.predict_action_chunk(
+            obs, agent, action_steps=agent.n_action_steps, generator=torch.Generator().manual_seed(13),
+        )
+        assert chunk.shape == (8, 19)
+        np.testing.assert_allclose(chunk, result[0, :8].numpy())
+
+        agent.train()
+        assert isinstance(agent.action_decoder, RectifiedFlow) and not agent.requires_ema_for_loss
+        loss, metrics = agent(batch)
+        assert loss.isfinite() and set(metrics) == {"loss"}
+        loss.backward()
+
         with torch.no_grad():
-            next(fresh.model.obs_encoder.rgb_encoder.parameters()).fill_(2)
+            next(rgb.parameters()).fill_(2)
             next(fresh.ema_model.obs_encoder.rgb_encoder.parameters()).fill_(3)
         fresh.save_checkpoint()
 
@@ -1694,7 +1729,7 @@ def test_hand_scene_rgb_initialization_and_checkpoint_lifecycle(tmp_path, small_
 @pytest.mark.parametrize("kind,preprocessing", [("dino", {"image_size": 8}), ("siglip", {})])
 def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind, preprocessing):
     from transformers import AutoConfig, SiglipVisionConfig
-    from dexmani_policy.training.initialization import prepare_warm_start, resolve_rgb_architecture
+    from dexmani_policy.training.initialization import inherit_rgb_architecture, resolve_rgb_architecture
 
     directory = tmp_path / "rgb"
     source = save_tiny_hf_rgb(directory, kind)
@@ -1739,14 +1774,15 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind, prepro
     monkeypatch.setattr(SiglipVisionConfig, "from_pretrained", forbidden)
     resolve_rgb_architecture(agent, "missing-source")
     warm = OmegaConf.create({"rgb_backbone_name": kind, "rgb_backbone_config": {}})
-    prepare_warm_start("hand_centric_test", warm, OmegaConf.to_container(agent))
+    saved_agent = OmegaConf.to_container(agent)
+    inherit_rgb_architecture(warm, saved_agent)
     assert warm.rgb_backbone_config.architecture == agent.rgb_backbone_config.architecture
     warm.rgb_backbone_config.architecture.hidden_size = 32
-    prepare_warm_start("hand_centric_test", warm, OmegaConf.to_container(agent))
+    inherit_rgb_architecture(warm, saved_agent)
     assert warm.rgb_backbone_config.architecture.hidden_size == 32
     warm.rgb_backbone_name = "resnet"
     with pytest.raises(ValueError, match="RGB backbone"):
-        prepare_warm_start("hand_centric_test", warm, OmegaConf.to_container(agent))
+        inherit_rgb_architecture(warm, saved_agent)
 
 
 def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
@@ -1800,6 +1836,7 @@ def test_method_owned_warm_checks():
 @pytest.mark.parametrize("method,fields", [
     ("dp", {"rgb", "finger_tactile_force", "taxel_tactile_force"}),
     ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
+    ("interflow", {"point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz"}),
     ("dqrise", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dexlatent", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("adaptac", {"point_cloud"}),
@@ -1818,7 +1855,7 @@ def test_observation_identity_constraints(method, fields):
 
 
 @pytest.mark.parametrize("method", [
-    "dp", "dp3", "r3d", "maniflow", "sat", "dqrise", "dexlatent", "afro", "cordvip", "adaptac", "ode",
+    "dp", "dp3", "r3d", "maniflow", "interflow", "sat", "dqrise", "dexlatent", "afro", "cordvip", "adaptac", "ode",
 ])
 def test_recipe_composition(method):
     cfg = load_config(method)

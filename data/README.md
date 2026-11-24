@@ -8,7 +8,7 @@
 | --- | --- |
 | [Uni3D（R3D 权重）](https://huggingface.co/eddie-cui/r3d-weights) | 初始化 R3D 的点云编码器 |
 | [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | DP 的可选 RGB 主干 |
-| [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) | SAT、DQ-RISE、DexLatent 的默认 RGB 主干 |
+| [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) | InterFlow、SAT、DQ-RISE、DexLatent 的默认 RGB 主干 |
 | [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) | RGB 策略的可选视觉主干 |
 | [DexLatent](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/Checkpoints/20260311_225425/checkpoint_epoch_1000.pt) | 提供冻结的 XHand 手部编码器与解码器 |
 
