@@ -50,7 +50,7 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |
 | `adaptac` | 用未来接触力引导动作生成 |
 
-DAI-Flow 的观测字段、未来目标对齐及运行命令见[方法说明](docs/InteractionFlow模型架构.md#运行与验证)。其训练需要启用 EMA；未来观测由 Dataset 从原示教中读取，不需要额外生成标签。
+DAI-Flow 的观测字段与未来目标对齐见[方法说明](docs/InteractionFlow模型架构.md)，训练、续训和评测命令见[运行与验证](docs/InteractionFlow模型架构.md#运行与验证)。其训练需要启用 EMA；未来观测由 Dataset 从原示教中读取，不需要额外生成标签。
 
 ## 文档
 

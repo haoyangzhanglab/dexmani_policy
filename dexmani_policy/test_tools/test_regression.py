@@ -93,13 +93,14 @@ def make_demo(tmp_path):
         store = zarr.open_group(str(path), mode="w")
         store.attrs.update(task_name="test", action_space="joint", dt=0.05)
         rng = np.random.default_rng(1)
+        n_rows = episode_ends[-1]
         fields = {
-            "action": rng.normal(size=(12, action_dim)).astype(np.float32),
-            "joint_state": rng.normal(size=(12, 19)).astype(np.float32),
-            "point_cloud": rng.normal(size=(12, 8, 6)).astype(np.float32),
+            "action": rng.normal(size=(n_rows, action_dim)).astype(np.float32),
+            "joint_state": rng.normal(size=(n_rows, 19)).astype(np.float32),
+            "point_cloud": rng.normal(size=(n_rows, 8, 6)).astype(np.float32),
         }
         if auxiliary:
-            fields["action_ee"] = rng.normal(size=(12, 21)).astype(np.float32)
+            fields["action_ee"] = rng.normal(size=(n_rows, 21)).astype(np.float32)
         for key, value in fields.items():
             store.create_dataset(f"data/{key}", data=value, chunks=(4, *value.shape[1:]))
         store.create_dataset("meta/episode_ends", data=np.array(episode_ends, dtype=np.int64))
@@ -763,22 +764,22 @@ def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
 @pytest.mark.parametrize("before", [1, 15])
 @pytest.mark.parametrize("resize", [None, (4, 6)])
 def test_future_observation_alignment(make_demo, before, resize):
-    path = make_demo(episode_ends=(1, 12))
+    path = make_demo(episode_ends=(1, 33, 65))
     group = zarr.open_group(str(path), mode="r+")
-    rows = np.arange(12, dtype=np.float32)
-    group["data/joint_state"][:] = np.broadcast_to(rows[:, None], (12, 19))
+    rows = np.arange(65, dtype=np.float32)
+    group["data/joint_state"][:] = np.broadcast_to(rows[:, None], (65, 19))
     group.create_dataset("data/rgb", data=np.broadcast_to(
-        np.arange(12, dtype=np.uint8)[:, None, None, None], (12, 2, 3, 3)).copy())
+        np.arange(65, dtype=np.uint8)[:, None, None, None], (65, 2, 3, 3)).copy())
     dataset = DemonstrationDataset(
         path, sensor_modalities=["joint_state", "rgb"], horizon=16, obs_horizon=2,
-        pad_before=before, pad_after=15, future_obs_steps=8, rgb_preprocess_size=resize,
+        pad_before=before, pad_after=15, future_obs_steps=15, rgb_preprocess_size=resize,
     )
     indices = [*reversed(range(len(dataset))), 0]
     for index, item in zip(indices, dataset.__getitems__(indices)):
         window, start, end = dataset.sampler.indices[index]
         current = min(max(window + 1, start), end - 1)
-        expected = min(current + 8, end - 1)
-        assert item["future_obs_valid"].item() == (current + 8 < end)
+        expected = min(current + 15, end - 1)
+        assert item["future_obs_valid"].item() == (current + 15 < end)
         assert item["future_obs"]["joint_state"].shape == (19,)
         assert (item["future_obs"]["joint_state"] == expected).all()
         assert item["future_obs"]["rgb"].shape == (3, *(resize or (2, 3)))
@@ -786,9 +787,13 @@ def test_future_observation_alignment(make_demo, before, resize):
         torch.testing.assert_close(item["future_obs"]["rgb"], dataset[index]["future_obs"]["rgb"])
     index = np.flatnonzero(dataset.sampler.indices[:, 0] == 1)[0]
     assert dataset[index]["future_obs_valid"]
-    assert dataset[index]["future_obs"]["joint_state"][0] == 10  # Window index 9.
-    # Window at row 3: latest observation row 4 -> future row 12 (invalid).
-    index = np.flatnonzero(dataset.sampler.indices[:, 0] == 3)[0]
+    assert dataset[index]["future_obs"]["joint_state"][0] == 17  # Window index 16, after the last action.
+    # Episode [1,33): current row 17 -> target 32 is the last valid observation.
+    index = np.flatnonzero(dataset.sampler.indices[:, 0] == 16)[0]
+    assert dataset[index]["future_obs_valid"]
+    assert dataset[index]["future_obs"]["joint_state"][0] == 32
+    # Current row 18 -> target 33 is exactly the exclusive episode end.
+    index = np.flatnonzero(dataset.sampler.indices[:, 0] == 17)[0]
     assert not dataset[index]["future_obs_valid"]
     assert not dataset.__getitems__([])
 
@@ -821,8 +826,17 @@ def test_dai_default_shapes_and_inference(monkeypatch):
     memory, state = model._encode_condition(packed)
     assert memory.shape == (2, 262, 768) and state.shape == (2, 768)
     x = torch.randn(2, 16, 19)
-    with torch.no_grad():
+    final_hidden, head_input = Mock(return_value=None), Mock(return_value=None)
+    with (
+        torch.no_grad(),
+        model.ditx_blocks[-1].register_forward_hook(final_hidden),
+        model.future_head.register_forward_pre_hook(head_input),
+    ):
         velocity, future = model(x, 0.5, packed, return_aux=True)
+    hidden = final_hidden.call_args.args[2]
+    readout = head_input.call_args.args[1][0]
+    assert hidden.shape == (2, 16, 768) and readout.shape == (2, 15, 768)
+    torch.testing.assert_close(readout, hidden[:, 1:])
     assert velocity.shape == x.shape and future.shape == (2, 6, 192)
     monkeypatch.setattr(model.future_head, "forward", Mock(side_effect=AssertionError("future head in inference")))
     with torch.no_grad():
@@ -830,43 +844,66 @@ def test_dai_default_shapes_and_inference(monkeypatch):
         assert RectifiedFlow(model, 5).eval().predict_action(packed, x.shape).shape == x.shape
 
 
-@pytest.mark.parametrize("valid,times", [([True, False], [0.2, 0.9]), ([False, False], [0.7, 0.8]),
-                                        ([True, True], [0., 0.]), ([True, True], [0.9, 0.9])])
+@pytest.mark.parametrize("valid,times", [
+    ([True, False, True], [0.2, 0.9, 0.8]),
+    ([False, False], [0.7, 0.8]),
+    ([True, True], [0., 0.]),
+    ([True, True], [0.9, 0.9]),
+    ([True, True], [0.2, 0.4]),
+    ([True], [0.2]),
+    ([True], [1e-4]),
+])
 def test_dai_future_loss_formula_and_normalization(monkeypatch, valid, times):
     from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
 
+    batch_size = len(valid)
+    mask = torch.tensor(valid)
     policy = InteractionFlow.__new__(InteractionFlow)
     Policy.__init__(policy, nn.Identity(), RectifiedFlow(nn.Identity()), 16, 2, 8, 19)
     policy.future_loss_weight = 0.1
     policy.normalizer = LinearNormalizer({"action": (19,), "joint_state": (19,)})
     policy.normalizer["joint_state"].scale.fill_(2)
     policy.normalizer["joint_state"].offset.fill_(3)
-    monkeypatch.setattr(policy, "_encode_obs", lambda obs: torch.zeros(2, 263, 192))
-    prediction = torch.randn(2, 6, 192, requires_grad=True)
-    target = torch.randn(2, 6, 192, requires_grad=True)
-    velocity = torch.ones(2, 16, 19, requires_grad=True)
+    monkeypatch.setattr(policy, "_encode_obs", lambda obs: torch.zeros(batch_size, 263, 192))
+    prediction = torch.randn(batch_size, 6, 192, requires_grad=True)
+    target = torch.randn(batch_size, 6, 192, requires_grad=True)
+    velocity = torch.ones(batch_size, 16, 19, requires_grad=True)
     timestep = torch.tensor(times)
     monkeypatch.setattr(policy.action_decoder, "_sample_training_pair", lambda actions: (
         torch.zeros_like(actions), timestep, torch.zeros_like(actions)))
     monkeypatch.setattr(policy.action_decoder.model, "forward", lambda *args, **kw: (velocity, prediction))
+    joints = torch.arange(batch_size, dtype=torch.float32)[:, None].expand(-1, 19)
+    # Invalid placeholders must never reach the teacher or affect the future loss.
+    future_joints = joints.clone()
+    future_joints[~mask] = float("nan")
 
-    def teacher(obs):
+    def encode_future(obs):
         assert not torch.is_grad_enabled()
-        torch.testing.assert_close(obs["joint_state"], torch.full((2, 19), 5.))
-        return target * 1
+        torch.testing.assert_close(obs["joint_state"], joints[mask] * 2 + 3)
+        return target[mask] * 1
 
-    batch = {"obs": {}, "action": torch.zeros(2, 16, 19),
-             "future_obs": {"joint_state": torch.ones(2, 19)}, "future_obs_valid": torch.tensor(valid)}
+    teacher = Mock(side_effect=encode_future)
+    batch = {"obs": {}, "action": torch.zeros_like(velocity),
+             "future_obs": {"joint_state": future_joints}, "future_obs_valid": mask}
     loss, metrics = policy(batch, ema_interaction_encoder=teacher)
-    weights = torch.tensor(valid) * timestep.square()
-    expected = (F.layer_norm(prediction, (192,)) - F.layer_norm(target, (192,))).abs().mean((1, 2))
-    expected = (expected * weights).sum() / weights.sum().clamp_min(1)
-    torch.testing.assert_close(metrics["future_loss"], expected)
+    errors = (F.layer_norm(prediction, (192,)) - F.layer_norm(target, (192,))).abs().mean((1, 2))
+    expected = sum(t * t * errors[i] for i, (m, t) in enumerate(zip(valid, times)) if m) / max(sum(valid), 1)
+    expected = torch.as_tensor(expected)
+    torch.testing.assert_close(metrics["future_loss"], expected, atol=0, rtol=1e-5)
     torch.testing.assert_close(loss, 1 + 0.1 * expected)
+    if valid == [True] and times == [0.2]:
+        torch.testing.assert_close(metrics["future_loss"], 0.04 * errors[0])
+    teacher_count = int(any(valid))
+    assert teacher.call_count == teacher_count
     loss.backward()
     assert target.grad is None
-    assert prediction.grad[~torch.tensor(valid)].count_nonzero() == 0
+    assert prediction.grad[~mask].count_nonzero() == 0
+    if not any(valid) or not any(times):
+        assert prediction.grad.count_nonzero() == 0
+    # FM still updates every sample, including those without a valid future.
+    assert (velocity.grad > 0).all()
     assert policy(batch, ema_interaction_encoder=teacher, log_metrics=False)[1] == {}
+    assert teacher.call_count == 2 * teacher_count
 
 
 def test_rectified_training_pair_preserves_sampling():
@@ -1863,7 +1900,7 @@ def save_tiny_hf_rgb(directory, kind):
 def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
     source, directory = tmp_path / "rgb", tmp_path / "interaction"
     pretrained = save_tiny_hf_rgb(source, "dino")
-    path = make_demo(auxiliary=False)
+    path = make_demo(auxiliary=False, episode_ends=(32,))
     data = zarr.open_group(str(path), mode="r+")["data"]
     frames = make_hand_scene_observation()
     frames["rgb"] = frames["rgb"].movedim(1, -1)
@@ -1887,6 +1924,7 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         assert isinstance(model.action_decoder, RectifiedFlow) and model.action_decoder.model.action_io is None
         fresh.train(max_updates=2)
         batch = default_collate([fresh.train_loader.dataset[i] for i in (1, 2)])
+        assert batch["future_obs_valid"].all()
         teacher = fresh.ema_model.obs_encoder.interaction_encoder
         assert not model.requires_ema_for_loss
         loss, metrics = model(batch, ema_interaction_encoder=teacher)
@@ -1908,7 +1946,11 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         velocity, predicted = backbone(xt, times, condition, return_aux=True)
         target = teacher(batch["future_obs"])
         fm = F.mse_loss(velocity, target_v)
-        future_loss = F.l1_loss(F.layer_norm(predicted, (192,)), F.layer_norm(target, (192,)))
+        per_sample = F.l1_loss(
+            F.layer_norm(predicted.float(), (192,)), F.layer_norm(target.float(), (192,)),
+            reduction="none",
+        ).mean((1, 2))
+        future_loss = (times.float().square() * per_sample).mean()
         hand_weight = interaction.hand_encoder.finger_mlp[0].weight
         fm_grad, = torch.autograd.grad(fm, (hand_weight,), retain_graph=True)
         assert fm_grad.isfinite().all() and fm_grad.abs().max() > 0
@@ -1918,6 +1960,15 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         ))
         assert all(g.isfinite().all() and g.abs().max() > 0 for g in future_grads)
         assert all(p.grad is None for p in teacher.parameters())
+        invalid_batch = default_collate([fresh.train_loader.dataset[i] for i in (-2, -1)])
+        assert not invalid_batch["future_obs_valid"].any()
+        with patch.object(teacher, "forward", side_effect=AssertionError("invalid teacher input")):
+            invalid_loss, invalid_metrics = model(invalid_batch, ema_interaction_encoder=teacher)
+        assert invalid_metrics["future_loss"].item() == 0
+        torch.testing.assert_close(invalid_loss, invalid_metrics["fm_loss"])
+        hand_grad, head_grad = torch.autograd.grad(invalid_loss, (hand_weight, backbone.future_head.queries))
+        assert hand_grad.isfinite().all() and hand_grad.abs().max() > 0
+        assert head_grad.count_nonzero() == 0
         with patch.object(model, "compile_backbone") as student_compile, patch.object(
             fresh.ema_model, "compile_backbone",
         ) as teacher_compile:
@@ -2185,7 +2236,8 @@ def test_recipe_composition(method):
     assert cfg.dataset.obs_horizon == cfg.agent.n_obs_steps == cfg.n_obs_steps
     validate_config(cfg)
     if method == "interaction_flow":
-        assert cfg.dataset.future_obs_steps == cfg.n_action_steps
+        assert cfg.dataset.future_obs_steps == cfg.horizon - (cfg.n_obs_steps - 1) == 15
+        assert cfg.n_action_steps == 8
         assert cfg.training.use_ema and cfg.agent.future_loss_weight == 0.1
     hydra.utils.get_class(cfg.dataset._target_)
     if method == "r3d":

@@ -107,23 +107,29 @@ class InteractionFlow(Policy):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         condition = self._encode_obs(batch["obs"])
         actions = self._encode_actions(batch["action"])
-        with torch.no_grad():
-            # Single frames retain [B,...], unlike the current observation's [B,T,...].
-            future_obs = {
-                key: self.normalizer[key].normalize(value) if key in self.normalizer.fields else value
-                for key, value in batch["future_obs"].items()
-            }
-            target = ema_interaction_encoder(future_obs)  # [B, 6, 192]
         xt, timestep, target_velocity = self.action_decoder._sample_training_pair(actions)
         velocity, future = self.action_decoder.model(xt, timestep, condition, return_aux=True)
         fm_loss = F.mse_loss(velocity.float(), target_velocity.float())
-        latent_shape = (future.shape[-1],)
-        per_sample = F.l1_loss(
-            F.layer_norm(future.float(), latent_shape),
-            F.layer_norm(target.float(), latent_shape), reduction="none",
-        ).mean(dim=(1, 2))
-        weights = batch["future_obs_valid"].float() * timestep.float().square()
-        future_loss = (weights * per_sample).sum() / weights.sum().clamp_min(1)
+        valid = batch["future_obs_valid"]
+        if valid.any():
+            with torch.no_grad():
+                # Single frames retain [N_valid,...], without an observation history dimension.
+                future_obs = {}
+                for key, value in batch["future_obs"].items():
+                    value = value[valid]
+                    if key in self.normalizer.fields:
+                        value = self.normalizer[key].normalize(value)
+                    future_obs[key] = value
+                target = ema_interaction_encoder(future_obs)  # [N_valid, 6, 192]
+            latent_shape = (future.shape[-1],)
+            per_sample = F.l1_loss(
+                F.layer_norm(future[valid].float(), latent_shape),
+                F.layer_norm(target.float(), latent_shape), reduction="none",
+            ).mean(dim=(1, 2))
+            weights = timestep[valid].float().square()
+            future_loss = (weights * per_sample).mean()
+        else:
+            future_loss = future.float().sum() * 0.0
         loss = fm_loss + self.future_loss_weight * future_loss
         return loss, {
             "loss": loss.detach(), "fm_loss": fm_loss.detach(), "future_loss": future_loss.detach(),

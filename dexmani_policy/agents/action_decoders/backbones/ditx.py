@@ -268,7 +268,7 @@ class FutureInteractionHead(nn.Module):
         nn.init.normal_(self.queries, std=WEIGHT_INIT_STD)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        memory = self.action_projection(hidden)  # [B, 16, 192]
+        memory = self.action_projection(hidden)  # [B, horizon-(n_obs_steps-1), 192]
         queries = self.queries.expand(hidden.shape[0], -1, -1)  # [B, 6, 192], wrist first
         return self.mlp(self.norm(self.attention(queries, memory)))
 
@@ -284,6 +284,7 @@ class InteractionDiTX(DiTX):
             n_obs_steps=n_obs_steps, obs_token_dim=obs_token_dim, hidden_dim=hidden_dim, **kwargs,
         )
         self.condition_counts = (n_obs_steps * num_scene_tokens, 1, 6)
+        self.action_start_index = n_obs_steps - 1
         self.scene_norm = nn.LayerNorm(hidden_dim)
         self.interaction_projection = nn.Linear(obs_token_dim, hidden_dim)
         self.interaction_norm = nn.LayerNorm(hidden_dim)
@@ -312,7 +313,8 @@ class InteractionDiTX(DiTX):
         )
         velocity = self.final_layer(hidden)
         if return_aux:
-            return velocity, self.future_head(hidden)
+            future_hidden = hidden[:, self.action_start_index:]  # [B, 15, 768]
+            return velocity, self.future_head(future_hidden)
         return velocity
 
     def sampling_modulations(self, timesteps, context_kv, chunk_size):

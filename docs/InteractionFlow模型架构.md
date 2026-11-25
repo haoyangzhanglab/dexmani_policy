@@ -40,8 +40,8 @@ flowchart TD
     memory --> ditx
     adaln --> ditx
     ditx --> velocity["Action Velocity"]
-    ditx -. "训练时的最终隐藏特征" .-> head["6 Query Future Head"]
-    future["单帧未来观测"] -.-> teacher["EMA Interaction Encoder<br/>no_grad"]
+    ditx -. "训练时取隐藏位置 1–15" .-> head["6 Query Future Head"]
+    future["有效样本的 t+15 单帧观测"] -.-> teacher["EMA Interaction Encoder<br/>no_grad"]
     teacher -.-> loss["Future Latent Loss"]
     head -.-> loss
 ```
@@ -88,18 +88,20 @@ flowchart TD
 
 ### 预测头与 Teacher
 
-最后一层动作隐藏特征 `[B,16,768]` 投影到 192 维。六个可学习 Query 通过一次 4-head Cross-Attention 读取动作特征，再经 LayerNorm 和 `192→384→192` MLP 输出 `[B,6,192]`。Query 身份顺序与 Interaction Encoder 相同。
+最后一层动作隐藏特征为 `[B,16,768]`。Future Head 只读取 `hidden[:, action_start_index:]`，其中 `action_start_index=n_obs_steps-1=1`，即未来动作位置 1–15，形状为 `[B,15,768]`，再投影到 192 维。历史位置 0 不进入 Head 的 Readout Memory；DiTX 内仍保留双向 Self-Attention。六个可学习 Query 通过一次 4-head Cross-Attention 读取动作特征，再经 LayerNorm 和 `192→384→192` MLP 输出 `[B,6,192]`。Query 身份顺序与 Interaction Encoder 相同。
 
-目标来自现有 EMA Policy 的 Interaction Encoder，在 `torch.no_grad()` 下编码单帧未来观测。当前与未来观测使用相同 LinearNormalizer 和确定性 RGB 预处理。Trainer 的 EMA 更新保持原样，仅通过 `training_microbatches()` 传入 Teacher Encoder，不额外编译 EMA Action Backbone。
+目标来自现有 EMA Policy 的 Interaction Encoder，在 `torch.no_grad()` 下仅编码 `future_obs_valid=True` 的单帧未来观测。先按 mask 筛选，再使用当前 Policy 的 LinearNormalizer 归一化，Teacher 输入保持 `[N_valid,...]`，不增加观测历史维度。当前与未来 RGB 使用相同的确定性预处理；预测值和时间权重取相同的有效子集。Trainer 的 EMA 更新保持原样，仅通过 `training_microbatches()` 传入 Teacher Encoder，不额外编译 EMA Action Backbone。
+
+全无效 Batch 跳过 Teacher，Student 仍计算动作速度和 Future Latent。辅助损失通过 `future.float().sum() * 0.0` 保留计算图并返回零，FM 正常训练。推理则完全跳过 Future Head。
 
 ### 时间对齐与有效性
 
-Dataset 先通过 `SequenceSampler.source_rows()` 找到最新观测的真实 Zarr 行号 `r`，再计算 `r + future_obs_steps`；默认 `future_obs_steps=${n_action_steps}=8`。目标达到或超过 exclusive Episode End 时，读取本 Episode 末行并置 `future_obs_valid=False`。样本仍参与 FM 训练，不将 Padding 后的未来帧当成有效监督。
+Dataset 先通过 `SequenceSampler.source_rows()` 找到最新观测的真实 Zarr 行号 `r`，再计算 `r + future_obs_steps`；默认 `future_obs_steps=15`，计算关系为 `horizon-(n_obs_steps-1)=16-(2-1)`。它对应完整预测 Action Chunk 的终点：最新观测为 `t`，15 个未来动作对应 `t` 至 `t+14`，目标为 `t+15`，普通窗口索引为 16。实际闭环仍只执行前 8 步动作。目标达到或超过 exclusive Episode End 时，读取本 Episode 末行并置 `future_obs_valid=False`。样本仍参与 FM 训练，不将 Padding 后的未来帧当成有效监督。
 
-| 窗口索引 | 0 | 1–8 | 9 | 10–15 |
+| 窗口相对索引 | 0 | 1–8 | 9–15 | 16 |
 | --- | --- | --- | --- | --- |
-| 时刻 | t−1 | t 至 t+7 | t+8 | t+9 至 t+14 |
-| 用途 | 历史观测 | 执行 8 步动作 | Future Target | 剩余预测动作 |
+| 时刻 | t−1 | t 至 t+7 | t+8 至 t+14 | t+15 |
+| 用途 | 历史对齐位置 | 本轮执行的动作 | 预测 Chunk 的其余动作 | Future Target，另行读取观测 |
 
 ### 训练目标
 
@@ -113,11 +115,19 @@ $$
 Future Loss 在每个 Token 的特征维做无参数 LayerNorm，再对 Token 和特征维取 L1 均值，得到每个样本的误差 $\ell_b$。Teacher 停止梯度，预测路径保持梯度：
 
 $$
-\mathcal L_{future}=\frac{\sum_b m_b\tau_b^2\ell_b}{\max(\sum_b m_b\tau_b^2,1)},\qquad
+\mathcal L_{future}=\frac{\sum_b m_b\tau_b^2\ell_b}{\max(\sum_b m_b,1)},\qquad
 \mathcal L=\mathcal L_{FM}+0.1\mathcal L_{future}.
 $$
 
-求和范围为当前 microbatch；通用 Trainer 继续按样本数平均梯度累积组，默认 `gradient_accumulation_steps=1`。FM 和 Future Loss 均用 FP32 计算。Future Loss 的梯度经过预测头、动作专家回到当前 Interaction Encoder，Teacher 不产生梯度。全无效目标的 Future Loss 为零。日志记录 `loss`、`fm_loss`、`future_loss`，其中后者包含 mask 和时间权重，尚未乘以 0.1。
+实现对非空有效子集的 `τ²ℓ` 直接取均值，等价于除以有效样本数量，保留 `τ²` 的绝对衰减：只有一个有效样本且 `τ=0.2` 时，Future Loss 为 `0.04ℓ`。FM 和 Future Loss 均用 FP32 计算。无效样本不贡献 Future Loss 梯度；有效样本的梯度经过预测头、动作专家回到当前 Interaction Encoder，Teacher 不产生梯度。
+
+公式的求和范围为当前 microbatch。默认 `gradient_accumulation_steps=1`；若启用梯度累积，通用 Trainer 按各 microbatch 的样本数平均损失，不会按整个累积组的有效样本总数重新归一化。
+
+| 日志指标 | 含义 |
+| --- | --- |
+| `fm_loss` | 整个动作窗口的 FP32 MSE |
+| `future_loss` | 有效样本的 `τ²ℓ` 均值，全无效时为零，尚未乘以 0.1 |
+| `loss` | `fm_loss + 0.1 * future_loss` |
 
 ## 推理
 
@@ -145,11 +155,13 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
-| `dataset.future_obs_steps` | `${n_action_steps}`，即 8 | 当前观测到未来目标的控制步数 |
+| `dataset.future_obs_steps` | `15` | 完整预测动作跨度 `horizon-(n_obs_steps-1)` |
 | `agent.future_loss_weight` | `0.1` | Future Loss 系数 |
 | `training.use_ema` | `true` | 提供未来交互 Teacher，训练必须启用 |
 | `training.use_compile` | `true` | 编译 Student Action Backbone |
 | `agent.num_inference_steps` | `5` | Euler 积分次数 |
+
+若修改 `horizon` 或 `n_obs_steps`，需同步调整 `dataset.future_obs_steps` 以保持终点对齐。
 
 默认标定数据路径在 Dataset 中保留 RGB 分辨率，由 Encoder 内的 ImageProcessor 做 resize 和归一化。启用未来观测采样时，Dataset 不接受随机 RGB 裁剪或颜色增强；当前和未来目标均使用确定性预处理。
 
@@ -159,4 +171,12 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 python -m pytest dexmani_policy/test_tools/test_regression.py -q
 ```
 
-回归测试覆盖形状和 Token 顺序、未来目标对齐与屏蔽、梯度路径、EMA 路由、缓存等价性、推理跳过 Future Head，以及训练保存和恢复。单元测试不衡量机器人任务成功率。
+相关回归测试覆盖：
+
+- Condition Packing、Context K/V 缓存等价性，以及 Future Head 的实际输入等于最后一层隐藏特征的 `[:,1:]`。
+- Future Target 的窗口索引 16、回合末行占位和有效性 mask。
+- 全有效、部分有效、全无效、单样本、极小及不同 Flow 时间下的损失公式；Teacher 仅接收有效样本且不产生梯度。
+- FM 和 Future Loss 的梯度路径、全无效 Batch 的 FM 训练、EMA 更新、训练保存和恢复。
+- Rectified Flow 采样及推理跳过 Future Head。
+
+单元测试不衡量机器人任务成功率。
