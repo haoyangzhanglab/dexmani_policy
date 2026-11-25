@@ -10,6 +10,7 @@ def window_indices(
     pad_before: int = 0,
     pad_after: int = 0,
 ) -> np.ndarray:
+    """Rows are (window start before clipping, episode start, exclusive episode end)."""
     episode_starts = np.r_[0, episode_ends[:-1]]
     counts = np.maximum(episode_ends - episode_starts - sequence_length + pad_before + pad_after + 1, 0)
     counts[~episode_mask] = 0
@@ -19,9 +20,9 @@ def window_indices(
         start_idx, end_idx = episode_starts[episode], episode_ends[episode]
         window_starts = np.arange(-pad_before, counts[episode] - pad_before, dtype=np.int64)
         next_cursor = cursor + counts[episode]
-        indices[cursor:next_cursor, 0] = np.maximum(window_starts, 0) + start_idx
-        indices[cursor:next_cursor, 1] = np.minimum(window_starts + sequence_length + start_idx, end_idx)
-        indices[cursor:next_cursor, 2] = np.maximum(-window_starts, 0)
+        indices[cursor:next_cursor, 0] = start_idx + window_starts
+        indices[cursor:next_cursor, 1] = start_idx
+        indices[cursor:next_cursor, 2] = end_idx
         cursor = next_cursor
 
     return indices
@@ -38,6 +39,7 @@ class SequenceSampler:
         episode_mask: np.ndarray,
         fields: dict[str, slice | None] | None = None,
         field_horizons: dict[str, int] | None = None,
+        frame_stride: int = 1,
     ):
         if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
@@ -53,51 +55,25 @@ class SequenceSampler:
         self.sequence_length = sequence_length
         self.fields = dict.fromkeys(episode_store.keys()) if fields is None else dict(fields)
         self.field_horizons = dict(field_horizons or {})
+        self.frame_stride = frame_stride
 
     def __len__(self):
         return len(self.indices)
 
-    def sample_source_row(self, idx, offset):
-        start, end, sample_start = self.indices[idx]
-        return int(min(max(start + offset - sample_start, start), end - 1))
-
-    def sample_source_rows(self, idx):
-        """Original source rows, including repeated boundary rows used by padding."""
-        start, end, sample_start = self.indices[idx].T[..., None]
-        return np.clip(
-            start + np.arange(self.sequence_length) - sample_start,
-            start,
-            end - 1,
-        )
+    def source_rows(self, indices, offsets):
+        window, start, end = np.moveaxis(self.indices[indices], -1, 0)
+        return np.clip(window + offsets, start, end - 1)
 
     def sample_batch(self, indices: list[int]) -> list[dict[str, np.ndarray]]:
         samples: list[dict[str, np.ndarray]] = [{} for _ in indices]
         if not samples:
             return samples
 
-        source_rows = self.sample_source_rows(indices)
+        source_rows = self.source_rows(np.asarray(indices)[:, None], np.arange(self.sequence_length))
         for key, columns in self.fields.items():
             length = self.field_horizons.get(key, self.sequence_length)
-            rows = source_rows[:, :length]
-            values = self.episode_store.read_rows_by_chunk(key, rows.ravel(), columns=columns)
-            for sample, value in zip(samples, values.reshape(*rows.shape, *values.shape[1:])):
+            rows = source_rows[:, :length:self.frame_stride]
+            values = self.episode_store.read_rows_by_chunk(key, rows, columns=columns)
+            for sample, value in zip(samples, values):
                 sample[key] = value
         return samples
-
-    def sample_sequence(self, idx):
-        result = {}
-        start, end, sample_start = self.indices[idx]
-        for key, columns in self.fields.items():
-            length = self.field_horizons.get(key, self.sequence_length)
-            # Even a horizon wholly inside left padding needs the first source frame.
-            before = min(sample_start, length - 1)
-            stop = min(end, start + length - before)
-            values = self.episode_store.read(key, slice(start, stop), columns=columns)
-            if len(values) != length:
-                padded = np.empty((length, *values.shape[1:]), dtype=values.dtype)
-                padded[:before] = values[0]
-                padded[before:before + len(values)] = values
-                padded[before + len(values):] = values[-1]
-                values = padded
-            result[key] = values
-        return result

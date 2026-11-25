@@ -24,17 +24,18 @@ class DexJoCoRunner(SimRunner):
     def _make_env(self, *, record_video: bool):
         from dexjoco.policy_env import DexJoCoEnv
 
-        env = DexJoCoEnv(
+        return DexJoCoEnv(
             self.task_name, sensor_modalities=self.sensor_modalities,
             action_format="rotvec",
             record_video=record_video, **self.env_kwargs,
         )
+
+    def _validate_env(self, env):
         processing = env.data_processing
         changes = {
             key: (expected, processing.get(key)) for key, expected in self.data_processing.items()
             if processing.get(key) != expected
         }
         if changes:
-            env.close()
             raise ValueError(f"DexJoCo observation processing mismatch (checkpoint, environment): {changes}")
-        return env
+        super()._validate_env(env)

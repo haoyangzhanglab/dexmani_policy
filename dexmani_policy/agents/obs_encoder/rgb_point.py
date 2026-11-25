@@ -1,4 +1,4 @@
-"""RGB–point observation tokens with late joint-state conditioning."""
+"""RGB-aligned scene encoding and late joint-state conditioning."""
 
 from __future__ import annotations
 
@@ -14,7 +14,67 @@ from .proprio import StateEncoder
 from .rgb.build import build_rgb_encoder
 
 
-class RGBPointObservationEncoder(nn.Module):
+class RGBPointSceneEncoder(nn.Module):
+    def __init__(
+        self,
+        *, pc_dim: int, num_points: int, patch_config: dict, spatial_config: dict,
+        fps_random_config: dict | None, rgb_backbone_config: dict | None,
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"],
+        rgb_semantic_sampling: Literal["center", "group_mean"],
+    ) -> None:
+        super().__init__()
+        if rgb_backbone_name not in ("dino", "dinov3", "siglip"):
+            raise ValueError("rgb_backbone_name must be 'dino', 'dinov3' or 'siglip'")
+        if rgb_semantic_sampling not in ("center", "group_mean"):
+            raise ValueError("rgb_semantic_sampling must be 'center' or 'group_mean'")
+        self.rgb_semantic_sampling = rgb_semantic_sampling
+        self.num_points = num_points
+        self.rgb_backbone_name = rgb_backbone_name
+
+        fps_config = {
+            "use_random": True, "use_random_start": True,
+            "use_shuffle_output": False,
+            **(fps_random_config or {}),
+        }
+        self.patch_encoder = LocalPatchEncoder(
+            input_channels=pc_dim, fps_random_config=fps_config, **patch_config,
+        )
+        self.rgb_encoder, self.image_processor = build_rgb_encoder(
+            rgb_backbone_name, rgb_backbone_config,
+        )
+        self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
+        self.spatial_encoder = SpatialContextEncoder(
+            channels=self.rgb_fusion.out_dim, **spatial_config,
+        )
+
+    @property
+    def effective_config(self) -> dict:
+        return {
+            "fps_random_config": self.patch_encoder.fps_random_config,
+            "rgb_backbone_name": self.rgb_backbone_name,
+            "rgb_semantic_sampling": self.rgb_semantic_sampling,
+            "rgb_backbone_config": {
+                **self.rgb_encoder.effective_config, **self.image_processor.config,
+            },
+        }
+
+    def encode_scene(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        points = preprocess_point_cloud(
+            obs["point_cloud"], self.num_points,
+            self.patch_encoder.fps_random_config, training=self.training,
+        )
+        patches = self.patch_encoder(points)
+
+        image_grid, projection = project_rgb_patches(
+            obs, points, patches, image_processor=self.image_processor,
+            rgb_encoder=self.rgb_encoder, sampling=self.rgb_semantic_sampling,
+        )
+        tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
+        centers = patches["xyz"]
+        return self.spatial_encoder(tokens, centers), centers, projection.valid
+
+
+class RGBPointObservationEncoder(RGBPointSceneEncoder):
     def __init__(
         self,
         pc_dim: int = 3,
@@ -27,40 +87,20 @@ class RGBPointObservationEncoder(nn.Module):
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
     ) -> None:
-        super().__init__()
-        if rgb_backbone_name not in ("dino", "dinov3", "siglip"):
-            raise ValueError("rgb_backbone_name must be 'dino', 'dinov3' or 'siglip'")
-        if rgb_semantic_sampling not in ("center", "group_mean"):
-            raise ValueError("rgb_semantic_sampling must be 'center' or 'group_mean'")
-        self.rgb_semantic_sampling = rgb_semantic_sampling
-        self.num_points = num_points
-        self.n_obs_steps = n_obs_steps
-        self.rgb_backbone_name = rgb_backbone_name
-
-        fps_config = {
-            "use_random": True, "use_random_start": True,
-            "use_shuffle_output": False,
-            **(fps_random_config or {}),
-        }
         patch_config = dict(pc_encoder_config or {})
         spatial_config = {
             key: patch_config.pop(key)
             for key in ("depth", "num_heads", "mlp_ratio", "rope_scale", "rope_base")
             if key in patch_config
         }
-        self.patch_encoder = LocalPatchEncoder(
-            input_channels=pc_dim, fps_random_config=fps_config, **patch_config,
+        super().__init__(
+            pc_dim=pc_dim, num_points=num_points, patch_config=patch_config, spatial_config=spatial_config,
+            fps_random_config=fps_random_config, rgb_backbone_name=rgb_backbone_name,
+            rgb_backbone_config=rgb_backbone_config, rgb_semantic_sampling=rgb_semantic_sampling,
         )
-        self.rgb_encoder, self.image_processor = build_rgb_encoder(
-            rgb_backbone_name, rgb_backbone_config,
-        )
-        self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
-        self.spatial_encoder = SpatialContextEncoder(
-            channels=self.rgb_fusion.out_dim, **spatial_config,
-        )
+        self.n_obs_steps = n_obs_steps
         self.out_dim = self.spatial_encoder.out_dim
         self.joint_encoder = StateEncoder(state_dim, self.out_dim)
-
         self.token_type_embedding = nn.Parameter(torch.empty(1, 2, self.out_dim))
         nn.init.normal_(self.token_type_embedding, std=0.02)
         self.token_norm = nn.LayerNorm(self.out_dim)
@@ -68,30 +108,12 @@ class RGBPointObservationEncoder(nn.Module):
     @property
     def effective_config(self) -> dict:
         return {
-            "pc_encoder_config": {
-                **self.spatial_encoder.effective_config, **self.patch_encoder.effective_config,
-            },
-            "fps_random_config": self.patch_encoder.fps_random_config,
-            "rgb_backbone_name": self.rgb_backbone_name,
-            "rgb_semantic_sampling": self.rgb_semantic_sampling,
-            "rgb_backbone_config": {
-                **self.rgb_encoder.effective_config, **self.image_processor.config,
-            },
+            **super().effective_config,
+            "pc_encoder_config": {**self.spatial_encoder.effective_config, **self.patch_encoder.effective_config},
         }
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        points = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points,
-            self.patch_encoder.fps_random_config, training=self.training,
-        )
-        patches = self.patch_encoder(points)
-
-        image_grid, projection = project_rgb_patches(
-            obs, points, patches, image_processor=self.image_processor,
-            rgb_encoder=self.rgb_encoder, sampling=self.rgb_semantic_sampling,
-        )
-        tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
-        spatial = self.spatial_encoder(tokens, patches["xyz"])
+        spatial, _, _ = self.encode_scene(obs)
         joint = self.joint_encoder(obs["joint_state"]).unsqueeze(1)
         spatial = spatial + self.token_type_embedding[:, :1].to(spatial.dtype)
         joint = joint + self.token_type_embedding[:, 1:].to(joint.dtype)

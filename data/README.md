@@ -1,28 +1,20 @@
 # 预训练权重
 
-`data/pretrained/` 存放外部预训练权重，为策略提供视觉表征或手部先验。示教数据单独存放于 `robot_data/`，见[仿真数据集格式](../docs/仿真数据集格式.md)。
+`data/pretrained/` 存放外部视觉模型和手部先验，`robot_data/` 存放示教数据。 [示教数据格式](../docs/仿真数据集格式.md)
 
 ## 外部模型
 
-| 模型与来源 | 用途 |
-| --- | --- |
-| [Uni3D（R3D 权重）](https://huggingface.co/eddie-cui/r3d-weights) | 初始化 R3D 的点云编码器 |
-| [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | `HandObjectInteractionEncoder`、SAT、DQ-RISE、DexLatent 的默认 RGB 主干，也是 DP 的可选主干 |
-| [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) | RGB 策略的可选视觉主干 |
-| [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) | RGB 策略的可选视觉主干 |
-| [DexLatent](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/Checkpoints/20260311_225425/checkpoint_epoch_1000.pt) | 提供冻结的 XHand 手部编码器与解码器 |
+在仓库根目录运行下载脚本。例如，InteractionFlow 默认使用的权重可用 `bash scripts/utils/download_pretrained.sh dinov2` 下载到 `data/pretrained/dinov2-small/`。
 
-视觉主干提供观测表征，手部先验负责动作表示；DexLatent 策略同时使用两者。
+| 模型与来源 | 下载项 | 用途 |
+| --- | --- | --- |
+| [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | `dinov2`（也可用 `sat`、`dqrise`） | InteractionFlow、SAT、DQ-RISE 和 DexLatent 的默认 RGB 主干 |
+| [Uni3D](https://huggingface.co/eddie-cui/r3d-weights) | `r3d` | R3D 的点云编码器 |
+| [DexLatent](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/Checkpoints/20260311_225425/checkpoint_epoch_1000.pt) | `dexlatent` | 冻结的 XHand 手部编码器与解码器，同时下载 DINOv2-small |
+| [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) | `dinov3` | 可选 RGB 主干 |
+| [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) | `siglip` | 可选 RGB 主干 |
 
-在仓库根目录执行 `bash scripts/utils/download_pretrained.sh <下载项>`。`sat`、`dqrise` 和 `dinov2` 下载 DINOv2-small，`dexlatent` 同时下载 DINOv2-small 和手部先验，`r3d` 下载 Uni3D，`all` 下载以上默认权重。可选的 DINOv3 和 SigLIP 分别通过 `dinov3` 和 `siglip` 下载。默认 DP 无需下载权重。
-
-DP 默认使用随机初始化的 ResNet18＋GroupNorm（`initialization.rgb=null`、`tune_mode=full`），联合训练。图像预处理为 84×84，裁剪与编码器 `image_size` 均为 76×76，避免 ImageProcessor 再放大到 224。
-
-可选 DINOv2 完整配置保留在 `dp.yaml` 末尾注释中。切换时整体替换 `rgb_backbone_config`，避免 ResNet 的 `model_name/norm_mode` 被传给 ViT，并同步替换 `initialization.rgb` 和图像处理尺寸。
-
-ResNet 可通过 `initialization.rgb=DEFAULT` 使用 torchvision 预训练权重，支持 `freeze` 和 `full`。`pretrained + freeze + group_norm` 可用于消融。BN→GN 保留卷积权重与 γ、β，GroupNorm 使用当前样本的分组统计，因此与使用 BN 运行统计的表征存在差异。恢复和部署使用完整 checkpoint。
-
-R3D 发布配方采用 `normalization.point_cloud=limits`，与 Uni3D 输入前的固定区间裁剪配套。该约束也适用于从 checkpoint 恢复。
+`all` 下载默认配方使用的 DINOv2-small、Uni3D 和 DexLatent 手部先验。切换 RGB 主干时，在配方中同时指定 `agent.rgb_backbone_name` 和对应的 `initialization.rgb`。DP 默认从头训练 ResNet18，配方中附有 DINOv2 的完整示例。 [DP 配方](../dexmani_policy/configs/dp.yaml)
 
 ## 上游源码与资产条款
 
@@ -39,11 +31,7 @@ R3D 发布配方采用 `normalization.point_cloud=limits`，与 Uni3D 输入前�
 
 ## 项目内预训练产物
 
-以下产物由本项目训练产生，不属于外部模型权重：
+- AFRO 和 CordViP 从示教训练 `encoder.pt`，将观测表征迁移到下游策略。 [观测预训练](../docs/观测预训练.md)
+- DQ-RISE 从手部关节目标训练 `codebook.npz`，用于将手姿索引还原为关节目标。 [手部动作表示](../docs/手部动作表示.md)
 
-| 产物 | 下游作用 |
-| --- | --- |
-| AFRO / CordViP 观测编码器 | 将场景动力学或接触与协调表征迁移到策略，见[观测预训练](../docs/观测预训练.md) |
-| DQ-RISE 手姿码本 | 将生成的手姿索引映射为关节目标，见[手部动作表示](../docs/手部动作表示.md) |
-
-整体关系见[项目架构](../docs/项目架构.md)，服务器上的权重同步见[SSH 服务器训练部署](../docs/SSH服务器训练部署.md)。
+在远端使用这些权重时，按 SSH 指南同步所需文件。 [SSH 服务器训练部署](../docs/SSH服务器训练部署.md)

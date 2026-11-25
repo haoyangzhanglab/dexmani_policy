@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.io_util import atomic_path, cleanup_on_exit
 
 
 class ExperimentLogger:
@@ -17,9 +17,8 @@ class ExperimentLogger:
         self.output_dir = Path(workspace.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         with ExitStack() as resources:
-            self.metrics_file = resources.enter_context(
-                (self.output_dir / "metrics.jsonl").open("a", buffering=1, encoding="utf-8")
-            )
+            self.metrics_file = (self.output_dir / "metrics.jsonl").open("a", buffering=1, encoding="utf-8")
+            resources.enter_context(cleanup_on_exit(self.metrics_file.close))
             self.wandb_run = None
             wandb_cfg = workspace.get("wandb_cfg")
             if workspace.get("wandb_enabled", True) and wandb_cfg is not None:
@@ -30,7 +29,7 @@ class ExperimentLogger:
                 self.wandb_run = wandb.init(
                     dir=str(self.output_dir), id=uuid.uuid4().hex, resume="never", **wandb_cfg
                 )
-                resources.callback(self.wandb_run.finish)
+                resources.enter_context(cleanup_on_exit(self.wandb_run.finish))
             if not resuming:
                 with atomic_path(self.output_dir / "config.yaml") as temporary:
                     OmegaConf.save(cfg, temporary, resolve=True)

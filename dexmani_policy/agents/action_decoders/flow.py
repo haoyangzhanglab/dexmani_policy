@@ -41,6 +41,11 @@ def _sample_flow(
         if not decoder.training and num_steps > 1 else None
     )
     timesteps = euler_time_grid(num_steps, sample)
+    prepare_modulations = getattr(decoder.model, "sampling_modulations", None)
+    modulations = (
+        prepare_modulations(timesteps, context_kv, decoder.num_inference_steps)
+        if context_kv is not None and prepare_modulations is not None else None
+    )
     target_times = None
     if target_t_sample_mode is not None:
         target_times = (
@@ -50,6 +55,8 @@ def _sample_flow(
 
     model_kwargs = {}
     for index, timestep in enumerate(timesteps):
+        if modulations is not None:
+            model_kwargs["modulations"] = next(modulations)
         if target_times is not None:
             model_kwargs["target_t"] = target_times[index].expand(action_shape[0])
         velocity = decoder.model(

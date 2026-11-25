@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.io_util import atomic_path, cleanup_on_exit
 from dexmani_policy.common.pytorch_util import (
     dict_apply,
     get_rng_state,
@@ -217,9 +217,6 @@ def train(method, model_class, argv=None):
     del checkpoint
     updates_per_epoch = (batches_per_epoch + accumulation - 1) // accumulation
     stop_step = total if max_updates is None else min(total, step + max_updates)
-    logger = ExperimentLogger(cfg, resuming=resuming)
-    print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
-          f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
 
     def forward(batch):
         count = next(iter(batch["obs"].values())).shape[0]
@@ -228,7 +225,10 @@ def train(method, model_class, argv=None):
         return loss, metrics, count
 
     iterator = None
-    try:
+    logger = ExperimentLogger(cfg, resuming=resuming)
+    with cleanup_on_exit(logger.close), cleanup_on_exit(lambda: close_data_loader(loader, iterator)):
+        print(f"[{type(model).__name__}] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
+              f"batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}")
         with training_signals() as stop:
             initial_step = step
             while step < stop_step:
@@ -285,11 +285,6 @@ def train(method, model_class, argv=None):
             export_encoder(saved, logger.output_dir / "encoder.pt")
             print(f"[{type(model).__name__}] Saved encoder.pt and checkpoints/latest.pt "
                   f"at epoch={epoch}, step={step}/{total}")
-    finally:
-        try:
-            close_data_loader(loader, iterator)
-        finally:
-            logger.close()
 
 
 def main():

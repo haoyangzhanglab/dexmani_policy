@@ -65,6 +65,8 @@ class EpisodeStore:
 
     def read_rows_by_chunk(self, key, rows, *, columns=None):
         # A single Zarr selection would load every requested compressed chunk before decoding.
+        shape = rows.shape
+        rows = rows.ravel()
         step = self[key].chunks[0]
         order = rows.argsort()
         chunks = rows[order] // step
@@ -77,7 +79,7 @@ class EpisodeStore:
             if output is None:
                 output = np.empty((len(rows), *block.shape[1:]), dtype=block.dtype)
             output[positions] = block[selected - start]
-        return output
+        return output.reshape(shape + output.shape[1:])
 
     def iter_chunks(self, key, *, episode_mask, columns=None):
         step = self[key].chunks[0]

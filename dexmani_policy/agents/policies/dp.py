@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import nn
@@ -10,6 +10,10 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
 from dexmani_policy.agents.policies.base import Policy
+
+if TYPE_CHECKING:
+    from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
+    from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
 
 class DPEncoder(nn.Module):
@@ -23,6 +27,7 @@ class DPEncoder(nn.Module):
         rgb_backbone_config: dict | None = None,
     ) -> None:
         super().__init__()
+        self.rgb_encoder: ResNetEncoder | ViTEncoder
         self.rgb_encoder, self.image_processor = build_rgb_encoder(
             rgb_backbone_name, config=rgb_backbone_config
         )

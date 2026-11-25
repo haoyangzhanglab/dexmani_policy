@@ -15,9 +15,12 @@ FIXED_OBSERVATION_SHAPES: dict[str, tuple[int, ...]] = {
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
 
 
-def validate_ddim_steps(steps: int, name: str) -> None:
+def validate_ddim_steps(steps: int, name: str, *, num_training_steps: int) -> int:
     if positive_int(steps, name) == 1:
         raise ValueError(f"{name} must be at least 2 for leading DDIM; 1 NFE starts at t=0")
+    if steps > num_training_steps:
+        raise ValueError(f"{name} ({steps}) exceeds DDIM num_training_steps ({num_training_steps})")
+    return steps
 
 
 def validate_observation_shape(name: str, shape: tuple[int, ...], *, width: int | None = None) -> None:

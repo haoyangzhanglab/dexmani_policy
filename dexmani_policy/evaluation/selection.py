@@ -1,19 +1,14 @@
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
-from hydra.utils import get_class
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.inference import select_inference_weights
 from dexmani_policy.common.io_util import write_json
-from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy, validate_runner_options
+from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy, resolve_rollout_options
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
-
-
-if TYPE_CHECKING:
-    from dexmani_policy.env_runner.sim_runner import SimRunner
 
 
 def candidate_score(candidate):
@@ -29,39 +24,39 @@ def run_pipeline(checkpoints, *, weights=None, inference_steps=None, action_step
     if len(checkpoints) < 2 or len(set(checkpoints)) != len(checkpoints):
         raise ValueError("Selection requires at least two distinct checkpoints. Use evaluate for a single checkpoint.")
     root = checkpoints[0].parent.parent
-    loaded = load_checkpoint(checkpoints[0])
-    cfg = loaded.effective_config
-    reference_runner = cfg["env_runner"]["_target_"]
-    reference_task_name = cfg["env_runner"]["task_name"]
-    reference_env_kwargs = cfg["env_runner"].get("env_kwargs") or {}
-    reference_control_dt_s = cfg["control_dt_s"]
-    del loaded
-    runner_class: type[SimRunner] = get_class(reference_runner)
-    validate_runner_options(
-        runner_class, cfg["action_key"], skip_intermediate_observations=skip_intermediate_observations, video=video,
-    )
-    for checkpoint in checkpoints[1:]:
+
+    def inspect_candidate(checkpoint):
         loaded = load_checkpoint(checkpoint)
         cfg = loaded.effective_config
-        if cfg["env_runner"]["_target_"] != reference_runner:
-            raise ValueError("Candidates must use the same environment runner")
-        validate_runner_options(
-            runner_class, cfg["action_key"],
-            skip_intermediate_observations=skip_intermediate_observations, video=video,
-        )
-        if cfg["env_runner"]["task_name"] != reference_task_name:
-            raise ValueError("Candidates must use the same task_name")
-        env_kwargs = cfg["env_runner"].get("env_kwargs") or {}
-        if env_kwargs != reference_env_kwargs:
-            raise ValueError("Candidates must use the same env_kwargs")
+        try:
+            select_inference_weights(loaded, weights=weights, inference_steps=inference_steps)
+            runner_class, _ = resolve_rollout_options(
+                cfg, action_steps=action_steps,
+                skip_intermediate_observations=skip_intermediate_observations, video=video,
+            )
+        except ValueError as error:
+            raise ValueError(f"{checkpoint}: {error}") from error
+        return cfg, runner_class
+
+    reference, runner_class = inspect_candidate(checkpoints[0])
+    reference_env = reference["env_runner"]
+    reference_control_dt_s = reference["control_dt_s"]
+    for checkpoint in checkpoints[1:]:
+        cfg, _ = inspect_candidate(checkpoint)
+        env = cfg["env_runner"]
+        if env["_target_"] != reference_env["_target_"]:
+            raise ValueError(f"{checkpoint}: Candidates must use the same environment runner")
+        if env["task_name"] != reference_env["task_name"]:
+            raise ValueError(f"{checkpoint}: Candidates must use the same task_name")
+        if (env.get("env_kwargs") or {}) != (reference_env.get("env_kwargs") or {}):
+            raise ValueError(f"{checkpoint}: Candidates must use the same env_kwargs")
         control_dt_s = cfg["control_dt_s"]
         if not np.isclose(control_dt_s, reference_control_dt_s, rtol=1e-6, atol=1e-9):
             raise ValueError(
                 f"Candidates must use the same control_dt_s: "
                 f"reference={reference_control_dt_s}, candidate={control_dt_s} ({checkpoint})"
             )
-        del loaded
-    seed_pool = runner_class.load_seed_pool(reference_task_name)
+    seed_pool = runner_class.load_seed_pool(reference_env["task_name"])
     test, selection = split_evaluation_seeds(
         seed_pool, seed, test_episodes, positive_int(selection_episodes, "selection_episodes"),
     )

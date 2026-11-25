@@ -44,6 +44,16 @@ class CrossAttention(nn.Module):
         return self.proj(x.transpose(1, 2).reshape(batch, length, channels))
 
 
+class AdaLNModulation(nn.Module):
+    def __init__(self, hidden_dim: int, n_layers: int):
+        super().__init__()
+        self.projection = nn.Linear(hidden_dim, n_layers * 9 * hidden_dim)
+        self.layer_shape = (n_layers, 9, hidden_dim)
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        return self.projection(F.silu(condition)).unflatten(-1, self.layer_shape)
+
+
 class DiTXBlock(nn.Module):
     def __init__(
         self,
@@ -82,11 +92,7 @@ class DiTXBlock(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        self.adaln_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True)
-        )
-
-    def forward(self, x, time_c, context_c, *, context_kv=None):
+    def forward(self, x, modulation, context_c, *, context_kv=None):
         (
             shift_msa,
             scale_msa,
@@ -97,21 +103,21 @@ class DiTXBlock(nn.Module):
             shift_mlp,
             scale_mlp,
             gate_mlp,
-        ) = self.adaln_modulation(time_c).chunk(9, dim=-1)
+        ) = modulation.unsqueeze(1).unbind(dim=2)
 
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
         self_attn_output = self.self_attn(
             normed_x, normed_x, normed_x, need_weights=False,
         )[0]
-        x = x + gate_msa.unsqueeze(1) * self_attn_output
+        x = x + gate_msa * self_attn_output
 
         normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
         cross_attn_output = self.cross_attn(normed_x_cross, context_c, context_kv=context_kv)
-        x = x + gate_cross.unsqueeze(1) * cross_attn_output
+        x = x + gate_cross * cross_attn_output
 
         normed_x_mlp = modulate(self.norm3(x), shift_mlp, scale_mlp)
         mlp_output = self.mlp(normed_x_mlp)
-        x = x + gate_mlp.unsqueeze(1) * mlp_output
+        x = x + gate_mlp * mlp_output
 
         return x
 
@@ -160,6 +166,7 @@ class DiTX(nn.Module):
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.timestep_embedder = TimestepMLP(timestep_embed_dim, hidden_dim)
+        self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers)
         self.ditx_blocks = nn.ModuleList(
             DiTXBlock(
                 hidden_size=hidden_dim,
@@ -184,8 +191,7 @@ class DiTX(nn.Module):
             nn.init.xavier_uniform_(block.self_attn.in_proj_weight)
             if block.self_attn.in_proj_bias is not None:
                 nn.init.zeros_(block.self_attn.in_proj_bias)
-            nn.init.zeros_(block.adaln_modulation[-1].weight)
-            nn.init.zeros_(block.adaln_modulation[-1].bias)
+        nn.init.zeros_(self.adaln_modulation.projection.weight)
 
         if self.action_io is None:
             nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
@@ -202,34 +208,76 @@ class DiTX(nn.Module):
         tokens = self.context_embedder(context)
         return add_temporal_embedding(tokens, self.context_frame_pos_embed.to(tokens.dtype))
 
+    def _encode_condition(self, context):
+        return self.embed_context(context), None
+
     def prepare_context_kv(self, context):
         if self.training:
             return None
-        context_c = self.embed_context(context)
-        return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
+        scene, state = self._encode_condition(context)
+        return state, tuple(block.cross_attn.prepare_kv(scene) for block in self.ditx_blocks)
 
     def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
     ) -> torch.Tensor:
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
-        context_c = self.embed_context(context) if context_kv is None else None
-        timestep = batch_timesteps(timestep, x, dtype=torch.float32)
-        time_c = self.timestep_embedder(timestep)
+        if context_kv is None:
+            scene, state = self._encode_condition(context)
+            layer_kv = None
+        else:
+            state, layer_kv = context_kv
+            scene = None
+        if modulations is None:
+            time = self.timestep_embedder(batch_timesteps(timestep, x, dtype=torch.float32))
+            modulations = self.adaln_modulation(time if state is None else time + state)
 
         if self.action_io is None:
             x = self.input_embedder(x)
             x = x + self.input_pos_embed[:, :x.shape[1]].to(dtype=x.dtype)
         else:
             x = self.action_io.encode(x)
-        for index, block in enumerate(self.ditx_blocks):
+        for index, (block, modulation) in enumerate(zip(self.ditx_blocks, modulations.unbind(1))):
             x = block(
-                x, time_c, context_c,
-                context_kv=None if context_kv is None else context_kv[index],
+                x, modulation, scene,
+                context_kv=None if layer_kv is None else layer_kv[index],
             )
         if self.action_io is None:
             return self.final_layer(x)
         return self.action_io.decode_velocity(x)
+
+
+class InteractionDiTX(DiTX):
+    """Read spatial patches with action queries modulated by joint and hand-object state."""
+
+    def __init__(
+        self, *, n_obs_steps: int, obs_token_dim: int, num_scene_tokens: int,
+        hidden_dim: int = 768, **kwargs,
+    ) -> None:
+        super().__init__(
+            n_obs_steps=n_obs_steps, obs_token_dim=obs_token_dim, hidden_dim=hidden_dim, **kwargs,
+        )
+        self.n_obs_steps = n_obs_steps
+        num_state_tokens = 1 + 6  # Joint state, wrist, then five fingers.
+        self.frame_token_counts = (num_scene_tokens, num_state_tokens)
+        self.obs_mlp = nn.Sequential(
+            nn.Linear(n_obs_steps * num_state_tokens * obs_token_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.obs_mlp.apply(initialize_linear)
+
+    def _encode_condition(self, context):
+        frames = context.unflatten(1, (self.n_obs_steps, -1))
+        scene, hand_state = frames.split(self.frame_token_counts, dim=2)
+        return self.embed_context(scene.flatten(1, 2)), self.obs_mlp(hand_state.flatten(1))
+
+    def sampling_modulations(self, timesteps, context_kv, chunk_size):
+        state, _ = context_kv
+        # Bound the per-step modulation tensor when the caller requests a longer Euler grid.
+        for chunk in timesteps.split(chunk_size):
+            time = self.timestep_embedder(chunk).unsqueeze(1)
+            yield from self.adaln_modulation(time + state).unbind(0)
 
 
 class ConsistencyDiTX(nn.Module):
@@ -260,6 +308,7 @@ class ConsistencyDiTX(nn.Module):
         self.target_t_embedder = TimestepMLP(pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
 
         self.timestep_and_target_t_fusion = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers)
 
         self.ditx_blocks = nn.ModuleList(
             [
@@ -289,9 +338,7 @@ class ConsistencyDiTX(nn.Module):
 
         self.apply(initialize_linear)
 
-        for block in self.ditx_blocks:
-            nn.init.zeros_(block.adaln_modulation[-1].weight)
-            nn.init.zeros_(block.adaln_modulation[-1].bias)
+        nn.init.zeros_(self.adaln_modulation.projection.weight)
 
         nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
@@ -342,10 +389,11 @@ class ConsistencyDiTX(nn.Module):
         )
 
         context_c = self.embed_context(context) if context_kv is None else None
-        for index, block in enumerate(self.ditx_blocks):
+        modulations = self.adaln_modulation(time_c)
+        for index, (block, modulation) in enumerate(zip(self.ditx_blocks, modulations.unbind(1))):
             x = block(
                 x,
-                time_c,
+                modulation,
                 context_c,
                 context_kv=None if context_kv is None else context_kv[index],
             )

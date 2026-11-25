@@ -17,7 +17,7 @@ import zarr
 from omegaconf import OmegaConf
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import Dataset, default_collate
+from torch.utils.data import DataLoader, Dataset, default_collate
 
 from dexmani_policy.agents.action_decoders.backbones import ditx, sat_action_io
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
@@ -41,7 +41,8 @@ from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.agents.policies.base import Policy
 from dexmani_policy.common import config as common_config, io_util
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
-from dexmani_policy.common.inference import predict_actions, prepare_observations, resolve_inference_settings, restore_policy
+from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+from dexmani_policy.common.inference import predict_actions, prepare_observations, restore_policy, select_inference_weights
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state, set_seed
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
@@ -276,16 +277,25 @@ def test_ddim_config_and_checkpoint_overrides(small_dp3_checkpoint):
             hydra.utils.instantiate(cfg.agent)
         assert isinstance(error.value.__cause__, ValueError)
         assert "leading DDIM" in str(error.value.__cause__)
-    cfg = load_config("dp3", ["eval.inference_steps=1"])
-    with pytest.raises(ValueError, match="leading DDIM"):
-        resolve_inference_settings(cfg)
+    checkpoint = load_checkpoint(small_dp3_checkpoint)
+    with pytest.raises(ValueError, match="num_training_steps"):
+        select_inference_weights(checkpoint, inference_steps=checkpoint.effective_config["agent"]["num_training_steps"] + 1)
     with pytest.raises(ValueError, match="leading DDIM"):
         load_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
     with pytest.raises(ValueError, match="leading DDIM"):
         rollout.evaluate_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
     for name in ("ode", "maniflow"):
-        cfg = load_config(name, ["eval.inference_steps=1"])
-        assert resolve_inference_settings(cfg)[1] == 1
+        checkpoint.effective_config = load_config(name, ["eval.inference_steps=1"])
+        assert select_inference_weights(checkpoint)[1] == 1
+
+
+def test_ddim_training_grid_bounds_direct_sampling():
+    with pytest.raises(ValueError, match="num_training_steps"):
+        ForceDiffusion(nn.Identity(), num_training_steps=4, num_inference_steps=5)
+    decoder = Diffusion(nn.Identity(), num_training_steps=4, num_inference_steps=4)
+    assert decoder.effective_config == {"num_training_steps": 4}
+    with pytest.raises(ValueError, match="num_training_steps"):
+        decoder.predict_action(torch.zeros(1, 1, 2), (1, 4, 2), inference_steps=5)
 
 
 def test_ddim_rtc_matches_two_step_reference():
@@ -686,6 +696,72 @@ def test_context_cache_outputs_gradients_and_new_observation(monkeypatch, backbo
         torch.testing.assert_close(sample(changed), second)
 
 
+def test_adaln_modulation_matches_independent_layers():
+    torch.manual_seed(4)
+    hidden, layers = 8, 3
+    model = ditx.AdaLNModulation(hidden, layers)
+    condition = torch.randn(2, hidden, requires_grad=True)
+    weight, bias = model.projection.weight, model.projection.bias
+    expected = torch.stack([
+        F.linear(F.silu(condition), w, b).unflatten(-1, (9, hidden))
+        for w, b in zip(weight.chunk(layers), bias.chunk(layers))
+    ], dim=1)
+    actual = model(condition)
+    torch.testing.assert_close(actual, expected)
+    probe = torch.randn_like(actual)
+    inputs = (condition, weight, bias)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual, inputs, probe), torch.autograd.grad(expected, inputs, probe),
+    )
+
+
+@pytest.mark.parametrize("batch,steps", [(1, 1), (1, 5), (2, 7)])
+def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
+    torch.manual_seed(5)
+    model = ditx.InteractionDiTX(
+        horizon=4, action_dim=19, n_obs_steps=2, num_scene_tokens=3, obs_token_dim=8,
+        hidden_dim=16, n_head=2, n_layers=2, p_drop_attn=0,
+    )
+    # A zero velocity head or closed adaLN gates would make cache equality vacuous.
+    with torch.no_grad():
+        assert model.adaln_modulation.projection.weight.count_nonzero() == 0
+        assert model.adaln_modulation.projection.bias.count_nonzero() == 0
+        model.final_layer.ffn_final.fc2.weight.normal_(std=0.1)
+        model.adaln_modulation.projection.weight.normal_(std=0.1)
+    frames = torch.randn(batch, 2, 10, 8)
+    packed = frames.flatten(1, 2)
+    assert model.prepare_context_kv(packed) is None
+    flow = RectifiedFlow(model, num_inference_steps=5).eval()
+
+    def sample(context):
+        return flow.predict_action(
+            context, (batch, 4, 19), inference_steps=steps, generator=torch.Generator().manual_seed(9),
+        )
+
+    scene_input, state_input, layer_kv, modulation = (Mock(return_value=None) for _ in range(4))
+    with (
+        model.context_embedder.register_forward_pre_hook(scene_input),
+        model.obs_mlp.register_forward_pre_hook(state_input),
+        model.ditx_blocks[0].cross_attn.kv.register_forward_pre_hook(layer_kv),
+        model.adaln_modulation.register_forward_pre_hook(modulation),
+    ):
+        first = sample(packed)
+    for capture in (scene_input, state_input, layer_kv):
+        assert capture.call_count == 1
+    assert modulation.call_count == math.ceil(steps / flow.num_inference_steps)
+    torch.testing.assert_close(scene_input.call_args.args[1][0], frames[:, :, :3].flatten(1, 2))
+    torch.testing.assert_close(state_input.call_args.args[1][0], frames[:, :, 3:].flatten(1))
+
+    changed = frames.clone()
+    changed[:, 1, -1] += 1
+    changed = changed.flatten(1, 2)
+    second = sample(changed)
+    assert not torch.allclose(first, second)
+    monkeypatch.setattr(model, "prepare_context_kv", lambda context: None)
+    torch.testing.assert_close(sample(packed), first)
+    torch.testing.assert_close(sample(changed), second)
+
+
 # Data sampling
 
 
@@ -725,21 +801,14 @@ def test_window_boundaries_and_short_observations(segments, horizon, before, aft
             for offset in range(-before, end - start - horizon + after + 1):
                 expected_rows.append([min(max(start + offset + t, start), end - 1) for t in range(horizon)])
     assert len(sampler) == len(expected_rows)
-    for index, rows in enumerate(expected_rows):
-        sample = sampler.sample_sequence(index)
-        np.testing.assert_array_equal(sampler.sample_source_rows(index), rows)
+    indices = [*reversed(range(len(expected_rows))), 0, len(expected_rows) - 1]
+    for index, sample in zip(indices, sampler.sample_batch(indices), strict=True):
+        rows = expected_rows[index]
         np.testing.assert_array_equal(sample["action"], fields["action"][rows])
         np.testing.assert_array_equal(sample["point_cloud"], fields["point_cloud"][rows[:obs_horizon], :, :3])
         np.testing.assert_array_equal(sample["rgb"], fields["rgb"][rows[:obs_horizon]])
         assert sample["point_cloud"].dtype == np.float32
         assert sample["rgb"].dtype == np.uint8
-        sample["action"][:] = -1
-        np.testing.assert_array_equal(sampler.sample_sequence(index)["action"], fields["action"][rows])
-
-    indices = [*reversed(range(len(expected_rows))), 0, len(expected_rows) - 1]
-    for index, sample in zip(indices, sampler.sample_batch(indices), strict=True):
-        for key, value in sampler.sample_sequence(index).items():
-            np.testing.assert_array_equal(sample[key], value)
         sample["action"][:] = -1
 
 
@@ -773,7 +842,7 @@ def test_real_sources_split_together_and_normalize_train_only(segments):
     np.testing.assert_allclose(normalizer["joint_state"].normalize(states),
                                (states - states.mean(0)) / states.std(0), atol=2e-5)
     for index in range(len(dataset)):
-        rows = dataset.sampler.sample_source_rows(index)
+        rows = dataset.sampler.source_rows(index, np.arange(dataset.horizon))
         episodes = np.searchsorted([1, 3, 8, 12], rows, side="right")
         assert np.all(episodes == episodes[0]) and train[episodes[0]]
 
@@ -867,10 +936,63 @@ def test_ode_tactile_and_afro_temporal_targets(segments, monkeypatch):
 
     monkeypatch.setattr(ode.episode_store, "read", record_read)
     np.testing.assert_array_equal(ode[1]["prev_action"], fields["action"][0])
-    assert action_reads == [slice(0, 3)]
+    assert action_reads == [slice(0, 2), slice(2, 3)]
     single = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
     np.testing.assert_array_equal(single[0]["prev_action"], fields["joint_state"][0])
     np.testing.assert_array_equal(single[1]["prev_action"], fields["action"][0])
+
+
+def assert_loader_matches_items(dataset, monkeypatch):
+    indices = [*reversed(range(len(dataset))), 0, 0]
+    np.random.seed(17)
+    expected = default_collate([dataset[index] for index in indices])
+    sample_batch = Mock(wraps=dataset.sampler.sample_batch)
+    monkeypatch.setattr(dataset.sampler, "sample_batch", sample_batch)
+    np.random.seed(17)
+    actual, = DataLoader(dataset, batch_sampler=[tuple(indices)])
+    sample_batch.assert_called_once_with(indices)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert dataset.__getitems__([]) == []
+    first, second = dataset.__getitems__([0, 0])
+    key = dataset.sensor_modalities[0]
+    original = second["obs"][key].clone()
+    first["obs"][key].fill_(-1)
+    torch.testing.assert_close(second["obs"][key], original, rtol=0, atol=0)
+    return actual
+
+
+@pytest.mark.parametrize("obs_horizon", [1, 2])
+def test_ode_batch_uses_clean_previous_target(segments, monkeypatch, obs_horizon):
+    path, fields = segments
+    dataset = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=obs_horizon, horizon=4,
+                         pad_before=2, pad_after=3, augmentation_cfg={"state": {"noise": {"noise_std": 0.2}}})
+    batch = assert_loader_matches_items(dataset, monkeypatch)
+    np.testing.assert_array_equal(batch["prev_action"][-1], fields["joint_state"][0])
+    assert not torch.equal(batch["prev_action"][-1], batch["obs"]["joint_state"][-1, 0])
+
+
+@pytest.mark.parametrize("key", ["finger_tactile_force", "taxel_tactile_force"])
+def test_adaptac_batch_force_padding(segments, monkeypatch, key):
+    path, fields = segments
+    if key == "taxel_tactile_force":
+        values = np.repeat(fields["finger_tactile_force"][:, :, None, :], 120, axis=2)
+        zarr.open_group(str(path), mode="a").create_dataset(f"data/{key}", data=values)
+    dataset = AdapTacDataset(path, sensor_modalities=[key], horizon=4, obs_horizon=2, pad_before=2, pad_after=3)
+    batch = assert_loader_matches_items(dataset, monkeypatch)
+    assert not batch["future_force"][~batch["future_force_valid"]].any()
+
+
+def test_afro_batched_strided_windows(segments, monkeypatch):
+    path, _ = segments
+    dataset = AFROPretrainDataset(path, frame_stride=2, horizon=4, pad_before=2, pad_after=3)
+    assert_loader_matches_items(dataset, monkeypatch)
+
+
+@pytest.mark.parametrize("contact", [False, True])
+def test_cordvip_batched_contact_labels(contact_data, monkeypatch, contact):
+    dataset = CordViPPretrainDataset(contact_data, obs_horizon=4, contact_loss_weight=int(contact))
+    batch = assert_loader_matches_items(dataset, monkeypatch)
+    assert ("contact_map" in batch) == contact
 
 
 # R3D dataset and loss
@@ -1203,9 +1325,31 @@ def make_hand_scene_observation(point_channels=3):
     }
 
 
+def test_local_geometry_matches_concatenated_patch_projection():
+    torch.manual_seed(3)
+    geometry = point_transformer.LocalGeometryEmbedding(3, 8, 0.1, local_hidden_dim=4)
+    points = torch.randn(2, 7, 3, requires_grad=True)
+    centers = points[:, :3]
+    neighbors = torch.randint(7, (2, 3, 4))
+    grouped = points[torch.arange(2)[:, None, None], neighbors]
+    features = geometry.point_mlp((grouped - centers.unsqueeze(2)) / geometry.geometry_scale)
+    pooled = features.amax(dim=2, keepdim=True)
+    weight = torch.cat((geometry.point_projection.weight, geometry.context_projection.weight), dim=1)
+    joined = torch.cat((features, pooled.expand_as(features)), dim=-1)
+    fused = F.linear(joined, weight, geometry.context_projection.bias)
+    expected = geometry.projection(geometry.context_mlp(fused).amax(dim=2))
+    actual = geometry(points, centers, neighbors)
+    torch.testing.assert_close(actual, expected)
+    probe = torch.randn_like(actual)
+    inputs = (points, *geometry.parameters())
+    torch.testing.assert_close(
+        torch.autograd.grad(actual, inputs, probe), torch.autograd.grad(expected, inputs, probe),
+    )
+
+
 @pytest.mark.parametrize("scene_config,point_channels,samples_per_patch", [
     pytest.param({}, 3, 1, id="center-xyz"),
-    pytest.param({"rgb_patch_sampling": "group_mean", "pc_dim": 6}, 6, 32, id="group-mean-xyzrgb"),
+    pytest.param({"rgb_semantic_sampling": "group_mean", "pc_dim": 6}, 6, 32, id="group-mean-xyzrgb"),
 ])
 def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
     encoder = HandObjectInteractionEncoder(
@@ -1594,6 +1738,84 @@ def save_tiny_hf_rgb(directory, kind):
     return source
 
 
+def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
+    source, directory = tmp_path / "rgb", tmp_path / "interaction"
+    pretrained = save_tiny_hf_rgb(source, "dino")
+    path = make_demo(auxiliary=False)
+    data = zarr.open_group(str(path), mode="r+")["data"]
+    frames = make_hand_scene_observation()
+    frames["rgb"] = frames["rgb"].movedim(1, -1)
+    for name in ("camera_intrinsic", "camera_extrinsic"):
+        frames[name] = frames[name].flatten(1)
+    for name, value in frames.items():
+        data[name] = value.numpy()[np.arange(len(data["action"])) % len(value)]
+    cfg = load_config("interaction_flow", [
+        f"zarr_path='{path}'", "task_name=test", f"workspace.output_dir='{directory}'",
+        "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
+        "dataloader.num_workers=0", "dataloader.batch_size=2", "training.lr_warmup_steps=0",
+        f"initialization.rgb='{source}'", "agent.rgb_backbone_config.image_size=[8,8]",
+        "agent.patch_config.num_patches=4", "agent.patch_config.group_size=4",
+        "agent.n_layers=1", "agent.hidden_dim=32", "agent.n_head=2",
+    ])
+    with closing(build_trainer(cfg)) as fresh:
+        model = fresh.model
+        encoder = model.obs_encoder
+        torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
+        assert not any(p.requires_grad for p in encoder.rgb_encoder.parameters())
+        assert isinstance(model.action_decoder, RectifiedFlow) and model.action_decoder.model.action_io is None
+        fresh.train(max_updates=2)
+        batch = default_collate([fresh.train_loader.dataset[i] for i in (1, 2)])
+        loss, _ = model(batch)
+        interaction = encoder.interaction_encoder
+        gradients = torch.autograd.grad(loss, (
+            encoder.state_encoder.mlp[0].weight, interaction.hand_encoder.finger_mlp[0].weight,
+            interaction.tactile_encoder.force_encoder[0].weight,
+            interaction.patch_encoder.geometry_embedding.projection.weight,
+            model.action_decoder.model.context_embedder.weight, model.action_decoder.model.obs_mlp[0].weight,
+        ))
+        assert all(g.isfinite().all() and g.abs().max() > 0 for g in gradients)
+
+        model.eval()
+        obs = batch["obs"]
+        with torch.no_grad():
+            scene_out, hand_out = Mock(return_value=None), Mock(return_value=None)
+            with (
+                interaction.spatial_encoder.register_forward_hook(scene_out),
+                interaction.geometric_relation.register_forward_hook(hand_out),
+            ):
+                packed = model._encode_obs(obs).unflatten(1, (2, 11))
+            assert scene_out.call_count == hand_out.call_count == 1
+            torch.testing.assert_close(packed[:, :, :4], scene_out.call_args.args[2].unflatten(0, (2, 2)))
+            torch.testing.assert_close(packed[:, :, 5:], hand_out.call_args.args[2].unflatten(0, (2, 2)))
+            joint_tokens = encoder.state_encoder(model.normalizer["joint_state"].normalize(obs["joint_state"]))
+            torch.testing.assert_close(packed[:, :, 4], joint_tokens)
+            for field in ("finger_tactile_force", "fingertip_xyz"):
+                changed = {**obs, field: obs[field] + 0.1}
+                updated = model._encode_obs(changed).unflatten(1, (2, 11))
+                torch.testing.assert_close(updated[:, :, :5], packed[:, :, :5], rtol=0, atol=0)
+                assert not torch.allclose(updated[:, :, 5:], packed[:, :, 5:])
+        with pytest.raises(ValueError, match="fingertip_xyz"):
+            model._encode_obs({**obs, "fingertip_xyz": obs["fingertip_xyz"].flatten(0, 1).unsqueeze(0)})
+
+        physical_obs = {key: data[key][:2] for key in cfg.dataset.sensor_modalities}
+        inputs = prepare_observations(
+            physical_obs, normalization_dims=model.normalization_dims,
+            n_obs_steps=2, rgb_preprocessing=rgb_preprocessing_kwargs(cfg.dataset), device="cpu",
+        )
+        expected = predict_actions(model, inputs, generator=torch.Generator().manual_seed(17))
+
+    source.rename(tmp_path / "detached_rgb_source")
+    latest = directory / "checkpoints/latest.pt"
+    with closing(load_policy(latest, weights="raw", device="cpu", seed=17)) as runtime:
+        result = runtime.predict(physical_obs)
+        assert result.shape == (15, 19)
+        np.testing.assert_allclose(result, expected)
+    with closing(prepare_resume(directory)) as resumed:
+        assert resumed.global_step == 2
+        resumed.train(max_updates=1)
+        assert resumed.global_step == 3
+
+
 @pytest.mark.parametrize("backbone_type", ["ditx", "dit"])
 def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch, backbone_type):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
@@ -1780,6 +2002,7 @@ def test_method_owned_warm_checks():
     ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dqrise", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dexlatent", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
+    ("interaction_flow", {"point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz"}),
     ("adaptac", {"point_cloud"}),
 ])
 def test_observation_identity_constraints(method, fields):
@@ -1796,7 +2019,8 @@ def test_observation_identity_constraints(method, fields):
 
 
 @pytest.mark.parametrize("method", [
-    "dp", "dp3", "r3d", "maniflow", "sat", "dqrise", "dexlatent", "afro", "cordvip", "adaptac", "ode",
+    "dp", "dp3", "r3d", "maniflow", "interaction_flow", "sat", "dqrise", "dexlatent",
+    "afro", "cordvip", "adaptac", "ode",
 ])
 def test_recipe_composition(method):
     cfg = load_config(method)
@@ -2150,6 +2374,18 @@ def test_keyboard_interrupt_cleans_up(tmp_path):
     assert target.read_text() == "old"
 
 
+def test_atomic_publish_preserves_writer_error_on_cleanup_failure(tmp_path, monkeypatch, caplog):
+    target = tmp_path / "result"
+    target.write_text("old")
+    failure = ValueError("writer failed")
+    with pytest.raises(ValueError) as caught, io_util.atomic_path(target):
+        monkeypatch.setattr(Path, "unlink", Mock(side_effect=OSError("unlink failed")))
+        raise failure
+    assert caught.value is failure
+    assert "unlink failed" in caplog.text
+    assert target.read_text() == "old"
+
+
 def test_checkpoint_and_latest_symlink_publish(tmp_path, monkeypatch):
     latest = tmp_path / "latest.pt"
     first = save_checkpoint(tmp_path / "step_1.pt", Checkpoint(1, {}, {}, {}, {}))
@@ -2261,7 +2497,7 @@ def contact_data(make_demo):
 def test_observation_validation_reports_nonfinite_contact_metric(contact_data):
     dataset = CordViPPretrainDataset(contact_data, contact_loss_weight=1, val_episodes=1, obs_horizon=1)
     validation = dataset.get_validation_dataset()
-    row = validation.sampler.sample_source_rows(0)[0]
+    row = validation.sampler.source_rows(0, 0)
     zarr.open_group(str(contact_data), mode="a")["data/contact_map"][row, 0] = np.nan
     model = CordViP(dict.fromkeys(dataset.sensor_modalities, "identity"), n_obs_steps=1)
 
@@ -2527,6 +2763,23 @@ def test_training_failure_closes_trainer():
     assert closed == [True]
 
 
+def test_training_preserves_failure_when_workers_and_logger_fail(tmp_path, small_dp3_config, monkeypatch, caplog):
+    trainer = build_trainer(small_dp3_config(tmp_path / "run"))
+    failure = ValueError("backward failed")
+    monkeypatch.setattr(trainer, "_backward_group", Mock(side_effect=failure))
+    workers = Mock(side_effect=OSError("worker cleanup failed"))
+    monkeypatch.setattr(policy_training, "close_data_loader", workers)
+    logger = Mock(side_effect=OSError("logger cleanup failed"))
+    trainer.logger._resources.callback(logger)
+    with pytest.raises(ValueError) as caught:
+        run_trainer(trainer, max_updates=1)
+    assert caught.value is failure
+    workers.assert_called_once()
+    logger.assert_called_once()
+    assert "worker cleanup failed" in caplog.text and "logger cleanup failed" in caplog.text
+    assert not trainer.model.training
+
+
 # Resume paths
 
 
@@ -2639,7 +2892,8 @@ def test_restoration_inherits_host_settings(small_dp3_checkpoint, tmp_path, api,
 
     def restore():
         if api == "restore":
-            return restore_policy(cfg, state, "cpu")
+            _, _, selected = select_inference_weights(checkpoint, weights=weights, inference_steps=2)
+            return restore_policy(cfg, selected, "cpu")
         return load_policy(source, weights=weights, device="cpu", seed=73, inference_steps=2)
 
     if case in {"missing_ema", "strict_error"}:
@@ -2700,6 +2954,7 @@ class SmallPolicy(torch.nn.Module):
     control_action_dim = 19
     normalization_dims = {"joint_state": 19, "action": 19}
     requires_prev_action = True
+    uses_ddim = False
 
     def __init__(self):
         super().__init__()
@@ -2857,6 +3112,33 @@ def test_control_period_mismatch_closes_env(monkeypatch):
     assert created[0].close_count == 1
 
 
+@pytest.mark.parametrize("runner_class,attribute", [(SimRunner, "dt"), (DexJoCoRunner, "data_processing")])
+def test_unreadable_env_metadata_releases_env(monkeypatch, caplog, runner_class, attribute):
+    kwargs = {"data_processing": {"joint_state": {}}} if runner_class is DexJoCoRunner else {}
+    runner = runner_class("test", 1, ["joint_state"], {}, 0.05, **kwargs)
+    env = SmallEnv()
+    failure = ValueError(f"unreadable {attribute}")
+    monkeypatch.setattr(SmallEnv, attribute, property(Mock(side_effect=failure)), raising=False)
+    env.close = Mock(side_effect=OSError("env cleanup failed"))
+    monkeypatch.setattr(runner, "_make_env", lambda **kwargs: env)
+    with pytest.raises(ValueError) as caught:
+        runner.make_env(record_video=False)
+    assert caught.value is failure
+    env.close.assert_called_once_with()
+    assert "env cleanup failed" in caplog.text
+
+
+def test_early_rollout_close_propagates_close_failure(monkeypatch):
+    env, runner = SmallEnv(), make_runner()
+    env.close = Mock(side_effect=OSError("env cleanup failed"))
+    monkeypatch.setattr(runner, "make_env", lambda **kwargs: env)
+    results = runner.run(SmallPolicy(), seeds=[7, 8], inference_steps=2, action_steps=2)
+    next(results)
+    with pytest.raises(OSError, match="env cleanup failed"):
+        results.close()
+    env.close.assert_called_once_with()
+
+
 @pytest.mark.parametrize("change", [None, "num_points", "size"])
 def test_dexjoco_point_cloud_observation_processing(monkeypatch, change):
     processing = {"proprio": {"layout": "wxyz"}, "rgb": {"size": [224, 224]}, "point_cloud": {"num_points": 4096}}
@@ -2892,6 +3174,7 @@ def checkpoints(tmp_path, monkeypatch, environments):
     monkeypatch.setattr(rollout, "restore_policy", restore)
     monkeypatch.setattr(SimRunner, "load_seed_pool", staticmethod(lambda task: list(range(100, 110))))
     cfg = {
+        "agent": {"_target_": f"{__name__}.SmallPolicy", "n_obs_steps": 3, "n_action_steps": 2, "horizon": 5},
         "eval": {"use_ema": False, "inference_steps": 2},
         "env_runner": {"_target_": "dexmani_policy.env_runner.sim_runner.SimRunner", "task_name": "test", "env_kwargs": {}},
         "control_dt_s": 0.05, "normalization_dims": SmallPolicy.normalization_dims, "dataset": {}, "action_key": "action",
@@ -2947,6 +3230,39 @@ def test_selection_rejects_different_env_kwargs(checkpoints, tmp_path):
     assert not output.exists()
 
 
+@pytest.mark.parametrize("steps,missing_ema,message", [
+    (1, False, "leading DDIM"), (9, False, "num_training_steps"), (2, True, "EMA weights are absent"),
+])
+def test_selection_checks_later_candidate_before_rollout(checkpoints, environments, tmp_path, steps, missing_ema, message):
+    for path, recipe in zip(checkpoints, ("ode", "dp3")):
+        ckpt = load_checkpoint(path)
+        ckpt.effective_config["agent"].update(_target_=load_config(recipe).agent._target_, horizon=4)
+        if recipe == "dp3":
+            ckpt.effective_config["agent"]["num_training_steps"] = 8
+            ckpt.effective_config["eval"]["use_ema"] = missing_ema
+        save_checkpoint(path, ckpt)
+    output = tmp_path / "eval"
+    with pytest.raises(ValueError, match=message) as caught:
+        selection.run_pipeline(checkpoints, inference_steps=steps, selection_episodes=2, test_episodes=2,
+                               device="cpu", output_dir=output)
+    assert str(checkpoints[1]) in str(caught.value)
+    assert not environments and not output.exists()
+
+
+@pytest.mark.parametrize("recipe,steps,message", [("dp3", 4, "future_steps"), ("ode", 1, "n_action_steps")])
+def test_selection_checks_execution_window_before_rollout(checkpoints, environments, tmp_path, recipe, steps, message):
+    for path, name, horizon in zip(checkpoints, ("maniflow", recipe), (8, 4)):
+        checkpoint = load_checkpoint(path)
+        agent = load_config(name, [f"horizon={horizon}", "n_obs_steps=2", "n_action_steps=3"]).agent
+        checkpoint.effective_config["agent"] = OmegaConf.to_container(agent, resolve=True)
+        save_checkpoint(path, checkpoint)
+    output = tmp_path / "eval"
+    with pytest.raises(ValueError, match=message) as caught:
+        selection.run_pipeline(checkpoints, action_steps=steps, output_dir=output)
+    assert str(checkpoints[1]) in str(caught.value)
+    assert not environments and not output.exists()
+
+
 def test_fixed_checkpoint_uses_only_test_seeds(checkpoints, tmp_path):
     output = tmp_path / "fixed_eval"
     with pytest.raises(ValueError, match="at least two distinct checkpoints"):
@@ -2978,7 +3294,7 @@ def test_eval_rejects_unsupported_action_before_loading_environment(checkpoints,
 
 
 @pytest.mark.parametrize("failure", ["video", "write"])
-def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints, environments, tmp_path, monkeypatch, failure):
+def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints, environments, tmp_path, monkeypatch, caplog, failure):
     output = tmp_path / "failed_eval"
     if failure == "video":
         def fail_video(frames, fps, path):
@@ -2990,6 +3306,13 @@ def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints,
         monkeypatch.setattr("dexmani_policy.env_runner.video.save_episode_video", fail_video)
     else:
         write_json = rollout.write_json
+        close = SmallEnv.close
+
+        def fail_close(env):
+            close(env)
+            raise OSError("env cleanup failed")
+
+        monkeypatch.setattr(SmallEnv, "close", fail_close)
 
         def fail_write(path, record):
             if len(record["episodes"]) == 2:
@@ -3000,6 +3323,8 @@ def test_evaluation_failure_closes_env_and_keeps_published_episodes(checkpoints,
     with pytest.raises(OSError, match=f"{failure} failed"):
         rollout.evaluate_policy(checkpoints[0], seeds=[7, 8], device="cpu", video=failure == "video", output_dir=output)
     assert environments[0].close_count == 1
+    if failure == "write":
+        assert "env cleanup failed" in caplog.text
     record = json.loads((output / "result_details.json").read_text())
     assert not record["completed"]
     assert record["statistics"]["n_success"] == 1

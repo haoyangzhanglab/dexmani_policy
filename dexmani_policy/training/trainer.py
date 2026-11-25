@@ -1,8 +1,9 @@
 import copy
 import os
 from functools import partial
+from itertools import islice
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import hydra
 import numpy as np
@@ -11,10 +12,9 @@ from omegaconf import OmegaConf, open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
-from dexmani_policy.agents.policies.adaptac import AdapTac
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy_state_dict, save_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.io_util import atomic_path, cleanup_on_exit
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.env_runner.dexjoco_runner import DexJoCoRunner
 from dexmani_policy.training import initialization
@@ -102,12 +102,10 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
 
 
 def run_trainer(trainer, *, max_updates=None):
-    try:
+    with cleanup_on_exit(trainer.close):
         trainer.compile_models()
         trainer.train(max_updates=max_updates)
         return trainer.global_step
-    finally:
-        trainer.close()
 
 
 def run_training(cfg, *, max_updates=None):
@@ -209,40 +207,23 @@ class PolicyTrainer:
             self.ema_updater.step(self.global_step)
         return grad_norm
 
-    def _forward_microbatch(
-        self,
-        batch: dict[str, Any],
-        *,
-        log_metrics: bool,
-        **loss_options,
-    ):
+    def _forward_microbatch(self, microbatch, *, log_metrics: bool):
+        batch, loss_options = microbatch
         count = batch["action"].shape[0]
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-        loss_kwargs = self.model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(
             device_type=self.device.type,
             dtype=torch.bfloat16,
             enabled=self.use_bfloat16,
         ):
-            loss, metrics = self.model(batch, log_metrics=log_metrics, **loss_kwargs, **loss_options)
+            loss, metrics = self.model(batch, log_metrics=log_metrics, **loss_options)
         return loss, metrics, count
 
     def _backward_group(self, iterator, group_size, *, log_metrics):
-        if group_size > 1 and isinstance(self.model, AdapTac):
-            batches = [next(iterator) for _ in range(group_size)]
-            counts = [(len(batch["action"]), int(batch["future_force_valid"].sum())) for batch in batches]
-            sample_total = sum(count for count, _ in counts)
-            valid_total = sum(valid for _, valid in counts)
-            # The outer sample weight count / sample_total becomes valid / valid_total for the force term.
-            scales = iter(sample_total * valid / (count * valid_total) for count, valid in counts)
-            iterator = iter(batches)
-
-            def forward(batch):
-                return self._forward_microbatch(batch, log_metrics=log_metrics, force_loss_scale=next(scales))
-        else:
-            forward = partial(self._forward_microbatch, log_metrics=log_metrics)
+        batches = self.model.training_microbatches(islice(iterator, group_size), self.ema_model)
         return backward_microbatches(
-            iterator, group_size, self.trainable_parameters, forward, device=self.device, log_metrics=log_metrics,
+            batches, group_size, self.trainable_parameters, partial(self._forward_microbatch, log_metrics=log_metrics),
+            device=self.device, log_metrics=log_metrics,
         )
 
     def save_checkpoint(self):
@@ -309,7 +290,10 @@ class PolicyTrainer:
             miniters=1,
         ) as pbar:
             iterator = None
-            try:
+            with (
+                cleanup_on_exit(self.model.eval),
+                cleanup_on_exit(lambda: close_data_loader(self.train_loader, iterator)),
+            ):
                 while self.global_step < stop_step:
                     num_batches = self.batches_per_epoch
                     iterator = iter(self.train_loader)
@@ -338,7 +322,3 @@ class PolicyTrainer:
                             break
                     if should_stop:
                         break
-
-            finally:
-                close_data_loader(self.train_loader, iterator)
-                self.model.eval()

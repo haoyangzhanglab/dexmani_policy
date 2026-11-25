@@ -22,7 +22,9 @@ class Diffusion(nn.Module):
         clip_sample: bool = True,
     ) -> None:
         super().__init__()
-        validate_ddim_steps(num_inference_steps, "num_inference_steps")
+        self.num_inference_steps = validate_ddim_steps(
+            num_inference_steps, "num_inference_steps", num_training_steps=num_training_steps,
+        )
         if type(clip_sample) is not bool:
             raise TypeError("agent.clip_sample must be a bool")
         if prediction_type not in ("epsilon", "sample", "v_prediction"):
@@ -40,7 +42,10 @@ class Diffusion(nn.Module):
             timestep_spacing="leading",
             prediction_type=prediction_type,
         )
-        self.num_inference_steps = num_inference_steps
+
+    @property
+    def effective_config(self) -> dict:
+        return {"num_training_steps": self.noise_scheduler.config.num_train_timesteps}
 
     def _training_prediction(
         self, cond: torch.Tensor, samples: torch.Tensor,
@@ -113,8 +118,9 @@ class Diffusion(nn.Module):
     ) -> torch.Tensor:
         num_steps = self.num_inference_steps
         if inference_steps is not None:
-            validate_ddim_steps(inference_steps, "inference_steps")
-            num_steps = inference_steps
+            num_steps = validate_ddim_steps(
+                inference_steps, "inference_steps", num_training_steps=self.noise_scheduler.config.num_train_timesteps,
+            )
 
         # Scheduler tensors are not module buffers; restored and trained instances need the same device.
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(

@@ -124,16 +124,19 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         }
 
     def __getitem__(self, idx):
-        return self._prepare_sample(self.sampler.sample_sequence(idx))
+        return self.__getitems__([idx])[0]
 
     def __getitems__(self, indices):
-        # Preserve per-item hooks supplied by dataset and sampler subclasses.
-        if type(self).__getitem__ is not DemonstrationDataset.__getitem__ or type(self.sampler) is not SequenceSampler:
-            return [self[idx] for idx in indices]
-        return [self._prepare_sample(sample) for sample in self.sampler.sample_batch(indices)]
+        indices = list(indices)
+        if not indices:
+            return []
+        data = self._samples_to_data(indices, self.sampler.sample_batch(indices))
+        return [self._prepare_sample(sample) for sample in data]
 
-    def _prepare_sample(self, sample):
-        data = self.sample_to_data(sample)
+    def _samples_to_data(self, indices, samples):
+        return map(self.sample_to_data, samples)
+
+    def _prepare_sample(self, data):
         # Each sample has a separate writable row range for in-place augmentation.
         for modality, augmentors in self.augmentors.items():
             values = data["obs"][modality]

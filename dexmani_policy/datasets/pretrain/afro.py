@@ -1,5 +1,3 @@
-import torch
-
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
@@ -22,9 +20,7 @@ class AFROPretrainDataset(ObservationPretrainDataset):
         )
 
     def build_sampler(self, mask):
-        return SequenceSampler(self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask=mask)
-
-    def __getitem__(self, index):
-        rows = self.sampler.sample_source_rows(index)[::self.frame_stride]
-        points = self.episode_store.read("point_cloud", rows, columns=slice(0, 3))
-        return {"obs": {"point_cloud": torch.as_tensor(points)}}
+        return SequenceSampler(
+            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask=mask,
+            fields=self.normalization_fields, frame_stride=self.frame_stride,
+        )

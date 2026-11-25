@@ -1,6 +1,6 @@
 """仿真与真机共用的策略恢复、观测准备及物理动作输出。"""
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -15,21 +15,31 @@ if TYPE_CHECKING:
     import torch
 
     from dexmani_policy.agents.policies.base import Policy
+    from dexmani_policy.common.checkpoint import Checkpoint
 
 
-def resolve_inference_settings(config, *, weights=None, inference_steps=None):
+def select_inference_weights(
+    checkpoint: "Checkpoint", *, weights: str | None = None, inference_steps: int | None = None,
+) -> tuple[str, int, dict[str, Any]]:
+    from hydra.utils import get_class
+
+    config = checkpoint.effective_config
     defaults = config["eval"]
     if weights is None:
         weights = "ema" if defaults["use_ema"] else "raw"
     if weights not in {"ema", "raw"}:
         raise ValueError("weights must be ema or raw")
-    steps = positive_int(defaults["inference_steps"] if inference_steps is None else inference_steps, "inference_steps")
-    if steps == 1:
-        from hydra.utils import get_class
-
-        if get_class(config["agent"]["_target_"]).uses_ddim:
-            validate_ddim_steps(steps, "inference_steps")
-    return weights, steps
+    steps = defaults["inference_steps"] if inference_steps is None else inference_steps
+    agent_config = config["agent"]
+    policy_class = cast("type[Policy]", get_class(agent_config["_target_"]))
+    if policy_class.uses_ddim:
+        steps = validate_ddim_steps(steps, "inference_steps", num_training_steps=agent_config["num_training_steps"])
+    else:
+        steps = positive_int(steps, "inference_steps")
+    state = checkpoint.ema_model_state if weights == "ema" else checkpoint.model_state
+    if state is None:
+        raise ValueError("Requested EMA weights are absent; select raw explicitly")
+    return weights, steps, state
 
 
 def contiguous_numpy(value, dtype=None):
@@ -98,16 +108,13 @@ def predict_actions(agent, observations, *, inference_steps=None, generator=None
 
 
 def restore_policy(
-    effective_config: dict[str, Any], state_dict: dict[str, Any] | None,
+    effective_config: dict[str, Any], state_dict: dict[str, Any],
     device: "str | torch.device",
 ) -> "Policy":
     import hydra
 
     from dexmani_policy.common.normalizer import normalization_feature_shapes
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
-
-    if state_dict is None:
-        raise ValueError("Requested EMA weights are absent; select raw explicitly")
 
     feature_dims = effective_config["normalization_dims"]
     rng_state = get_rng_state()

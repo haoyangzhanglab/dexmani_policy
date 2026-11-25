@@ -25,7 +25,15 @@ class LocalGeometryEmbedding(nn.Module):
         self.point_mlp = build_mlp(
             [input_channels, local_hidden_dim, local_hidden_dim], activate_last=True,
         )
-        self.context_mlp = build_mlp([2 * local_hidden_dim, local_hidden_dim, local_hidden_dim])
+        self.point_projection = nn.Linear(local_hidden_dim, local_hidden_dim, bias=False)
+        self.context_projection = nn.Linear(local_hidden_dim, local_hidden_dim)
+        # The two projections form a single affine map with fan-in 2C.
+        bound = (2 * local_hidden_dim) ** -0.5
+        for parameter in (self.point_projection.weight, self.context_projection.weight, self.context_projection.bias):
+            nn.init.uniform_(parameter, -bound, bound)
+        self.context_mlp = nn.Sequential(
+            nn.LayerNorm(local_hidden_dim), nn.GELU(), nn.Linear(local_hidden_dim, local_hidden_dim),
+        )
         self.projection = nn.Linear(local_hidden_dim, channels)
 
     def forward(
@@ -35,7 +43,7 @@ class LocalGeometryEmbedding(nn.Module):
         grouped_points[..., :3].sub_(centers.unsqueeze(2)).div_(self.geometry_scale)
         features = self.point_mlp(grouped_points.to(self.point_mlp[0].weight.dtype))
         context = features.amax(dim=2, keepdim=True)
-        features = torch.cat((features, context.expand_as(features)), dim=-1)
+        features = self.point_projection(features) + self.context_projection(context)
         features = self.context_mlp(features)
         return self.projection(features.amax(dim=2))
 

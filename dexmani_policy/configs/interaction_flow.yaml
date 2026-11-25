@@ -1,0 +1,79 @@
+defaults:
+  - common
+  - _self_
+
+policy_name: interaction_flow
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+
+initialization:
+  rgb: data/pretrained/dinov2-small
+
+dataset:
+  _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
+  sensor_modalities:
+    - point_cloud
+    - rgb
+    - camera_intrinsic
+    - camera_extrinsic
+    - joint_state
+    - eef_pose
+    - fingertip_xyz
+    - finger_tactile_force
+
+normalization:
+  point_cloud: identity
+  rgb: identity
+  camera_intrinsic: identity
+  camera_extrinsic: identity
+  joint_state: limits
+  eef_pose: identity
+  fingertip_xyz: identity
+  finger_tactile_force: identity
+
+dataloader:
+  batch_size: 128
+  drop_last: true
+
+agent:
+  _target_: dexmani_policy.agents.policies.interaction_flow.InteractionFlow
+  action_dim: null
+  state_dim: 19
+  pc_dim: 3
+  num_points: 1024
+  patch_config:
+    num_patches: 128
+    group_size: 32
+  spatial_config:
+    depth: 2
+    num_heads: 8
+  rgb_backbone_name: dino
+  rgb_backbone_config:
+    tune_mode: freeze
+    image_size: [224, 224]
+  rgb_semantic_sampling: center
+
+  n_layers: 8
+  hidden_dim: 768
+  n_head: 8
+  mlp_ratio: 4.0
+  p_drop_attn: 0.1
+  qkv_bias: false
+  qk_norm: false
+  timestep_embed_dim: 128
+  num_inference_steps: 5
+  time_shift_alpha: 1.0
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.95]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+training:
+  use_compile: true
+
+eval:
+  inference_steps: ${agent.num_inference_steps}

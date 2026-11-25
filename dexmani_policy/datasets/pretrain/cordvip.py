@@ -36,11 +36,8 @@ class CordViPPretrainDataset(ObservationPretrainDataset):
             episode_mask=mask, fields=fields,
         )
 
-    def __getitem__(self, index):
-        sample = self.sampler.sample_sequence(index)
-        batch: dict[str, dict[str, torch.Tensor] | torch.Tensor] = {
-            "obs": {key: torch.as_tensor(sample[key]) for key in self.sensor_modalities},
-        }
+    def sample_to_data(self, sample):
+        batch = super().sample_to_data(sample)
         if "contact_map" in sample:
             batch["contact_map"] = torch.as_tensor(sample["contact_map"])
         return batch

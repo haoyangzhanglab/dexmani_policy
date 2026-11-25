@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
@@ -15,24 +14,20 @@ class AdapTacDataset(DemonstrationDataset):
 
     def build_sampler(self, episode_mask):
         sampler = super().build_sampler(episode_mask)
-        start, end, sample_start = sampler.indices.T
-        query = np.clip(start + self.action_start_index - sample_start, start, end - 1)
-        episode_ends = self.episode_store.episode_ends
-        ends = episode_ends[np.searchsorted(episode_ends, query, side="right")]
-        sampler.indices = sampler.indices[query + 1 < ends]
+        query = sampler.source_rows(slice(None), self.action_start_index)
+        sampler.indices = sampler.indices[query + 1 < sampler.indices[:, 2]]
         return sampler
 
-    def __getitem__(self, idx):
-        data = super().__getitem__(idx)
-        query = self.sampler.sample_source_row(idx, self.action_start_index)
-        episode_ends = self.episode_store.episode_ends
-        end = int(episode_ends[np.searchsorted(episode_ends, query, side="right")])
+    def _samples_to_data(self, indices, samples):
+        data = super()._samples_to_data(indices, samples)
+        query = self.sampler.source_rows(indices, self.action_start_index)
+        ends = self.sampler.indices[indices, 2]
         future_steps = self.horizon - self.action_start_index
-        force = self.episode_store.read(self.force_key, slice(query + 1, min(query + 1 + future_steps, end)))
-        steps = np.arange(future_steps)
-        padded = np.empty((future_steps, *force.shape[1:]), dtype=force.dtype)
-        padded[:len(force)] = force
-        padded[len(force):] = 0
-        data["future_force"] = torch.from_numpy(padded)
-        data["future_force_valid"] = torch.from_numpy(steps < len(force))
-        return data
+        rows = query[:, None] + np.arange(1, future_steps + 1)
+        valid = rows < ends[:, None]
+        force = self.episode_store.read_rows_by_chunk(self.force_key, np.minimum(rows, ends[:, None] - 1))
+        force[~valid] = 0
+        for item, values, mask in zip(data, force, valid):
+            item["future_force"] = values
+            item["future_force_valid"] = mask
+            yield item

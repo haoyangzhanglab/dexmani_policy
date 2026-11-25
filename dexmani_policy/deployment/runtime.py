@@ -4,7 +4,7 @@ import numpy as np
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.inference import (
-    prepare_numeric_tensor, prepare_observations, predict_actions, resolve_inference_settings, restore_policy,
+    prepare_numeric_tensor, prepare_observations, predict_actions, restore_policy, select_inference_weights,
 )
 from dexmani_policy.deployment.metadata import policy_info
 
@@ -17,8 +17,7 @@ def load_policy(path, *, weights=None, inference_steps=None, device="cuda:0", se
         path = (path / "checkpoints/latest.pt").resolve()
     checkpoint = load_checkpoint(path)
     cfg = checkpoint.effective_config
-    weights, steps = resolve_inference_settings(cfg, weights=weights, inference_steps=inference_steps)
-    state = checkpoint.ema_model_state if weights == "ema" else checkpoint.model_state
+    weights, steps, state = select_inference_weights(checkpoint, weights=weights, inference_steps=inference_steps)
     del checkpoint
     agent = restore_policy(cfg, state, device)
     del state

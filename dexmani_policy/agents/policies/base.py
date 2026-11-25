@@ -80,7 +80,10 @@ class Policy(nn.Module):
 
     @property
     def effective_config(self) -> dict:
-        return dict(getattr(self.obs_encoder, "effective_config", {}))
+        return {
+            **getattr(self.obs_encoder, "effective_config", {}),
+            **getattr(self.action_decoder, "effective_config", {}),
+        }
 
     @property
     def action_start_index(self) -> int:
@@ -104,15 +107,20 @@ class Policy(nn.Module):
     def requires_ema_for_loss(self) -> bool:
         return bool(getattr(self.action_decoder, "requires_ema_for_loss", False))
 
-    def get_training_loss_kwargs(self, ema_agent: Policy | None = None) -> dict:
-        if not self.requires_ema_for_loss:
-            return {}
-        assert ema_agent is not None
-        return {"ema_decoder": ema_agent.action_decoder}
+    def training_microbatches(self, batches, ema_agent):
+        options = {"ema_decoder": ema_agent.action_decoder} if self.requires_ema_for_loss else {}
+        for batch in batches:
+            yield batch, options
 
     def _preprocess_obs(self, obs_dict: dict) -> dict:
+        if not obs_dict:
+            return {}
+        # Flattening without checking the history can mix frames from different samples.
+        expected = (next(iter(obs_dict.values())).shape[0], self.n_obs_steps)
         result = {}
         for key, value in obs_dict.items():
+            if value.shape[:2] != expected:
+                raise ValueError(f"{key} requires [B,T]={expected}, got {tuple(value.shape[:2])}")
             if key in self.normalizer.fields:
                 value = self.normalizer[key].normalize(value)
             result[key] = value.flatten(0, 1)

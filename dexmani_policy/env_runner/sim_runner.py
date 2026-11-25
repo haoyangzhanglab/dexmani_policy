@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES
+from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, positive_int
 from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
+from dexmani_policy.common.io_util import cleanup_after_error, cleanup_on_exit
+
+
+def resolve_action_steps(steps: int | None, *, n_action_steps: int, future_steps: int, requires_prev_action: bool) -> int:
+    steps = positive_int(n_action_steps if steps is None else steps, "action_steps")
+    if steps > future_steps:
+        raise ValueError(f"action_steps must not exceed future_steps ({future_steps})")
+    if requires_prev_action and steps != n_action_steps:
+        raise ValueError("ODE execution requires action_steps == n_action_steps")
+    return steps
 
 
 class SimRunner:
@@ -122,23 +133,21 @@ class SimRunner:
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
         if self.skip_intermediate_observations and video_save_dir is not None:
             raise ValueError("Skipping intermediate observations requires video=False")
-        if agent.requires_prev_action and action_steps != agent.n_action_steps:
-            raise ValueError("ODE execution requires action_steps == n_action_steps")
+        action_steps = resolve_action_steps(
+            action_steps, n_action_steps=agent.n_action_steps, future_steps=agent.future_steps,
+            requires_prev_action=agent.requires_prev_action,
+        )
         unsupported = (TACTILE_FEATURE_SHAPES.keys() & set(self.sensor_modalities)) - {"finger_tactile_force"}
         if unsupported:
             raise ValueError(f"Sim has no dense tactile producer for: {sorted(unsupported)}")
-        env = None
-        try:
+        with ExitStack() as resources:
             for index, seed in enumerate(seeds):
-                if env is None or (
+                if index == 0 or (
                     self.env_rebuild_interval > 0 and index % self.env_rebuild_interval == 0
                 ):
-                    if env is not None:
-                        try:
-                            env.close()
-                        finally:
-                            env = None
+                    resources.close()
                     env = self.make_env(record_video=video_save_dir is not None)
+                    resources.enter_context(cleanup_on_exit(env.close))
 
                 success, steps = self._run_episode(
                     agent, env, seed, inference_steps, action_steps=action_steps
@@ -158,9 +167,6 @@ class SimRunner:
                         env.get_video(), 1 / env.dt, Path(video_save_dir) / f"episode_{seed}.mp4",
                     )
                 yield result
-        finally:
-            if env is not None:
-                env.close()
 
     def _make_env(self, *, record_video: bool):
         from dexmani_sim import resolve_env_class
@@ -174,8 +180,14 @@ class SimRunner:
 
     def make_env(self, *, record_video: bool):
         env = self._make_env(record_video=record_video)
+        try:
+            self._validate_env(env)
+        except BaseException as error:
+            cleanup_after_error(env.close, error)
+            raise
+        return env
+
+    def _validate_env(self, env):
         dt = env.dt
         if not np.isclose(dt, self.control_dt_s, rtol=1e-6, atol=1e-9):
-            env.close()
             raise ValueError(f"Control period mismatch: Sim dt={dt} s, Policy control_dt_s={self.control_dt_s} s")
-        return env

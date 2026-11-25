@@ -186,6 +186,19 @@ class AdapTac(Policy):
         fused = self.force_fusion(visual, tactile, guide)
         return torch.cat((fused, state), dim=-1)
 
+    def training_microbatches(self, batches, ema_agent):
+        batches = list(batches)
+        if len(batches) == 1:
+            yield batches[0], {}
+            return
+        valid_counts = [int(batch["future_force_valid"].sum()) for batch in batches]
+        total_valid = sum(valid_counts)
+        total_samples = sum(len(batch["action"]) for batch in batches)
+        for batch, valid in zip(batches, valid_counts):
+            # The trainer averages by samples; the force objective averages by valid timesteps.
+            scale = (valid * total_samples) / (len(batch["action"]) * total_valid)
+            yield batch, {"force_loss_scale": scale}
+
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, force_loss_scale: float = 1.0, **kwargs,
     ) -> tuple[torch.Tensor, dict]:
