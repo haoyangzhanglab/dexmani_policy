@@ -1146,46 +1146,39 @@ def test_tactile_contact_gate_scales_local_update():
     torch.testing.assert_close(residual[:, 1:] - residual[:, :1], expected_local)
 
 
-def test_hand_scene_attention_geometry_bias():
+def test_hand_scene_attention_shared_rope_origin():
     attention = GeoAwareRelationAttention()
     hand_tokens = torch.randn(2, 6, 192)
     scene_tokens = torch.randn(2, 128, 192)
-    hand_landmarks_base = torch.randn(2, 6, 3, dtype=torch.bfloat16)
-    scene_points_base = torch.randn(2, 128, 3, dtype=torch.bfloat16)
-    assert torch.count_nonzero(attention.geometry_bias[-1].weight) == 0
-    assert torch.count_nonzero(attention.geometry_bias[-1].bias) == 0
-    with torch.no_grad():
-        attention.geometry_bias[-1].weight[:, :4].copy_(torch.eye(4))
+    hand_landmarks_base = torch.rand(2, 6, 3) * 0.2
+    scene_points_base = torch.rand(2, 128, 3) * 0.2
+    shift = torch.tensor([0.25, -0.5, 0.75])
 
-    capture_geometry = Mock(return_value=None)
+    tokens = attention(hand_tokens, scene_tokens, hand_landmarks_base, scene_points_base)
+    translated = attention(hand_tokens, scene_tokens, hand_landmarks_base + shift, scene_points_base + shift)
+    torch.testing.assert_close(translated, tokens)
+    shifted_hand = attention(hand_tokens, scene_tokens, hand_landmarks_base + shift, scene_points_base)
+    assert not torch.allclose(shifted_hand, tokens)
+
+    capture_rope = Mock(return_value=None)
     with (
-        attention.geometry_bias.register_forward_hook(capture_geometry),
+        attention.rope.register_forward_hook(capture_rope, with_kwargs=True),
         patch.object(F, "scaled_dot_product_attention", wraps=F.scaled_dot_product_attention) as sdpa,
         torch.autocast("cpu", dtype=torch.bfloat16),
     ):
         tokens = attention(hand_tokens, scene_tokens, hand_landmarks_base, scene_points_base)
 
     assert tokens.shape == (2, 6, 192)
-    _, (geometry_input,), geometry_output = capture_geometry.call_args.args
-    assert geometry_input.shape == geometry_output.shape == (2, 6, 128, 4)
-    assert geometry_input.dtype == geometry_output.dtype == torch.float32
-    relative_xyz = scene_points_base.float()[:, None] - hand_landmarks_base.float()[:, :, None]
-    expected_geometry = torch.cat(
-        (
-            relative_xyz / 0.10,
-            torch.linalg.vector_norm(relative_xyz, dim=-1, keepdim=True) / 0.10,
-        ),
-        dim=-1,
-    )
-    torch.testing.assert_close(geometry_input, expected_geometry)
+    assert capture_rope.call_count == 2
+    for call, xyz in zip(capture_rope.call_args_list, (hand_landmarks_base, scene_points_base)):
+        _, (positions,), kwargs, (cos, sin) = call.args
+        torch.testing.assert_close(positions, xyz)
+        torch.testing.assert_close(kwargs["origin"], scene_points_base.mean(dim=1, keepdim=True))
+        assert cos.dtype == sin.dtype == torch.float32
     query, key, value = sdpa.call_args.args[:3]
-    bias = sdpa.call_args.kwargs["attn_mask"]
     assert query.shape == (2, 4, 6, 48)
     assert key.shape == value.shape == (2, 4, 128, 48)
-    assert bias.shape == (2, 4, 6, 128)
-    assert bias.dtype == query.dtype == torch.bfloat16
-    assert torch.count_nonzero(bias) > 0
-    torch.testing.assert_close(bias, geometry_output.permute(0, 3, 1, 2).to(query.dtype))
+    assert query.dtype == key.dtype == value.dtype == torch.bfloat16
 
     with pytest.raises(ValueError, match="batch"):
         attention(hand_tokens, scene_tokens[:1], hand_landmarks_base, scene_points_base[:1])
@@ -1216,7 +1209,6 @@ def make_hand_scene_observation(point_channels=3):
 ])
 def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
     encoder = HandObjectInteractionEncoder(
-        rgb_backbone_name="dino",
         rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
         **scene_config,
     ).eval()
@@ -1224,8 +1216,11 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
     obs = make_hand_scene_observation(point_channels)
     point_cloud = obs["point_cloud"]
     camera_extrinsic = obs["camera_extrinsic"]
-    tokens = encoder(obs)
+    capture_scene = Mock(return_value=None)
+    with encoder.spatial_encoder.register_forward_pre_hook(capture_scene):
+        tokens = encoder(obs)
     assert tokens.shape == (2, 6, 192)
+    assert capture_scene.call_args.args[1][0].shape == (2, 128, 192)
     result = encoder.forward_with_aux({
         **obs,
         "camera_intrinsic": obs["camera_intrinsic"].flatten(1),
@@ -1273,8 +1268,8 @@ def test_hand_scene_encoder_backward():
     for name in (
         "patch_encoder.geometry_embedding.point_mlp.0.weight",
         "rgb_fusion.semantic_projection.weight",
+        "rgb_fusion.fusion_projection.weight",
         "spatial_encoder.blocks.0.qkv.weight",
-        "scene_projection.weight",
         "hand_encoder.wrist_mlp.0.weight",
         "hand_encoder.finger_mlp.0.weight",
         "hand_encoder.slot_embeddings",
@@ -1288,24 +1283,12 @@ def test_hand_scene_encoder_backward():
         "geometric_relation.hand_attention.in_proj_weight",
         "geometric_relation.query_projection.weight",
         "geometric_relation.scene_kv.weight",
-        "geometric_relation.geometry_bias.2.weight",
         "geometric_relation.ffn.0.weight",
     ):
         grad = encoder.get_parameter(name).grad
         assert grad is not None, name
         assert grad.isfinite().all(), name
         assert grad.count_nonzero() > 0, name
-
-    geometry_bias = encoder.geometric_relation.geometry_bias
-    # The zero-initialized final layer blocks gradients to the first layer until an update.
-    optimizer = torch.optim.SGD(geometry_bias.parameters(), lr=0.1)
-    optimizer.step()
-    encoder.zero_grad(set_to_none=True)
-    (encoder(obs) * probe).mean().backward()
-
-    distance_grad = geometry_bias[0].weight.grad[:, 3]
-    assert distance_grad.isfinite().all()
-    assert distance_grad.count_nonzero() > 0
 
 
 # Policy initialization
@@ -1368,6 +1351,7 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         "workspace.wandb_cfg=null", "dataset.sensor_modalities=[joint_state]", "dataset.augmentation_cfg=null",
         "training.device=cpu", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
         "agent.hidden_dim=16", "agent.n_layers=1", "agent.n_head=2", "agent.pc_encoder_config.channels=24",
+        "+agent.rgb_backbone_config.architecture={model_type:dinov2}",
         "training.use_compile=false", "training.loop.total_train_steps=3",
         "dataloader.num_workers=0", "dataloader.batch_size=2",
     ])
@@ -1427,20 +1411,6 @@ def test_hand_affine_and_latent_order(tmp_path, make_demo, monkeypatch, method):
         torch.testing.assert_close(model.normalizer["hand_latent"].state_dict(), reference["hand_latent"].state_dict())
         normalized = model._encode_actions(torch.cat(chunks))
         assert normalized.shape[-1] == 39
-    before = copy.deepcopy(model.state_dict())
-    before_config = copy.deepcopy(cfg.agent)
-    sat_cfg = load_config("sat", [
-        "training.device=cpu", "agent.action_dim=19", "agent.hidden_dim=16",
-        "agent.n_layers=1", "agent.n_head=2", "initialization.rgb=null", "agent.pc_encoder_config.channels=24",
-    ])
-    sat = build_policy(sat_cfg, dataset, {"action": 19, "joint_state": 19})
-    with torch.no_grad():
-        sat.normalizer["action"].scale.fill_(9)
-        sat.obs_encoder.rgb_encoder.weight.zero_()
-    sat_cfg.agent.rgb_backbone_config.tune_mode = "full"
-    torch.testing.assert_close(model.state_dict(), before)
-    assert cfg.agent == before_config
-
     with closing(build_trainer(cfg)) as trainer:
         trainer.train(max_updates=1)
     latest = directory / "checkpoints/latest.pt"
@@ -1624,7 +1594,8 @@ def save_tiny_hf_rgb(directory, kind):
     return source
 
 
-def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch):
+@pytest.mark.parametrize("backbone_type", ["ditx", "dit"])
+def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch, backbone_type):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
@@ -1635,15 +1606,18 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
     data["rgb"] = np.full((n_frames, 8, 8, 3), 128, dtype=np.uint8)
     data["camera_intrinsic"] = np.tile(np.eye(3, dtype=np.float32).ravel(), (n_frames, 1))
     data["camera_extrinsic"] = np.tile(np.eye(4, dtype=np.float32)[:3].ravel(), (n_frames, 1))
+    hand_obs = make_hand_scene_observation()
+    for key in ("eef_pose", "fingertip_xyz", "finger_tactile_force"):
+        data[key] = np.repeat(hand_obs[key][:1].numpy(), n_frames, axis=0)
     cfg = load_config("sat", [
         f"zarr_path='{path}'", "task_name=test", f"workspace.output_dir='{directory}'",
         "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
-        "dataloader.num_workers=0", "dataloader.batch_size=2", "dataset.augmentation_cfg=null",
-        "horizon=4", "n_obs_steps=1", "n_action_steps=4", f"initialization.rgb='{source}'",
-        "agent.rgb_backbone_name=dino", "agent.rgb_backbone_config.tune_mode=full",
+        "dataloader.num_workers=0", "dataloader.batch_size=2",
+        "horizon=4", "n_action_steps=3", f"initialization.rgb='{source}'",
+        f"agent.backbone_type={backbone_type}", "agent.rgb_backbone_config.tune_mode=full",
         "agent.rgb_backbone_config.image_size=[8,8]", "agent.num_inference_steps=2",
-        "agent.pc_encoder_config.channels=24", "agent.pc_encoder_config.num_patches=4",
-        "agent.pc_encoder_config.group_size=4", "agent.n_layers=1", "agent.hidden_dim=16", "agent.n_head=2",
+        "agent.patch_config.num_patches=4", "agent.patch_config.group_size=4",
+        "agent.n_layers=1", "agent.hidden_dim=16", "agent.n_head=2",
     ])
 
     with (
@@ -1657,10 +1631,10 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         prior, = fresh.cfg.prior_data
         assert prior == {"source": None, "artifact": str(source), "budget_verified": False}
         assert fresh.cfg.agent.rgb_backbone_config.architecture.hidden_size == 16
-        with torch.no_grad():
-            next(fresh.model.obs_encoder.rgb_encoder.parameters()).fill_(2)
-            next(fresh.ema_model.obs_encoder.rgb_encoder.parameters()).fill_(3)
-        fresh.save_checkpoint()
+        capture_context = Mock(return_value=None)
+        with fresh.model.action_decoder.model.context_embedder.register_forward_pre_hook(capture_context):
+            fresh.train(max_updates=1)
+        assert capture_context.call_args.args[1][0].shape == (2, 12, 192)
 
         def forbidden(*args, **kwargs):
             pytest.fail("Checkpoint restoration must use the saved RGB architecture")
@@ -1674,8 +1648,16 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         with closing(load_policy(latest, weights="raw", device="cpu")) as runtime:
             torch.testing.assert_close(runtime.agent.state_dict(), saved.model_state)
             obs = {key: data[key][:cfg.n_obs_steps] for key in cfg.dataset.sensor_modalities}
-            actions = runtime.predict(obs)
-            assert actions.shape == (4, 19) and np.isfinite(actions).all()
+            with runtime.agent.action_decoder.model.context_embedder.register_forward_pre_hook(capture_context):
+                actions = runtime.predict(obs)
+            assert capture_context.call_args.args[1][0].shape == (1, 12, 192)
+            assert actions.shape == (3, 19) and np.isfinite(actions).all()
+            batched = prepare_observations(
+                obs, normalization_dims=runtime.agent.normalization_dims, n_obs_steps=cfg.n_obs_steps,
+                rgb_preprocessing=runtime.info.rgb_preprocessing, device="cpu",
+            )
+            with pytest.raises(RuntimeError, match="unflatten"):
+                runtime.agent.predict_action({key: tensor.transpose(0, 1) for key, tensor in batched.items()})
         warm_cfg = copy.deepcopy(cfg)
         warm_cfg.initialization.policy = str(latest)
         warm_cfg.workspace.output_dir = str(tmp_path / "warm")
@@ -1703,9 +1685,6 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind, prepro
     encoder = HandObjectInteractionEncoder(**OmegaConf.to_container(agent))
     config = copy.deepcopy(encoder.effective_config)
     encoder = HandObjectInteractionEncoder(**config)
-    initial_weights = copy.deepcopy(encoder.rgb_encoder.state_dict())
-    encoder.rgb_encoder.initialize_weights(None)
-    torch.testing.assert_close(encoder.rgb_encoder.state_dict(), initial_weights, rtol=0, atol=0)
     encoder.rgb_encoder.initialize_weights(str(directory))
     torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), source.state_dict())
     larger_config = copy.deepcopy(config)
@@ -1727,7 +1706,7 @@ def test_rgb_resolution_and_external_weights(tmp_path, monkeypatch, kind, prepro
     monkeypatch.setattr(AutoConfig, "from_pretrained", forbidden)
     monkeypatch.setattr(SiglipVisionConfig, "from_pretrained", forbidden)
     resolve_rgb_architecture(agent, "missing-source")
-    warm = OmegaConf.create({"rgb_backbone_config": {}})
+    warm = OmegaConf.create({"rgb_backbone_name": kind, "rgb_backbone_config": {}})
     saved_agent = OmegaConf.to_container(agent)
     inherit_rgb_architecture(warm, saved_agent)
     assert warm.rgb_backbone_name == kind
@@ -1759,8 +1738,8 @@ def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
     source = timm.create_model(**architecture, pretrained=False)
     save_file(source.state_dict(), tmp_path / "model.safetensors")
     with patch.object(timm, "create_model", wraps=timm.create_model) as create_model:
-        encoder = HandObjectInteractionEncoder(rgb_backbone_config={
-            "architecture": overrides, "image_size": 32, "tune_mode": "full",
+        encoder = HandObjectInteractionEncoder(rgb_backbone_name="dinov3", rgb_backbone_config={
+            "architecture": overrides, "tune_mode": "full",
         })
     create_model.assert_called_once_with(**architecture, pretrained=False)
     config = copy.deepcopy(encoder.effective_config)
@@ -1769,6 +1748,7 @@ def test_dinov3_timm_architecture_and_local_weights(tmp_path, monkeypatch):
     assert config == encoder.effective_config
     assert config["rgb_backbone_config"]["architecture"] == architecture
     assert config["rgb_backbone_config"]["image_size"] == (32, 32)
+    assert encoder(make_hand_scene_observation()).shape == (2, 6, 192)
     invalid_weights = source.state_dict()
     invalid_weights["cls_token"] = invalid_weights["cls_token"] + 1
     invalid_weights["unexpected"] = torch.zeros(1)
@@ -1797,7 +1777,7 @@ def test_method_owned_warm_checks():
 
 @pytest.mark.parametrize("method,fields", [
     ("dp", {"rgb", "finger_tactile_force", "taxel_tactile_force"}),
-    ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
+    ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz"}),
     ("dqrise", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dexlatent", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("adaptac", {"point_cloud"}),

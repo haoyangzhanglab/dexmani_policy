@@ -3,7 +3,7 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, SiglipVisionConfig, SiglipVisionModel
+from transformers import AutoConfig, AutoModel, Dinov2Config, SiglipVisionConfig, SiglipVisionModel
 
 
 class ViTEncoder(nn.Module):
@@ -31,15 +31,18 @@ class ViTEncoder(nn.Module):
             architecture = {"model_name": "vit_small_patch16_dinov3", **(architecture or {})}
             self.backbone = timm.create_model(**architecture, pretrained=False)
             self.patch_size = self.backbone.patch_embed.patch_size[0]
-            self.hidden_dim = self.backbone.num_features
+            hidden_dim = self.backbone.num_features
             self.num_prefix_tokens = self.backbone.num_prefix_tokens
         else:
-            if architecture is None:
-                raise ValueError("HF ViT requires an explicit architecture; resolve it before construction")
             if kind == "dino":
-                config = AutoConfig.for_model(**architecture)
+                config = (
+                    Dinov2Config(hidden_size=384, num_attention_heads=6, image_size=518)
+                    if architecture is None else AutoConfig.for_model(**architecture)
+                )
             elif kind == "siglip":
-                # HF from_dict mutates its input; preserve the caller's architecture.
+                if architecture is None:
+                    raise ValueError("SigLIP requires an explicit architecture")
+                # HF from_dict mutates its input.
                 config = SiglipVisionConfig.from_dict(dict(architecture))
                 config.vision_use_head = global_token_type == "pooler"
             else:
@@ -51,7 +54,7 @@ class ViTEncoder(nn.Module):
             else:
                 self.backbone = SiglipVisionModel(config)
             self.patch_size = int(config.patch_size)
-            self.hidden_dim = int(config.hidden_size)
+            hidden_dim = int(config.hidden_size)
             self.num_prefix_tokens = (
                 1 + int(getattr(config, "num_register_tokens", 0)) if kind == "dino" else 0
             )
@@ -59,12 +62,12 @@ class ViTEncoder(nn.Module):
             tune_mode=tune_mode, global_token_type=global_token_type,
             out_dim=out_dim, architecture=architecture,
         )
-        self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
+        self.out_dim = hidden_dim if out_dim is None else int(out_dim)
 
         self.proj = (
             nn.Identity()
-            if self.out_dim == self.hidden_dim
-            else nn.Linear(self.hidden_dim, self.out_dim)
+            if self.out_dim == hidden_dim
+            else nn.Linear(hidden_dim, self.out_dim)
         )
         if tune_mode == "lora":
             from peft import LoraConfig, get_peft_model
@@ -94,9 +97,7 @@ class ViTEncoder(nn.Module):
 
         self.backbone.train(self.training and tune_mode != "freeze")
 
-    def initialize_weights(self, source: str | None) -> None:
-        if source is None:
-            return
+    def initialize_weights(self, source: str) -> None:
         backbone = self.backbone.get_base_model() if self.tune_mode == "lora" else self.backbone
         if self.kind == "dinov3":
             from huggingface_hub import hf_hub_download

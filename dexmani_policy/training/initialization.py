@@ -32,17 +32,15 @@ def resolve_rgb_architecture(agent, source):
 def inherit_rgb_architecture(agent, saved_agent):
     name = agent.get("rgb_backbone_name")
     saved_name = saved_agent.get("rgb_backbone_name")
-    if name is None and saved_name is None:
-        return
-    if name is not None and name != saved_name:
+    if name != saved_name:
         raise ValueError(f"RGB backbone differs from initialization policy: current={name!r}, checkpoint={saved_name!r}")
+    if name not in ("dino", "dinov3", "siglip"):
+        return
     rgb = dict(agent.get("rgb_backbone_config") or {})
-    if rgb.get("architecture") is None:
-        architecture = (saved_agent.get("rgb_backbone_config") or {}).get("architecture")
-        if architecture is not None:
-            rgb["architecture"] = architecture
+    if rgb.get("architecture") is not None:
+        return
+    rgb["architecture"] = saved_agent["rgb_backbone_config"]["architecture"]
     with open_dict(agent):
-        agent.rgb_backbone_name = saved_name
         agent.rgb_backbone_config = rgb
 
 

@@ -24,7 +24,7 @@ class RGBPointObservationEncoder(nn.Module):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
-        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
     ) -> None:
         super().__init__()
@@ -56,7 +56,7 @@ class RGBPointObservationEncoder(nn.Module):
         )
         self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, self.patch_encoder.out_dim)
         self.spatial_encoder = SpatialContextEncoder(
-            channels=2 * self.patch_encoder.out_dim, **spatial_config,
+            channels=self.rgb_fusion.out_dim, **spatial_config,
         )
         self.out_dim = self.spatial_encoder.out_dim
         self.joint_encoder = StateEncoder(state_dim, self.out_dim)
@@ -68,7 +68,6 @@ class RGBPointObservationEncoder(nn.Module):
     @property
     def effective_config(self) -> dict:
         return {
-            # Store the local width; RGB fusion doubles it for spatial attention.
             "pc_encoder_config": {
                 **self.spatial_encoder.effective_config, **self.patch_encoder.effective_config,
             },

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# all 准备默认配方所需权重；可选 DINOv2、SigLIP 分别用 dinov2、siglip。
+# all 准备默认配方所需权重；可选 DINOv3、SigLIP 分别用 dinov3、siglip。
 set -euo pipefail
 
 usage() {
@@ -46,10 +46,10 @@ def download_hf(repo_id, directory, filenames):
 if method in ("all", "r3d"):
     download_hf("eddie-cui/r3d-weights", "uni3d", ("model.safetensors",))
 
-if method == "dinov2":
+if method in ("all", "dexlatent", "sat", "dqrise", "dinov2"):
     download_hf("facebook/dinov2-small", "dinov2-small", ("config.json", "model.safetensors"))
 
-if method in ("all", "dexlatent", "sat", "dqrise", "dinov3"):
+if method == "dinov3":
     download_hf("timm/vit_small_patch16_dinov3.lvd1689m", "dinov3-small",
                 ("config.json", "model.safetensors", "LICENSE.md"))
 

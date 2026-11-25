@@ -56,14 +56,14 @@ class ResNetEncoder(nn.Module):
             backbone = convert_group_norm(backbone)
 
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
-        self.hidden_dim = int(backbone.fc.in_features)
-        self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
+        hidden_dim = int(backbone.fc.in_features)
+        self.out_dim = hidden_dim if out_dim is None else int(out_dim)
 
         self.proj = (
             nn.Identity()
-            if self.out_dim == self.hidden_dim
+            if self.out_dim == hidden_dim
             else nn.Conv2d(
-                self.hidden_dim,
+                hidden_dim,
                 self.out_dim,
                 kernel_size=1,
             )
@@ -74,9 +74,7 @@ class ResNetEncoder(nn.Module):
         self.backbone.requires_grad_(tune_mode == "full")
         self.backbone.train(self.training and tune_mode != "freeze")
 
-    def initialize_weights(self, source: str | None) -> None:
-        if source is None:
-            return
+    def initialize_weights(self, source: str) -> None:
         norm_layer = FrozenBatchNorm2d if self.norm_mode == "frozen_bn" else nn.BatchNorm2d
         pretrained = getattr(torchvision.models, self.model_name)(weights=source, norm_layer=norm_layer)
         if self.norm_mode == "group_norm":

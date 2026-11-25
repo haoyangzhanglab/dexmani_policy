@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Literal, overload
 
 import torch
 import torch.nn.functional as F
@@ -80,6 +81,16 @@ class ImageProcessor(torch.nn.Module):
             "interpolation": self.interpolation,
         }
 
+    @overload
+    def process_images(
+        self, images: torch.Tensor, *, return_transform: Literal[False] = False,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def process_images(
+        self, images: torch.Tensor, *, return_transform: Literal[True],
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
     def process_images(
         self,
         images: torch.Tensor,
@@ -104,4 +115,6 @@ class ImageProcessor(torch.nn.Module):
                 align_corners=None if self.interpolation == "nearest" else False,
             )
         images = images.sub(self.image_mean.view(1, 3, 1, 1)).div_(self.image_std.view(1, 3, 1, 1))
-        return (images, transform) if return_transform else images
+        if return_transform:
+            return images, transform
+        return images

@@ -13,25 +13,6 @@ class ImageProjection(NamedTuple):
 
 
 @torch.no_grad()
-def pixels_to_grid(
-    pixels: torch.Tensor, valid: torch.Tensor, image_hw: tuple[int, int]
-) -> ImageProjection:
-    """Normalize pixel centers to FP32 grids with support in [-1,1)."""
-    height, width = image_hw
-    if min(height, width) <= 0:
-        raise ValueError("image dimensions must be positive (height, width)")
-
-    with torch.autocast(device_type=pixels.device.type, enabled=False):
-        pixels = pixels.float()
-        size = pixels.new_tensor((width, height))
-        valid = ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1) & valid
-        grid = (pixels + 0.5).div_(size).mul_(2).sub_(1)
-        # A valid pixel just inside the right edge can round to exactly +1.
-        grid.clamp_(-1, 1 - torch.finfo(torch.float32).eps / 2)
-        return ImageProjection(torch.where(valid[..., None], grid, 0.0), valid)
-
-
-@torch.no_grad()
 def project_to_image(
     points: torch.Tensor,
     intrinsics: torch.Tensor,
@@ -40,6 +21,9 @@ def project_to_image(
     image_hw: tuple[int, int],
 ) -> ImageProjection:
     """Project XYZ [BT,N,3] using extrinsics from the point frame to OpenCV cameras."""
+    height, width = image_hw
+    if min(height, width) <= 0:
+        raise ValueError("image dimensions must be positive (height, width)")
     if points.ndim != 3 or points.shape[-1] != 3:
         raise ValueError("points must have shape [BT,N,3]")
     bt = points.shape[0]
@@ -73,4 +57,9 @@ def project_to_image(
         pixels = homogeneous[..., :2].div_(torch.where(valid[..., None], denominator, 1))
         pixels = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
         pixels = (pixels[..., None, :] * image_affine[..., None, :2, :]).sum(-1)
-        return pixels_to_grid(pixels, valid, image_hw)
+        size = pixels.new_tensor((width, height))
+        valid &= ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1)
+        grid = (pixels + 0.5).div_(size).mul_(2).sub_(1)
+        # A valid pixel just inside the right edge can round to exactly +1.
+        grid.clamp_(-1, 1 - torch.finfo(torch.float32).eps / 2)
+        return ImageProjection(torch.where(valid[..., None], grid, 0.0), valid)

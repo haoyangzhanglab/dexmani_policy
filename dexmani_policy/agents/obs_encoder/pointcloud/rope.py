@@ -23,11 +23,15 @@ class RotaryPositionEmbedding3D(nn.Module):
             persistent=False,
         )
 
-    def forward(self, xyz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, xyz: torch.Tensor, *, origin: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.autocast(device_type=xyz.device.type, enabled=False):
             # A shared origin improves phase precision without changing pairwise offsets.
             positions = xyz.float()
-            positions = (positions - positions.mean(dim=1, keepdim=True)) / self.scale
+            if origin is None:
+                origin = positions.mean(dim=1, keepdim=True)
+            positions = (positions - origin.float()) / self.scale
             angles = positions.unsqueeze(-1) * self.inv_freq.float()
             angles = angles.repeat_interleave(2, dim=-1).flatten(-2)
             return angles.cos().unsqueeze(1), angles.sin().unsqueeze(1)

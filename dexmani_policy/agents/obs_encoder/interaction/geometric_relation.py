@@ -2,16 +2,17 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..pointcloud.rope import RotaryPositionEmbedding3D
+
 
 class GeoAwareRelationAttention(nn.Module):
-    """Update hand tokens with geometry-biased attention to Base-frame scene tokens."""
+    """Query Base-frame scene patches with spatially rotated hand queries and scene keys."""
 
     embed_dim = 192
     num_heads = 4
     head_dim = embed_dim // num_heads
-    relative_position_scale = 0.10
 
-    def __init__(self) -> None:
+    def __init__(self, rope_scale: float = 0.05, rope_base: float = 100.0) -> None:
         super().__init__()
         self.hand_norm = nn.LayerNorm(self.embed_dim)
         self.hand_attention = nn.MultiheadAttention(self.embed_dim, self.num_heads, batch_first=True)
@@ -19,9 +20,7 @@ class GeoAwareRelationAttention(nn.Module):
         self.scene_norm = nn.LayerNorm(self.embed_dim)
         self.query_projection = nn.Linear(self.embed_dim, self.embed_dim)
         self.scene_kv = nn.Linear(self.embed_dim, 2 * self.embed_dim)
-        self.geometry_bias = nn.Sequential(nn.Linear(4, 32), nn.SiLU(), nn.Linear(32, self.num_heads))
-        nn.init.zeros_(self.geometry_bias[-1].weight)
-        nn.init.zeros_(self.geometry_bias[-1].bias)
+        self.rope = RotaryPositionEmbedding3D(self.head_dim, rope_scale, rope_base)
         self.context_projection = nn.Linear(self.embed_dim, self.embed_dim)
         self.ffn_norm = nn.LayerNorm(self.embed_dim)
         self.ffn = nn.Sequential(nn.Linear(self.embed_dim, 384), nn.GELU(), nn.Linear(384, self.embed_dim))
@@ -54,21 +53,10 @@ class GeoAwareRelationAttention(nn.Module):
         )
         key, value = scene_kv.permute(2, 0, 3, 1, 4).unbind(0)
 
-        with torch.autocast(device_type=hand_landmarks_base.device.type, enabled=False):
-            relative_xyz_base = scene_points_base.float()[:, None] - hand_landmarks_base.float()[:, :, None]
-            relative_distance = torch.linalg.vector_norm(relative_xyz_base, dim=-1, keepdim=True)
-            geometry_input = torch.cat(
-                (
-                    relative_xyz_base / self.relative_position_scale,
-                    relative_distance / self.relative_position_scale,
-                ),
-                dim=-1,
-            )
-            geometry_bias = self.geometry_bias(geometry_input)
-        geometry_bias = geometry_bias.permute(0, 3, 1, 2).to(
-            dtype=query.dtype, memory_format=torch.contiguous_format,
-        )
-        scene_context = F.scaled_dot_product_attention(query, key, value, attn_mask=geometry_bias)
+        origin = scene_points_base.float().mean(dim=1, keepdim=True)
+        query = self.rope.apply_rotary(query, *self.rope(hand_landmarks_base, origin=origin))
+        key = self.rope.apply_rotary(key, *self.rope(scene_points_base, origin=origin))
+        scene_context = F.scaled_dot_product_attention(query, key, value)
         scene_context = scene_context.transpose(1, 2).flatten(2)
         hand_tokens = hand_tokens + self.context_projection(scene_context)
         return self.norm(hand_tokens + self.ffn(self.ffn_norm(hand_tokens)))

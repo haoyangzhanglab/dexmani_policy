@@ -19,6 +19,8 @@ from .tactile import FingerTactileEncoder, TactileFusion
 class HandObjectInteractionEncoder(nn.Module):
     """Encode six wrist-first hand landmarks against RGB-aligned 3D scene memory."""
 
+    out_dim = GeoAwareRelationAttention.embed_dim
+
     def __init__(
         self,
         pc_dim: int = 3,
@@ -26,7 +28,7 @@ class HandObjectInteractionEncoder(nn.Module):
         patch_config: dict | None = None,
         spatial_config: dict | None = None,
         fps_random_config: dict | None = None,
-        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dinov3",
+        rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
         rgb_backbone_config: dict | None = None,
         rgb_patch_sampling: Literal["center", "group_mean"] = "center",
     ) -> None:
@@ -52,12 +54,16 @@ class HandObjectInteractionEncoder(nn.Module):
         )
         scene_channels = self.patch_encoder.out_dim
         self.rgb_fusion = RGBPatchFusion(self.rgb_encoder.out_dim, scene_channels)
-        self.spatial_encoder = SpatialContextEncoder(channels=2 * scene_channels, **(spatial_config or {}))
-        self.scene_projection = nn.Linear(self.spatial_encoder.out_dim, scene_channels)
+        self.spatial_encoder = SpatialContextEncoder(
+            channels=self.rgb_fusion.out_dim, **(spatial_config or {}),
+        )
         self.hand_encoder = HandKinematicEncoder()
         self.tactile_encoder = FingerTactileEncoder()
         self.tactile_fusion = TactileFusion()
-        self.geometric_relation = GeoAwareRelationAttention()
+        self.geometric_relation = GeoAwareRelationAttention(
+            rope_scale=self.spatial_encoder.effective_config["rope_scale"],
+            rope_base=self.spatial_encoder.effective_config["rope_base"],
+        )
 
     @property
     def effective_config(self) -> dict:
@@ -99,7 +105,7 @@ class HandObjectInteractionEncoder(nn.Module):
         scene_points_base = patches["xyz"]
         scene_tokens = self.rgb_fusion(patches["tokens"], image_grid, projection)
         scene_tokens = self.spatial_encoder(scene_tokens, scene_points_base)
-        return self.scene_projection(scene_tokens), scene_points_base, projection.valid
+        return scene_tokens, scene_points_base, projection.valid
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Return six wrist-first interaction tokens [B, 6, 192]."""
