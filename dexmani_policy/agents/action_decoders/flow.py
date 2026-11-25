@@ -93,15 +93,21 @@ class RectifiedFlow(nn.Module):
         *,
         log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        xt, t, target_v = self._sample_training_pair(actions)
+        pred_v = self.model(x=xt, timestep=t, context=cond)
+        loss = F.mse_loss(pred_v.float(), target_v.float())
+        return loss, {"loss": loss.detach()} if log_metrics else {}
+
+    def _sample_training_pair(
+        self, actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = actions.shape[0]
         noise = torch.randn_like(actions)
         t = shift_time_to_noise(torch.rand(batch_size, device=actions.device), self.time_shift_alpha)
         t_view = t.view(batch_size, *([1] * (actions.ndim - 1)))
         xt = interpolate_flow(noise, actions, t_view)
         target_v = actions - noise
-        pred_v = self.model(x=xt, timestep=t, context=cond)
-        loss = F.mse_loss(pred_v.float(), target_v.float())
-        return loss, {"loss": loss.detach()} if log_metrics else {}
+        return xt, t, target_v
 
     @torch.no_grad()
     def predict_action(

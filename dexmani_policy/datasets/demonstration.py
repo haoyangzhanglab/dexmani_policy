@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int
 from dexmani_policy.common.image_util import preprocess_rgb_train, validate_rgb_preprocessing
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.datasets.episode_store import EpisodeStore
@@ -35,12 +35,18 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: Callable | None = None,
         pc_dim: int | None = None,
+        future_obs_steps: int | None = None,
     ) -> None:
         super().__init__()
 
         if "rgb" in sensor_modalities:
             validate_rgb_preprocessing(rgb_preprocess_size, rgb_random_crop_size, rgb_color_aug)
 
+        self.future_obs_steps = future_obs_steps
+        if future_obs_steps is not None:
+            positive_int(future_obs_steps, "future_obs_steps")
+            if rgb_random_crop_size is not None or rgb_color_aug is not None:
+                raise ValueError("Future observations require deterministic RGB preprocessing")
         self.action_key = action_key
         if pc_dim is not None and (type(pc_dim) is not int or pc_dim not in (3, 6)):
             raise ValueError("pc_dim must be 3 (XYZ), 6 (XYZRGB), or None (all stored channels)")
@@ -134,7 +140,22 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         return [self._prepare_sample(sample) for sample in data]
 
     def _samples_to_data(self, indices, samples):
-        return map(self.sample_to_data, samples)
+        data = [self.sample_to_data(sample) for sample in samples]
+        if self.future_obs_steps is not None:
+            current = self.sampler.source_rows(indices, self.obs_horizon - 1)
+            ends = self.sampler.indices[indices, 2]
+            target = current + self.future_obs_steps
+            valid = target < ends
+            rows = np.minimum(target, ends - 1)
+            fields = self.consumed_fields
+            future = {
+                key: self.episode_store.read_rows_by_chunk(key, rows, columns=fields[key])
+                for key in self.sensor_modalities
+            }
+            for i, item in enumerate(data):
+                item["future_obs"] = {key: values[i] for key, values in future.items()}
+                item["future_obs_valid"] = bool(valid[i])
+        return data
 
     def _prepare_sample(self, data):
         # Each sample has a separate writable row range for in-place augmentation.
@@ -143,17 +164,20 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             for augmentor in augmentors:
                 if np.random.random() <= augmentor.prob:
                     augmentor.augment(values)
-        if "rgb" in data["obs"]:
-            rgb = data["obs"]["rgb"]
+        for name in ("obs", "future_obs"):
+            if name not in data or "rgb" not in data[name]:
+                continue
+            rgb = data[name]["rgb"]
+            if name == "future_obs":
+                rgb = rgb[None]  # Reuse the window preprocessing for one frame.
             if self.rgb_preprocess_size is not None:
-                data["obs"]["rgb"] = preprocess_rgb_train(
-                    rgb,
-                    resize_hw=self.rgb_preprocess_size,
-                    random_crop_hw=self.rgb_random_crop_size,
-                    color_augmentation=self.rgb_color_aug,
+                rgb = preprocess_rgb_train(
+                    rgb, resize_hw=self.rgb_preprocess_size,
+                    random_crop_hw=self.rgb_random_crop_size, color_augmentation=self.rgb_color_aug,
                 )
             else:
-                data["obs"]["rgb"] = np.ascontiguousarray(rgb.transpose(0, 3, 1, 2))
+                rgb = np.ascontiguousarray(rgb.transpose(0, 3, 1, 2))
+            data[name]["rgb"] = rgb[0] if name == "future_obs" else rgb
 
         return dict_apply(data, torch.as_tensor)
 

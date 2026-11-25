@@ -214,20 +214,20 @@ class DiTX(nn.Module):
     def prepare_context_kv(self, context):
         if self.training:
             return None
-        scene, state = self._encode_condition(context)
-        return state, tuple(block.cross_attn.prepare_kv(scene) for block in self.ditx_blocks)
+        memory, state = self._encode_condition(context)
+        return state, tuple(block.cross_attn.prepare_kv(memory) for block in self.ditx_blocks)
 
-    def forward(
+    def _forward_hidden(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
     ) -> torch.Tensor:
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
         if context_kv is None:
-            scene, state = self._encode_condition(context)
+            memory, state = self._encode_condition(context)
             layer_kv = None
         else:
             state, layer_kv = context_kv
-            scene = None
+            memory = None
         if modulations is None:
             time = self.timestep_embedder(batch_timesteps(timestep, x, dtype=torch.float32))
             modulations = self.adaln_modulation(time if state is None else time + state)
@@ -239,16 +239,42 @@ class DiTX(nn.Module):
             x = self.action_io.encode(x)
         for index, (block, modulation) in enumerate(zip(self.ditx_blocks, modulations.unbind(1))):
             x = block(
-                x, modulation, scene,
+                x, modulation, memory,
                 context_kv=None if layer_kv is None else layer_kv[index],
             )
+        return x  # [B, horizon, hidden_dim]
+
+    def forward(
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
+    ) -> torch.Tensor:
+        x = self._forward_hidden(x, timestep, context, context_kv=context_kv, modulations=modulations)
         if self.action_io is None:
             return self.final_layer(x)
         return self.action_io.decode_velocity(x)
 
 
+class FutureInteractionHead(nn.Module):
+    def __init__(self, hidden_dim: int, latent_dim: int):
+        super().__init__()
+        self.action_projection = nn.Linear(hidden_dim, latent_dim)
+        self.queries = nn.Parameter(torch.empty(1, 6, latent_dim))
+        self.attention = CrossAttention(latent_dim, num_heads=4)
+        self.norm = nn.LayerNorm(latent_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(latent_dim, 2 * latent_dim), nn.GELU(),
+            nn.Linear(2 * latent_dim, latent_dim),
+        )
+        self.apply(initialize_linear)
+        nn.init.normal_(self.queries, std=WEIGHT_INIT_STD)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        memory = self.action_projection(hidden)  # [B, 16, 192]
+        queries = self.queries.expand(hidden.shape[0], -1, -1)  # [B, 6, 192], wrist first
+        return self.mlp(self.norm(self.attention(queries, memory)))
+
+
 class InteractionDiTX(DiTX):
-    """Read spatial patches with action queries modulated by joint and hand-object state."""
+    """DAI-Flow action expert with unified scene/interaction memory."""
 
     def __init__(
         self, *, n_obs_steps: int, obs_token_dim: int, num_scene_tokens: int,
@@ -257,20 +283,37 @@ class InteractionDiTX(DiTX):
         super().__init__(
             n_obs_steps=n_obs_steps, obs_token_dim=obs_token_dim, hidden_dim=hidden_dim, **kwargs,
         )
-        self.n_obs_steps = n_obs_steps
-        num_state_tokens = 1 + 6  # Joint state, wrist, then five fingers.
-        self.frame_token_counts = (num_scene_tokens, num_state_tokens)
-        self.obs_mlp = nn.Sequential(
-            nn.Linear(n_obs_steps * num_state_tokens * obs_token_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.condition_counts = (n_obs_steps * num_scene_tokens, 1, 6)
+        self.scene_norm = nn.LayerNorm(hidden_dim)
+        self.interaction_projection = nn.Linear(obs_token_dim, hidden_dim)
+        self.interaction_norm = nn.LayerNorm(hidden_dim)
+        self.role_embeddings = nn.Parameter(torch.empty(1, 6, hidden_dim))
+        self.state_mlp = nn.Sequential(
+            nn.Linear(obs_token_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),
         )
-        self.obs_mlp.apply(initialize_linear)
+        self.interaction_projection.apply(initialize_linear)
+        self.state_mlp.apply(initialize_linear)
+        nn.init.normal_(self.role_embeddings, std=WEIGHT_INIT_STD)
+        self.future_head = FutureInteractionHead(hidden_dim, obs_token_dim)
 
     def _encode_condition(self, context):
-        frames = context.unflatten(1, (self.n_obs_steps, -1))
-        scene, hand_state = frames.split(self.frame_token_counts, dim=2)
-        return self.embed_context(scene.flatten(1, 2)), self.obs_mlp(hand_state.flatten(1))
+        scene, state, interaction = context.split(self.condition_counts, dim=1)
+        scene = self.scene_norm(self.embed_context(scene))  # [B, 256, 768]
+        interaction = self.interaction_projection(interaction)
+        interaction = self.interaction_norm(interaction + self.role_embeddings.to(interaction.dtype))
+        return torch.cat((scene, interaction), dim=1), self.state_mlp(state[:, 0])
+
+    def forward(
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *,
+        context_kv=None, modulations=None, return_aux: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        hidden = self._forward_hidden(
+            x, timestep, context, context_kv=context_kv, modulations=modulations,
+        )
+        velocity = self.final_layer(hidden)
+        if return_aux:
+            return velocity, self.future_head(hidden)
+        return velocity
 
     def sampling_modulations(self, timesteps, context_kv, chunk_size):
         state, _ = context_kv

@@ -1,42 +1,52 @@
-# InteractionFlow 模型架构
+# DAI-Flow 模型架构
 
-InteractionFlow 用最近两帧观测生成一段绝对关节目标。它先让带触觉的手部 token 查询场景，得到腕部和五指各自的交互表征。生成动作时，关节状态与这些交互表征调制解码器，动作 token 再查询两帧的场景细节。下文的维度和步数均取自默认配方。 [interaction_flow.yaml](../dexmani_policy/configs/interaction_flow.yaml)
+DAI-Flow（Dynamic-aware Interaction Flow for Dexterous Imitation Learning）以模仿学习为主体，将结构化手–物交互 Token 直接送入动作专家，并通过动作隐藏特征预测未来交互 Latent。未来预测仅作为训练监督，不重建观测，也不使用历史交互差分。
 
-## 整体架构
+配置入口为 `interaction_flow`，实现类为 `InteractionFlow`。下文维度取自[默认配方](../dexmani_policy/configs/interaction_flow.yaml)：动作窗口 16、观测窗口 2、执行窗口 8。
 
-```mermaid
-flowchart TD
-    vision["点云、RGB、相机标定"] --> scene["场景编码<br/>每帧 128 个 token"]
-    hand["腕部、指尖、五指触觉"] --> fusion["手部编码与触觉融合"]
-    scene -->|场景 K/V| relation["手部查询场景"]
-    fusion -->|手部 Q| relation
-    relation -->|每帧 6 个交互 token| state["合并两帧状态<br/>MLP"]
-    joints["每帧 1 个关节状态 token"] --> state
-    state --> mod["逐层 adaLN 调制"]
-    time["流时间 t 的嵌入"] --> mod
-    scene -->|两帧场景 K/V| dit["8 层 InteractionDiTX<br/>动作查询场景"]
-    mod --> dit
-    trajectory["当前动作轨迹"] -->|动作 Q| dit
-    dit -->|轨迹流速度| output["5 步 Euler 积分<br/>反归一化为关节目标"]
-```
+## 输入与输出
 
-### 输入与输出
-
-`B` 为批大小，`T=2` 为观测帧数。下表使用策略输入的维度顺序，示教 Zarr 中的 RGB 按 `[H,W,3]` 存储。五指顺序均为拇指、食指、中指、无名指、小指。 [示教数据格式](仿真数据集格式.md)
+`B` 为批大小，`T=2` 为观测帧数，`N` 为每帧点数。下表为 Policy 接收的 Tensor 形状；Dataset 将 Zarr 中的 RGB 从 HWC 转为 CHW，模型内再 resize 到 224 × 224。
 
 | 字段 | 默认形状 | 含义 |
 | --- | --- | --- |
-| `point_cloud` | `[B,T,N,C]` | 基座系场景点云，XYZ 单位为米。默认从 XYZ 或 XYZRGB 中取前三维。 |
-| `rgb` | `[B,T,3,H,W]` | 与点云对应的相机图像，送入 RGB 主干前调整到 224 × 224。 |
-| `camera_intrinsic` | `[B,T,9]` | 展平的 3 × 3 相机内参，将相机坐标投影到图像像素。 |
-| `camera_extrinsic` | `[B,T,12]` | 展平的 3 × 4 外参，将基座坐标变换到 OpenCV 相机坐标。 |
-| `joint_state` | `[B,T,19]` | 实测关节角（弧度），依次为 7 维手臂和 12 维手部。 |
-| `eef_pose` | `[B,T,9]` | 基座系腕部位置（米），以及腕部旋转矩阵前两列组成的 6D 表示。 |
-| `fingertip_xyz` | `[B,T,5,3]` | 五个指尖在基座系中的位置，单位为米。 |
-| `finger_tactile_force` | `[B,T,5,3]` | 每指一个三维汇总力，沿用数据源的触觉坐标系和尺度。 |
-| `action`（训练目标） | `[B,16,19]` | 16 个控制时刻的绝对关节目标，排列与关节状态一致。 |
+| `point_cloud` | `[B,2,N,3]` | 基座系 XYZ，单位为米；默认只读取 XYZ 通道 |
+| `rgb` | `[B,2,3,H,W]` | 与点云相机对应的 `uint8` 图像 |
+| `camera_intrinsic` | `[B,2,9]` | 展平的 3 × 3 内参 |
+| `camera_extrinsic` | `[B,2,12]` | 展平的 3 × 4 外参，基座系转相机系 |
+| `joint_state` | `[B,2,19]` | 实测关节角，7 维手臂与 12 维手部 |
+| `eef_pose` | `[B,2,9]` | 腕部位置和旋转矩阵前两列组成的 6D 旋转表示 |
+| `fingertip_xyz` | `[B,2,5,3]` | 基座系五指指尖位置 |
+| `finger_tactile_force` | `[B,2,5,3]` | 五指汇总力，沿用数据源坐标系和尺度 |
+| `action`（训练） | `[B,16,19]` | 完整专家动作窗口，默认绝对关节目标 |
 
-训练集分别提供 `joint_state` 和 `action` 的逐维归一化范围。几何与相机参数保留物理尺度供投影和空间注意力使用。RGB 由视觉主干的图像处理器归一化。
+五指顺序固定为 Thumb、Index、Middle、Ring、Little。交互 Token 在五指之前增加 Wrist。`joint_state` 和 `action` 使用训练数据拟合的 limits 归一化；几何、相机、触觉字段使用 identity，RGB 由 ImageProcessor 处理。
+
+训练 batch 另含单帧 `future_obs`（每个字段为 `[B,...]`，没有时间维）和布尔 `future_obs_valid: [B]`。`predict_action()` 只接收观测字典，返回 `future_actions: [B,15,19]`，执行器每轮使用前 8 步。
+
+## 信息流
+
+```mermaid
+flowchart TD
+    obs["两帧当前观测"] --> encoder["HandObjectInteractionEncoder"]
+    encoder --> scene["两帧 Scene: 256 tokens"]
+    encoder --> interaction["最新 Interaction: 6 tokens"]
+    scene --> memory["独立投影与归一化后拼接<br/>Unified Context: 262 × 768"]
+    interaction --> memory
+    joints["最新 Joint State"] --> state["StateEncoder + MLP"]
+    state --> adaln["AdaLNModulation"]
+    time["Flow 时间嵌入"] --> adaln
+    noisy["加噪动作: 16 × 19"] --> ditx["8 层 InteractionDiTX"]
+    memory --> ditx
+    adaln --> ditx
+    ditx --> velocity["Action Velocity"]
+    ditx -. "训练时的最终隐藏特征" .-> head["6 Query Future Head"]
+    future["单帧未来观测"] -.-> teacher["EMA Interaction Encoder<br/>no_grad"]
+    teacher -.-> loss["Future Latent Loss"]
+    head -.-> loss
+```
+
+虚线为训练期辅助路径。推理以噪声初始化动作，反复计算 Action Velocity 并做 Euler 积分。
 
 ## 单帧观测编码
 
@@ -60,43 +70,93 @@ flowchart TD
 
 六个手部 token 先做 4 头自注意力，再以手部为查询（Q）、场景 patch 为键和值（K/V）做交叉注意力。腕部、指尖和 patch 中心都以当帧 patch 中心的均值为原点。3D RoPE 按各手部位置旋转 Q，按各 patch 位置旋转 K，让注意力利用手部与场景的相对位置。残差前馈网络和归一化输出 `[B,6,192]` 的交互 token。 [手物交互编码器](../dexmani_policy/agents/obs_encoder/interaction/hand_object_interaction.py)
 
-## 两帧条件与动作解码
+## 条件与动作专家
 
-关节状态由独立 MLP 编为 1 个 192 维 token。每帧按「128 个场景、1 个关节状态、腕部和五指的 6 个交互 token」排列，两帧从旧到新组成 `[B,270,192]`。解码器按用途取出两组条件。
+六个交互 Token 按 Wrist、Thumb、Index、Middle、Ring、Little 排列。输入点云、RGB、相机标定、腕部姿态、指尖位置和触觉的字段与坐标约定见[示教数据格式](仿真数据集格式.md)。
 
-| 条件 | 两帧合并后的形状 | 在 DiTX 中的作用 |
+| Packed Condition 内容 | 默认形状 | 用途 |
 | --- | --- | --- |
-| 场景 | `[B,256,192] → [B,256,768]` | 投影后加上对应的帧嵌入，各层从中计算交叉注意力的 K/V。 |
-| 关节状态与手物交互 | `[B,2,7,192] → [B,2688] → [B,768]` | 按帧和手部顺序展开，MLP 将两帧压缩为一个状态向量，供各层调制使用。 |
+| 两帧 Scene，旧帧在前 | `[B,256,192]` | 独立 Linear 投影，加 Frame Embedding，再 LayerNorm |
+| 最新 Joint State | `[B,1,192]` | 独立 MLP 映射为 `[B,768]` |
+| 最新 Interaction | `[B,6,192]` | 独立 Linear 投影，加六个 Role Embeddings，再 LayerNorm |
 
-当前轨迹的每个 19 维动作投影为一个 768 维 token，加上动作窗口内的位置嵌入。8 个 DiTX 块依次用 **自注意力** 关联 16 个动作时刻，用 **交叉注意力** 让动作向两帧场景查询信息，再用 **前馈网络** 更新每个动作 token。注意力使用 8 个头，前馈隐藏宽度为模型宽度的 4 倍。
+编码器按帧批量执行；打包时保留两帧 Scene，只取最新一帧的 Interaction 与 Joint State，不引入时间差分。Packed Condition 按表格顺序排列，为 `[B,263,192]`。Scene 和 Interaction 拼成唯一的 `[B,262,768]` Context Memory；Joint State 与 Flow 时间嵌入相加，进入原有 AdaLNModulation。
 
-流时间先编码为 128 维正弦特征，再映射到 768 维。与状态条件相加后，一次投影为每层的三个子层分别生成平移、缩放和残差门控向量。输出头将动作 token 映射回 `[B,16,19]`，预测归一化动作轨迹沿流时间变化的速度。 [策略组装](../dexmani_policy/agents/policies/interaction_flow.py) · [InteractionDiTX](../dexmani_policy/agents/action_decoders/backbones/ditx.py)
+动作专家保持 8 层、768 维、8 heads、MLP ratio 4。每层依次执行动作自注意力、唯一的 Context Cross-Attention 和 MLP，均由 AdaLN 调制。16 个时间动作 Token 的输入输出仍为 `[B,16,19]`。
 
-## Rectified Flow 训练与闭环推理
+## 训练期 Future Interaction Latent
+
+### 预测头与 Teacher
+
+最后一层动作隐藏特征 `[B,16,768]` 投影到 192 维。六个可学习 Query 通过一次 4-head Cross-Attention 读取动作特征，再经 LayerNorm 和 `192→384→192` MLP 输出 `[B,6,192]`。Query 身份顺序与 Interaction Encoder 相同。
+
+目标来自现有 EMA Policy 的 Interaction Encoder，在 `torch.no_grad()` 下编码单帧未来观测。当前与未来观测使用相同 LinearNormalizer 和确定性 RGB 预处理。Trainer 的 EMA 更新保持原样，仅通过 `training_microbatches()` 传入 Teacher Encoder，不额外编译 EMA Action Backbone。
+
+### 时间对齐与有效性
+
+Dataset 先通过 `SequenceSampler.source_rows()` 找到最新观测的真实 Zarr 行号 `r`，再计算 `r + future_obs_steps`；默认 `future_obs_steps=${n_action_steps}=8`。目标达到或超过 exclusive Episode End 时，读取本 Episode 末行并置 `future_obs_valid=False`。样本仍参与 FM 训练，不将 Padding 后的未来帧当成有效监督。
+
+| 窗口索引 | 0 | 1–8 | 9 | 10–15 |
+| --- | --- | --- | --- | --- |
+| 时刻 | t−1 | t 至 t+7 | t+8 | t+9 至 t+14 |
+| 用途 | 历史观测 | 执行 8 步动作 | Future Target | 剩余预测动作 |
 
 ### 训练目标
 
-令 $a$ 为归一化后的完整示教动作窗口，$c$ 为两帧观测条件。对每个窗口采样同形状的高斯噪声 $\epsilon\sim\mathcal N(0,I)$，窗口内各控制时刻共用一个流时间 $t$。默认 `time_shift_alpha=1`，$t$ 在 $[0,1)$ 上均匀采样。模型学习从噪声指向示教轨迹的速度，损失覆盖全部 16 个时刻和 19 个关节。
+`RectifiedFlow._sample_training_pair()` 供普通 FM 和辅助训练共用，保持高斯噪声采样与 Flow 时间采样。默认 `time_shift_alpha=1`，每个样本的时间在 `[0,1)` 上均匀采样，16 个动作位置共用该时间。FM Loss 覆盖整个动作窗口：
 
 $$
-x_t=(1-t)\epsilon+t a,\qquad
-\mathcal L=\operatorname{MSE}\bigl(v_\theta(x_t,t,c),\;a-\epsilon\bigr).
+x_\tau=(1-\tau)\epsilon+\tau a^*,\qquad
+\mathcal L_{FM}=\operatorname{MSE}(v_\theta,a^*-\epsilon).
 $$
 
-### 五步 Euler 采样
+Future Loss 在每个 Token 的特征维做无参数 LayerNorm，再对 Token 和特征维取 L1 均值，得到每个样本的误差 $\ell_b$。Teacher 停止梯度，预测路径保持梯度：
 
-从 $x_0\sim\mathcal N(0,I)$ 出发，同一对观测编码一次，五次速度预测共用场景 K/V。在 $t_i=i/5$（$i=0,\ldots,4$）处依次更新 $x_{t_{i+1}}=x_{t_i}+v_\theta(x_{t_i},t_i,c)/5$。将 $x_1$ 反归一化，即得到按控制时刻排列的绝对关节目标。 [Rectified Flow](../dexmani_policy/agents/action_decoders/flow.py)
+$$
+\mathcal L_{future}=\frac{\sum_b m_b\tau_b^2\ell_b}{\max(\sum_b m_b\tau_b^2,1)},\qquad
+\mathcal L=\mathcal L_{FM}+0.1\mathcal L_{future}.
+$$
 
-### 动作对齐
+求和范围为当前 microbatch；通用 Trainer 继续按样本数平均梯度累积组，默认 `gradient_accumulation_steps=1`。FM 和 Future Loss 均用 FP32 计算。Future Loss 的梯度经过预测头、动作专家回到当前 Interaction Encoder，Teacher 不产生梯度。全无效目标的 Future Loss 为零。日志记录 `loss`、`fm_loss`、`future_loss`，其中后者包含 mask 和时间权重，尚未乘以 0.1。
 
-设最近一次观测在控制时刻 $k$，另一帧在 $k-1$。16 个输出位置中，第 0 个对应过去，从索引 1 起的 15 个构成 `future_actions`。默认执行其中前 8 个目标，随后用新观测重新规划。 [动作窗口切片](../dexmani_policy/agents/policies/base.py)
+## 推理
 
-| 窗口索引 | 0 | 1 至 8 | 9 至 15 |
-| --- | --- | --- | --- |
-| 控制时刻 | $k-1$ | $k$ 至 $k+7$ | $k+8$ 至 $k+14$ |
-| 本轮用途 | 对齐较早的观测 | 依次执行 8 个目标 | 下一轮观测到达后重新预测 |
+`InteractionDiTX.forward(..., return_aux=False)` 只返回动作速度；显式传入 `return_aux=True` 时返回 `(velocity, future_latent)`。该辅助接口由训练损失调用，开关不依赖模块的 train/eval 状态。推理不读取未来观测、不调用 Teacher，也不预测未来 Latent。
 
-## 复现入口
+标准推理在 eval 模式下运行：观测编码一次，每层 Context K/V 缓存一次。5 次 Euler 迭代复用缓存及预计算的 AdaLN 调制。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
-准备含表中字段的示教数据并下载默认的 DINOv2-small 权重后，在仓库根目录运行 `bash scripts/training/train.sh interaction_flow task_name=pick_apple_messy`。 [默认配方](../dexmani_policy/configs/interaction_flow.yaml) · [权重下载](../data/README.md#外部模型) · [仿真评测](仿真评测机制.md)
+## 运行与验证
+
+准备上述字段的示教数据及 [DINOv2-small 权重](../data/README.md#外部模型)。在 `policy` 环境、仓库根目录运行：
+
+```bash
+RUN=experiments/train/interaction_flow/pick_apple_messy/run01
+bash scripts/training/train.sh interaction_flow task_name=pick_apple_messy hydra.run.dir="$RUN"
+```
+
+每个新实验使用新的输出目录。默认权重目录为 `data/pretrained/dinov2-small`，可通过 `initialization.rgb` 指定其他位置。续训和评测沿用统一入口：
+
+```bash
+python -m dexmani_policy.training.resume --run "$RUN"
+bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episodes 100
+```
+
+[默认配方](../dexmani_policy/configs/interaction_flow.yaml) 中的相关设置：
+
+| 配置 | 默认值 | 作用 |
+| --- | --- | --- |
+| `dataset.future_obs_steps` | `${n_action_steps}`，即 8 | 当前观测到未来目标的控制步数 |
+| `agent.future_loss_weight` | `0.1` | Future Loss 系数 |
+| `training.use_ema` | `true` | 提供未来交互 Teacher，训练必须启用 |
+| `training.use_compile` | `true` | 编译 Student Action Backbone |
+| `agent.num_inference_steps` | `5` | Euler 积分次数 |
+
+默认标定数据路径在 Dataset 中保留 RGB 分辨率，由 Encoder 内的 ImageProcessor 做 resize 和归一化。启用未来观测采样时，Dataset 不接受随机 RGB 裁剪或颜色增强；当前和未来目标均使用确定性预处理。
+
+相关实现：[Policy 与损失](../dexmani_policy/agents/policies/interaction_flow.py)、[DiTX 与 Future Head](../dexmani_policy/agents/action_decoders/backbones/ditx.py)、[Flow 采样](../dexmani_policy/agents/action_decoders/flow.py)、[Dataset](../dexmani_policy/datasets/demonstration.py)。
+
+```bash
+python -m pytest dexmani_policy/test_tools/test_regression.py -q
+```
+
+回归测试覆盖形状和 Token 顺序、未来目标对齐与屏蔽、梯度路径、EMA 路由、缓存等价性、推理跳过 Future Head，以及训练保存和恢复。单元测试不衡量机器人任务成功率。

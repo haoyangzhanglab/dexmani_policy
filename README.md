@@ -44,14 +44,16 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `ode` | 从上一条实际应用的关节目标积分生成轨迹 |
 | `r3d` | 用预训练三维表征生成动作 |
 | `maniflow` | 结合 Flow Matching 与一致性学习 |
-| `interaction_flow` | 融合五指触觉与场景几何，用 Rectified Flow 生成关节轨迹。 [InteractionFlow 模型架构](docs/InteractionFlow模型架构.md) |
+| `interaction_flow` | DAI-Flow：结构化手物交互驱动 Rectified Flow，训练时由 EMA 未来交互 Latent 提供辅助监督。 [DAI-Flow 模型架构](docs/InteractionFlow模型架构.md) |
 | `sat` | 用 RGB、点云和关节状态观测生成关节轨迹 |
 | `dqrise` / `dexlatent` | 用 RGB、点云和关节状态观测生成手姿码本索引或连续手部潜变量 |
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |
 | `adaptac` | 用未来接触力引导动作生成 |
 
+DAI-Flow 的观测字段、未来目标对齐及运行命令见[方法说明](docs/InteractionFlow模型架构.md#运行与验证)。其训练需要启用 EMA；未来观测由 Dataset 从原示教中读取，不需要额外生成标签。
+
 ## 文档
 
 - 了解项目和数据　[项目架构](docs/项目架构.md) · [示教数据格式](docs/仿真数据集格式.md)
-- 理解策略　[InteractionFlow 模型架构](docs/InteractionFlow模型架构.md) · [触觉与交互建模](docs/触觉与交互建模.md) · [手部动作表示](docs/手部动作表示.md)
+- 理解策略　[DAI-Flow 模型架构](docs/InteractionFlow模型架构.md) · [触觉与交互建模](docs/触觉与交互建模.md) · [手部动作表示](docs/手部动作表示.md)
 - 运行实验　[预训练权重](data/README.md) · [观测预训练](docs/观测预训练.md) · [仿真评测与选模](docs/仿真评测机制.md) · [SSH 远程训练](docs/SSH服务器训练部署.md)
