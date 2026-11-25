@@ -1600,15 +1600,12 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
     pretrained = save_tiny_hf_rgb(source, "dino")
-    path = make_demo()
+    path = make_demo(auxiliary=False)
     data = zarr.open_group(str(path), mode="r+")["data"]
     n_frames = len(data["action"])
     data["rgb"] = np.full((n_frames, 8, 8, 3), 128, dtype=np.uint8)
     data["camera_intrinsic"] = np.tile(np.eye(3, dtype=np.float32).ravel(), (n_frames, 1))
     data["camera_extrinsic"] = np.tile(np.eye(4, dtype=np.float32)[:3].ravel(), (n_frames, 1))
-    hand_obs = make_hand_scene_observation()
-    for key in ("eef_pose", "fingertip_xyz", "finger_tactile_force"):
-        data[key] = np.repeat(hand_obs[key][:1].numpy(), n_frames, axis=0)
     cfg = load_config("sat", [
         f"zarr_path='{path}'", "task_name=test", f"workspace.output_dir='{directory}'",
         "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
@@ -1616,7 +1613,7 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         "horizon=4", "n_action_steps=3", f"initialization.rgb='{source}'",
         f"agent.backbone_type={backbone_type}", "agent.rgb_backbone_config.tune_mode=full",
         "agent.rgb_backbone_config.image_size=[8,8]", "agent.num_inference_steps=2",
-        "agent.patch_config.num_patches=4", "agent.patch_config.group_size=4",
+        "agent.pc_encoder_config.num_patches=4", "agent.pc_encoder_config.group_size=4",
         "agent.n_layers=1", "agent.hidden_dim=16", "agent.n_head=2",
     ])
 
@@ -1625,6 +1622,8 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
                      side_effect=ViTEncoder.initialize_weights) as initialize_rgb,
         closing(build_trainer(cfg)) as fresh,
     ):
+        assert isinstance(fresh.model.obs_encoder, rgb_point.RGBPointObservationEncoder)
+        assert "joint_state" in fresh.model.normalizer.fields
         initialize_rgb.assert_called_once_with(fresh.model.obs_encoder.rgb_encoder, str(source))
         for model in (fresh.model, fresh.ema_model):
             torch.testing.assert_close(model.obs_encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
@@ -1634,7 +1633,7 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         capture_context = Mock(return_value=None)
         with fresh.model.action_decoder.model.context_embedder.register_forward_pre_hook(capture_context):
             fresh.train(max_updates=1)
-        assert capture_context.call_args.args[1][0].shape == (2, 12, 192)
+        assert capture_context.call_args.args[1][0].shape == (2, 10, 192)
 
         def forbidden(*args, **kwargs):
             pytest.fail("Checkpoint restoration must use the saved RGB architecture")
@@ -1647,16 +1646,17 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
             torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
         with closing(load_policy(latest, weights="raw", device="cpu")) as runtime:
             torch.testing.assert_close(runtime.agent.state_dict(), saved.model_state)
+            assert runtime.info.observation_fields == tuple(cfg.dataset.sensor_modalities)
             obs = {key: data[key][:cfg.n_obs_steps] for key in cfg.dataset.sensor_modalities}
             with runtime.agent.action_decoder.model.context_embedder.register_forward_pre_hook(capture_context):
                 actions = runtime.predict(obs)
-            assert capture_context.call_args.args[1][0].shape == (1, 12, 192)
+            assert capture_context.call_args.args[1][0].shape == (1, 10, 192)
             assert actions.shape == (3, 19) and np.isfinite(actions).all()
             batched = prepare_observations(
                 obs, normalization_dims=runtime.agent.normalization_dims, n_obs_steps=cfg.n_obs_steps,
                 rgb_preprocessing=runtime.info.rgb_preprocessing, device="cpu",
             )
-            with pytest.raises(RuntimeError, match="unflatten"):
+            with pytest.raises(ValueError, match="2 observation frames, got 1"):
                 runtime.agent.predict_action({key: tensor.transpose(0, 1) for key, tensor in batched.items()})
         warm_cfg = copy.deepcopy(cfg)
         warm_cfg.initialization.policy = str(latest)
@@ -1777,7 +1777,7 @@ def test_method_owned_warm_checks():
 
 @pytest.mark.parametrize("method,fields", [
     ("dp", {"rgb", "finger_tactile_force", "taxel_tactile_force"}),
-    ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz"}),
+    ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dqrise", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dexlatent", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("adaptac", {"point_cloud"}),

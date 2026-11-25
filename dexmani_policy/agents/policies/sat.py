@@ -5,18 +5,16 @@ from typing import Literal
 
 import torch
 
-from dexmani_policy.agents.action_decoders.backbones.sat_action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
+from dexmani_policy.agents.action_decoders.backbones.sat_action_io import SATActionIO
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.obs_encoder.interaction import HandObjectInteractionEncoder
+from dexmani_policy.agents.obs_encoder.rgb_point import RGBPointObservationEncoder
 from dexmani_policy.agents.policies.base import Policy
 
 
 class SAT(Policy):
-    required_identity_fields = frozenset({
-        "point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz",
-    })
+    required_identity_fields = frozenset({"point_cloud", "camera_intrinsic", "camera_extrinsic"})
     supports_rtc = True
     supported_action_keys = ("action",)
 
@@ -27,13 +25,13 @@ class SAT(Policy):
         n_action_steps: int = 8,
         action_dim: int = 19,
         pc_dim: int = 3,
+        state_dim: int = 19,
         num_points: int = 1024,
-        patch_config: dict | None = None,
-        spatial_config: dict | None = None,
+        pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         rgb_backbone_config: dict | None = None,
         rgb_backbone_name: Literal["dino", "dinov3", "siglip"] = "dino",
-        rgb_patch_sampling: Literal["center", "group_mean"] = "center",
+        rgb_semantic_sampling: Literal["center", "group_mean"] = "center",
         n_layers: int = 8,
         hidden_dim: int = 256,
         n_head: int = 8,
@@ -51,15 +49,16 @@ class SAT(Policy):
         if backbone_type not in {"ditx", "dit"}:
             raise ValueError("SAT backbone_type must be 'ditx' or 'dit'")
 
-        obs_encoder = HandObjectInteractionEncoder(
+        obs_encoder = RGBPointObservationEncoder(
             pc_dim=pc_dim,
+            state_dim=state_dim,
             num_points=num_points,
-            patch_config=patch_config,
-            spatial_config=spatial_config,
+            n_obs_steps=n_obs_steps,
+            pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
             rgb_backbone_config=rgb_backbone_config,
             rgb_backbone_name=rgb_backbone_name,
-            rgb_patch_sampling=rgb_patch_sampling,
+            rgb_semantic_sampling=rgb_semantic_sampling,
         )
 
         backbone_class = DiT if backbone_type == "dit" else partial(DiTX, horizon=horizon, action_dim=action_dim)
@@ -93,6 +92,7 @@ class SAT(Policy):
         )
 
     def _encode_obs(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
-        batch_size = obs_dict["point_cloud"].shape[0]
-        tokens = super()._encode_obs(obs_dict)
-        return tokens.unflatten(0, (batch_size, self.n_obs_steps)).flatten(1, 2)
+        obs_steps = obs_dict["point_cloud"].shape[1]
+        if obs_steps != self.n_obs_steps:
+            raise ValueError(f"SAT requires {self.n_obs_steps} observation frames, got {obs_steps}")
+        return super()._encode_obs(obs_dict)

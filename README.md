@@ -46,7 +46,7 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `ode` | 从上一条实际应用的关节目标积分生成轨迹 |
 | `r3d` | 用预训练三维表征生成动作 |
 | `maniflow` | 结合 Flow Matching 与一致性学习 |
-| `sat` | 用每帧六个手物交互 token 生成关节轨迹 |
+| `sat` | 用 RGB、点云和关节状态观测生成关节轨迹 |
 | `dqrise` / `dexlatent` | 用 RGB、点云和关节状态观测生成手姿码本索引或连续手部潜变量 |
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |
 | `adaptac` | 用未来接触力引导动作生成 |
