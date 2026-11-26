@@ -8,7 +8,7 @@
 
 | 模型与来源 | 下载项 | 用途 |
 | --- | --- | --- |
-| [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | `dinov2`（也可用 `sat`、`dqrise`） | InteractionFlow、SAT、DQ-RISE 和 DexLatent 的默认 RGB 主干 |
+| [DINOv2-small](https://huggingface.co/facebook/dinov2-small) | `dinov2`（也可用 `sat`、`dqrise`） | InteractionFlow、FlowMatch、SAT、DQ-RISE 和 DexLatent 的默认 RGB 主干 |
 | [Uni3D](https://huggingface.co/eddie-cui/r3d-weights) | `r3d` | R3D 的点云编码器 |
 | [DexLatent](https://github.com/EmptyBlueBox/DexLatent/blob/502750df34b9fa6a1b56a66481586887ec722f9c/Checkpoints/20260311_225425/checkpoint_epoch_1000.pt) | `dexlatent` | 冻结的 XHand 手部编码器与解码器，同时下载 DINOv2-small |
 | [DINOv3-S](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m) | `dinov3` | 可选 RGB 主干 |

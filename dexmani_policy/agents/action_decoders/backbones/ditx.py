@@ -248,7 +248,7 @@ class DiTX(nn.Module):
                 x, modulation, memory,
                 context_kv=None if layer_kv is None else layer_kv[index],
             )
-        return x  # [B, horizon, hidden_dim]
+        return x
 
     def forward(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,

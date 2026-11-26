@@ -45,6 +45,7 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `r3d` | 用预训练三维表征生成动作 |
 | `maniflow` | 结合 Flow Matching 与一致性学习 |
 | `interaction_flow` | DAI-Flow：结构化手物交互驱动 Rectified Flow，训练时由 EMA 未来交互 Latent 提供辅助监督。 [DAI-Flow 模型架构](docs/InteractionFlow模型架构.md) |
+| `flowmatch` | 原始19维关节空间的 Flow Matching，默认关闭 Factorized 模式；与 SAT、DQ-RISE、DexLatent 共享观测编码。 [动作表示](docs/手部动作表示.md#flowmatch) |
 | `sat` | 用 RGB、点云和关节状态观测生成关节轨迹 |
 | `dqrise` / `dexlatent` | 用 RGB、点云和关节状态观测生成手姿码本索引或连续手部潜变量 |
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |

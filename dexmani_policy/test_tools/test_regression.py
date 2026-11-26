@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, Dataset, default_collate
 
 from dexmani_policy.agents.action_decoders.backbones import ditx, sat_action_io
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
+from dexmani_policy.agents.action_decoders.backbones.factorized_action_io import FactorizedActionIO
 from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import InteractionDiTX
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
@@ -2337,10 +2338,17 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         assert resumed.global_step == 3
 
 
-@pytest.mark.parametrize("backbone_type,tune_mode", [
-    ("ditx", "full"), ("dit", "full"), ("ditx", "freeze"), ("ditx", "lora"),
+@pytest.mark.parametrize("method,options,tune_mode", [
+    ("sat", ["agent.backbone_type=ditx"], "full"),
+    ("sat", ["agent.backbone_type=dit"], "full"),
+    ("sat", ["agent.backbone_type=ditx"], "freeze"),
+    ("sat", ["agent.backbone_type=ditx"], "lora"),
+    ("flowmatch", [], "freeze"),
+    ("flowmatch", ["agent.factorized=true"], "freeze"),
 ])
-def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch, backbone_type, tune_mode):
+def test_rgb_flow_initialization_and_checkpoint_lifecycle(
+    tmp_path, make_demo, monkeypatch, method, options, tune_mode,
+):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
@@ -2351,12 +2359,13 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
     data["rgb"] = np.full((n_frames, 8, 8, 3), 128, dtype=np.uint8)
     data["camera_intrinsic"] = np.tile(np.eye(3, dtype=np.float32).ravel(), (n_frames, 1))
     data["camera_extrinsic"] = np.tile(np.eye(4, dtype=np.float32)[:3].ravel(), (n_frames, 1))
-    cfg = load_config("sat", [
+    cfg = load_config(method, [
         f"zarr_path='{path}'", "task_name=test", f"workspace.output_dir='{directory}'",
         "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
         "dataloader.num_workers=0", "dataloader.batch_size=2",
         "horizon=4", "n_action_steps=3", f"initialization.rgb='{source}'",
-        f"agent.backbone_type={backbone_type}", f"agent.rgb_backbone_config.tune_mode={tune_mode}",
+        *options,
+        f"agent.rgb_backbone_config.tune_mode={tune_mode}",
         "agent.rgb_backbone_config.image_size=[8,8]", "agent.num_inference_steps=2",
         "agent.pc_encoder_config.num_patches=4", "agent.pc_encoder_config.group_size=4",
         "agent.n_layers=1", "agent.hidden_dim=16", "agent.n_head=2",
@@ -2368,6 +2377,12 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         closing(build_trainer(cfg)) as fresh,
     ):
         assert isinstance(fresh.model.obs_encoder, rgb_point.RGBPointObservationEncoder)
+        if method == "flowmatch":
+            backbone = fresh.model.action_decoder.model
+            factorized = cfg.agent.factorized
+            assert isinstance(backbone.action_io, FactorizedActionIO) == factorized
+            assert hasattr(backbone, "input_embedder") == (not factorized)
+            assert hasattr(backbone, "final_layer") == (not factorized)
         assert "joint_state" in fresh.model.normalizer.fields
         initialize_rgb.assert_called_once_with(fresh.model.obs_encoder.rgb_encoder, str(source))
         for model in (fresh.model, fresh.ema_model):
@@ -2392,11 +2407,6 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         monkeypatch.setattr(policy_training.initialization, "resolve_rgb_architecture", forbidden)
         latest = directory / "checkpoints/latest.pt"
         saved = load_checkpoint(latest)
-        resume_cfg = OmegaConf.create(saved.effective_config)
-        resume_cfg.initialization.rgb = None
-        with closing(build_trainer(resume_cfg, checkpoint=saved)) as resumed:
-            torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
-            torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
         with closing(load_policy(latest, weights="raw", device="cpu")) as runtime:
             if tune_mode == "lora":
                 deployed = copy.deepcopy(fresh.model)
@@ -2415,7 +2425,8 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
                 obs, normalization_dims=runtime.agent.normalization_dims, n_obs_steps=cfg.n_obs_steps,
                 rgb_preprocessing=runtime.info.rgb_preprocessing, device="cpu",
             )
-            with pytest.raises(ValueError, match="2 observation frames, got 1"):
+            message = "2 observation frames, got 1" if method == "sat" else r"requires \[B,T\]"
+            with pytest.raises(ValueError, match=message):
                 runtime.agent.predict_action({key: tensor.transpose(0, 1) for key, tensor in batched.items()})
         warm_cfg = copy.deepcopy(cfg)
         warm_cfg.initialization.policy = str(latest)
@@ -2427,6 +2438,12 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
             assert warm.cfg.agent.rgb_backbone_config.architecture == saved_rgb["architecture"]
             torch.testing.assert_close(warm.model.state_dict(), saved.model_state)
             torch.testing.assert_close(warm.ema_model.state_dict(), saved.model_state)
+        with closing(prepare_resume(directory)) as resumed:
+            torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
+            torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
+            assert resumed.global_step == saved.global_step
+            resumed.train(max_updates=1)
+            assert resumed.global_step == saved.global_step + 1
         assert initialize_rgb.call_count == 1
 
 
@@ -2538,6 +2555,7 @@ def test_method_owned_warm_checks():
 @pytest.mark.parametrize("method,fields", [
     ("dp", {"rgb", "finger_tactile_force", "taxel_tactile_force"}),
     ("sat", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
+    ("flowmatch", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dqrise", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("dexlatent", {"point_cloud", "camera_intrinsic", "camera_extrinsic"}),
     ("interaction_flow", {"point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz"}),
@@ -2557,7 +2575,7 @@ def test_observation_identity_constraints(method, fields):
 
 
 @pytest.mark.parametrize("method", [
-    "dp", "dp3", "r3d", "maniflow", "interaction_flow", "sat", "dqrise", "dexlatent",
+    "dp", "dp3", "r3d", "maniflow", "interaction_flow", "sat", "dqrise", "dexlatent", "flowmatch",
     "afro", "cordvip", "adaptac", "ode",
 ])
 def test_recipe_composition(method):
@@ -2566,6 +2584,8 @@ def test_recipe_composition(method):
     assert cfg.agent.horizon == cfg.dataset.horizon == cfg.horizon
     assert cfg.dataset.obs_horizon == cfg.agent.n_obs_steps == cfg.n_obs_steps
     validate_config(cfg)
+    if method == "flowmatch":
+        assert cfg.agent.factorized is False
     if method == "interaction_flow":
         assert cfg.dataset.future_obs_steps == cfg.horizon - (cfg.n_obs_steps - 1) == 15
         assert cfg.n_action_steps == 8
@@ -2639,6 +2659,84 @@ def test_sat_backbones(backbone_class):
     backbone(actions, 0.5, context).square().mean().backward()
     assert torch.isfinite(actions.grad).all()
     assert actions.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("horizon", [1, 4, 16])
+def test_factorized_action_io(horizon):
+    io = FactorizedActionIO(horizon, 16)
+    actions = torch.randn(2, horizon, 19)
+    tokens = io.encode(actions)
+    assert tokens.shape == (2, 2 * horizon, 16)
+    torch.testing.assert_close(tokens[:, :horizon], io.arm_embedder(actions[..., :7]) + io.time_pos_embed)
+    torch.testing.assert_close(tokens[:, horizon:], io.hand_embedder(actions[..., 7:]) + io.time_pos_embed)
+    for part, token_slice in ((slice(0, 7), slice(horizon, None)), (slice(7, None), slice(0, horizon))):
+        changed = actions.clone()
+        changed[..., part] += 1
+        torch.testing.assert_close(io.encode(changed)[:, token_slice], tokens[:, token_slice])
+    velocity = io.decode_velocity(tokens)
+    assert velocity.shape == actions.shape
+    assert torch.count_nonzero(velocity) == 0
+    (velocity - 1).square().mean().backward()
+    for head in (io.arm_head, io.hand_head):
+        assert head.ffn_final.fc2.weight.grad.abs().sum() > 0
+    with torch.no_grad():
+        io.arm_head.ffn_final.fc2.weight.normal_()
+        io.hand_head.ffn_final.fc2.weight.normal_()
+    torch.testing.assert_close(io.decode_velocity(tokens), torch.cat((
+        io.arm_head(tokens[:, :horizon]), io.hand_head(tokens[:, horizon:]),
+    ), dim=-1))
+
+
+@pytest.mark.parametrize("factorized", [False, True])
+@pytest.mark.parametrize("batch,obs_steps,steps", [(1, 1, 1), (2, 2, 5), (2, 3, 5)])
+def test_joint_flow_coupling_and_sampling(factorized, batch, obs_steps, steps):
+    torch.manual_seed(7)
+    model = ditx.DiTX(
+        horizon=4, action_dim=19, n_obs_steps=obs_steps, obs_token_dim=8,
+        hidden_dim=16, n_layers=2, n_head=2, p_drop_attn=0,
+        action_io=FactorizedActionIO(4, 16) if factorized else None,
+    ).eval()
+    heads = (model.action_io.arm_head, model.action_io.hand_head) if factorized else (model.final_layer,)
+    projections = (model.action_io.arm_embedder, model.action_io.hand_embedder) if factorized else (model.input_embedder,)
+    # Open the zero-initialized gates and heads to test actual dependencies.
+    with torch.no_grad():
+        model.adaln_modulation.projection.weight.normal_(std=0.1)
+        for head in heads:
+            head.ffn_final.fc2.weight.normal_(std=0.1)
+    actions = torch.randn(batch, 4, 19, requires_grad=True)
+    context = torch.randn(batch, obs_steps * 3, 8, requires_grad=True)
+    velocity = model(actions, 0.4, context)
+    arm_grad, = torch.autograd.grad(velocity[..., :7].square().mean(), actions, retain_graph=True)
+    hand_grad, = torch.autograd.grad(velocity[..., 7:].square().mean(), actions, retain_graph=True)
+    assert arm_grad[..., 7:].abs().sum() > 0
+    assert hand_grad[..., :7].abs().sum() > 0
+    torch.testing.assert_close(velocity, model(actions, 0.4, context, context_kv=model.prepare_context_kv(context)))
+    decoder = RectifiedFlow(model, num_inference_steps=5, time_shift_alpha=3).eval()
+    torch.manual_seed(17)
+    xt, t, target = decoder.sample_training_pair(actions)
+    expected = F.mse_loss(model(xt, t, context).float(), target.float())
+    torch.manual_seed(17)
+    loss, _ = decoder.compute_loss(context, actions)
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    for projection in projections:
+        assert torch.isfinite(projection.weight.grad).all()
+        assert projection.weight.grad.abs().sum() > 0
+    assert context.grad.abs().sum() > 0
+    with ExitStack() as stack:
+        calls = [stack.enter_context(patch.object(block.cross_attn, "prepare_kv", wraps=block.cross_attn.prepare_kv))
+                 for block in model.ditx_blocks]
+        sample = decoder.predict_action(context, actions.shape, inference_steps=steps,
+                                        generator=torch.Generator().manual_seed(23))
+        assert all(call.call_count == 1 for call in calls)
+    reference = torch.randn(actions.shape, generator=torch.Generator().manual_seed(23))
+    with torch.no_grad():
+        for i in range(steps):
+            reference = reference + model(reference, i / steps, context) / steps
+    torch.testing.assert_close(sample, reference)
+    guided = decoder.predict_action(context, actions.shape, rtc_prefix=actions.detach()[:, 1:3],
+                                    history_offset=1, rtc_guidance_cap=0.2)
+    assert guided.shape == actions.shape and torch.isfinite(guided).all()
 
 
 # Gradient accumulation
