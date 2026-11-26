@@ -66,7 +66,7 @@ from dexmani_policy.training.data import (
     record_prior_data, record_training_data, restore_data_records, use_policy_split,
 )
 from dexmani_policy.training.initialization import build_policy
-from dexmani_policy.training.optimization import clip_gradients
+from dexmani_policy.training.optimization import backward_microbatches, clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.vqvae import train as train_vq
 from dexmani_policy.training.pretrain.obs import common as obs_training
 from dexmani_policy.training.pretrain.obs.afro import AFRO
@@ -297,6 +297,47 @@ def test_ddim_training_grid_bounds_direct_sampling():
     assert decoder.effective_config == {"num_training_steps": 4}
     with pytest.raises(ValueError, match="num_training_steps"):
         decoder.predict_action(torch.zeros(1, 1, 2), (1, 4, 2), inference_steps=5)
+
+
+@pytest.mark.parametrize("prediction_type", ["sample", "epsilon"])
+@pytest.mark.parametrize("clip_range,prefix_value", [(1.0, 1.0), (1.0, 0.25), (0.5, 0.25)])
+def test_ddim_rtc_clipped_reference(monkeypatch, prediction_type, clip_range, prefix_value):
+    class Denoiser(nn.Module):
+        def forward(self, x, timestep, context):
+            clean = (2 if timestep > 0 else 1) * x
+            if prediction_type == "sample":
+                return clean
+            a = decoder.noise_scheduler.alphas_cumprod[timestep]
+            return (x - a.sqrt() * clean) / (1 - a).sqrt()
+
+    decoder = Diffusion(Denoiser(), num_training_steps=100, num_inference_steps=2,
+                        prediction_type=prediction_type, clip_sample=True)
+    decoder.noise_scheduler.register_to_config(clip_sample_range=clip_range)
+    shape = (1, 1, 1)
+    monkeypatch.setattr(torch, "randn", lambda *args, **kwargs: torch.ones(shape))
+    with torch.inference_mode():
+        actual = decoder.predict_action(
+            torch.zeros(shape), shape, rtc_prefix=torch.full(shape, prefix_value), rtc_guidance_cap=0.8,
+        )
+    reference = 1.0
+    soft_weight = 0.5 * math.expm1(0.5) / math.expm1(1)
+    for current, previous in [(50, 0), (0, -50)]:
+        alphas = decoder.noise_scheduler.alphas_cumprod
+        a, a_prev = float(alphas[current]), float(alphas[previous]) if previous >= 0 else 1.0
+        slope = 2 if current > 0 else 1
+        raw_clean = slope * reference
+        clean = max(-clip_range, min(clip_range, raw_clean))
+        # DDIM derives epsilon before clipping x0; the VJP also retains the raw slope.
+        noise = (reference - math.sqrt(a) * raw_clean) / math.sqrt(1 - a)
+        strength = (math.sqrt(a_prev * (1 - a)) - math.sqrt(a * (1 - a_prev))) * min(
+            0.8, 1 / math.sqrt(a * (1 - a)),
+        )
+        reference = (math.sqrt(a_prev) * clean + math.sqrt(1 - a_prev) * noise
+                     + strength * slope * soft_weight * (prefix_value - clean))
+    reference = max(-clip_range, min(clip_range, reference))
+    torch.testing.assert_close(actual, torch.full(shape, reference))
+    if clip_range == prefix_value == 1:
+        assert actual.item() == pytest.approx(0.98640904, abs=1e-6)
 
 
 def test_ddim_rtc_matches_two_step_reference():
@@ -1605,30 +1646,71 @@ class SmallRGBWeights(nn.Linear):
         self.effective_config = {}
 
     def initialize_weights(self, source):
-        if source is not None:
-            self.load_state_dict(torch.load(source, weights_only=True))
+        self.load_state_dict(torch.load(source, weights_only=True))
 
 
 def build_small_rgb(name, config):
     return SmallRGBWeights(), ImageProcessor.from_preset(name, config)
 
 
-def test_dp_rgb_initialization(tmp_path, make_demo, monkeypatch):
+@pytest.mark.parametrize("tune_mode", [None, "freeze", "lora", "full"])
+@pytest.mark.parametrize("has_source", [False, True])
+def test_dp_rgb_initialization(tmp_path, make_demo, monkeypatch, tune_mode, has_source):
     monkeypatch.setattr(dp, "build_rgb_encoder", build_small_rgb)
+    if tune_mode is not None:
+        monkeypatch.setattr(SmallRGBWeights, "tune_mode", tune_mode, raising=False)
     dataset = DemonstrationDataset(make_demo(), sensor_modalities=["joint_state"], horizon=4, obs_horizon=1)
     source = tmp_path / "rgb.pt"
     rgb = SmallRGBWeights()
     torch.save(rgb.state_dict(), source)
     cfg = load_config("dp", [
         "training.device=cpu", "agent.action_dim=19", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
-        f"initialization.rgb={source}", "agent.down_dims=[16,32]",
+        f"initialization.rgb={source if has_source else 'null'}", "agent.down_dims=[16,32]",
     ])
     with patch.object(SmallRGBWeights, "initialize_weights", autospec=True,
                       side_effect=SmallRGBWeights.initialize_weights) as initialize:
+        if not has_source and tune_mode in {"freeze", "lora"}:
+            with pytest.raises(ValueError, match="random backbone.*initialization.rgb.*tune_mode=full"):
+                build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+            initialize.assert_not_called()
+            return
         model = build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
     assert isinstance(model.obs_encoder, dp.DPEncoder)
-    initialize.assert_called_once_with(model.obs_encoder.rgb_encoder, str(source))
-    torch.testing.assert_close(model.obs_encoder.rgb_encoder.state_dict(), rgb.state_dict())
+    if has_source:
+        initialize.assert_called_once_with(model.obs_encoder.rgb_encoder, str(source))
+        torch.testing.assert_close(model.obs_encoder.rgb_encoder.state_dict(), rgb.state_dict())
+    else:
+        initialize.assert_not_called()
+
+
+@pytest.mark.parametrize("kind,tune_mode", [
+    ("resnet", "freeze"), ("resnet", "full"),
+    ("dino", "freeze"), ("dino", "lora"), ("dino", "full"),
+    ("siglip", "freeze"), ("siglip", "lora"), ("siglip", "full"),
+    ("dinov3", "freeze"), ("dinov3", "lora"), ("dinov3", "full"),
+])
+def test_fresh_rgb_without_weights(make_demo, kind, tune_mode):
+    dataset = DemonstrationDataset(make_demo(), sensor_modalities=["joint_state"], horizon=4, obs_horizon=1)
+    cfg = load_config("dp", [
+        "training.device=cpu", "agent.action_dim=19", "horizon=4", "n_obs_steps=1", "n_action_steps=4",
+        "initialization.rgb=null", "agent.down_dims=[16,32]",
+    ])
+    rgb_config = {"tune_mode": tune_mode}
+    if kind in {"dino", "siglip"}:
+        rgb_config.update(architecture=tiny_hf_rgb_config(kind).to_dict(), image_size=[8, 8])
+    elif kind == "dinov3":
+        rgb_config["architecture"] = {"img_size": 32, "embed_dim": 24, "depth": 1, "num_heads": 3}
+    # Exercise the default frozen ViT as well as explicitly frozen ResNet.
+    if kind != "resnet" and tune_mode == "freeze":
+        del rgb_config["tune_mode"]
+    cfg.agent.rgb_backbone_name = kind
+    cfg.agent.rgb_backbone_config = rgb_config
+    if tune_mode in {"freeze", "lora"}:
+        with pytest.raises(ValueError, match="random backbone.*initialization.rgb.*tune_mode=full"):
+            build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+    else:
+        model = build_policy(cfg, dataset, {"action": 19, "joint_state": 19})
+        assert model.obs_encoder.rgb_encoder.tune_mode == "full"
 
 
 def test_non_rgb_training_ignores_rgb_source(tmp_path, small_dp3_config):
@@ -2023,8 +2105,10 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         assert resumed.global_step == 3
 
 
-@pytest.mark.parametrize("backbone_type", ["ditx", "dit"])
-def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch, backbone_type):
+@pytest.mark.parametrize("backbone_type,tune_mode", [
+    ("ditx", "full"), ("dit", "full"), ("ditx", "freeze"), ("ditx", "lora"),
+])
+def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, monkeypatch, backbone_type, tune_mode):
     from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 
     directory, source = tmp_path / "fresh", tmp_path / "rgb"
@@ -2040,7 +2124,7 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
         "dataloader.num_workers=0", "dataloader.batch_size=2",
         "horizon=4", "n_action_steps=3", f"initialization.rgb='{source}'",
-        f"agent.backbone_type={backbone_type}", "agent.rgb_backbone_config.tune_mode=full",
+        f"agent.backbone_type={backbone_type}", f"agent.rgb_backbone_config.tune_mode={tune_mode}",
         "agent.rgb_backbone_config.image_size=[8,8]", "agent.num_inference_steps=2",
         "agent.pc_encoder_config.num_patches=4", "agent.pc_encoder_config.group_size=4",
         "agent.n_layers=1", "agent.hidden_dim=16", "agent.n_head=2",
@@ -2055,7 +2139,13 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         assert "joint_state" in fresh.model.normalizer.fields
         initialize_rgb.assert_called_once_with(fresh.model.obs_encoder.rgb_encoder, str(source))
         for model in (fresh.model, fresh.ema_model):
-            torch.testing.assert_close(model.obs_encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
+            backbone = model.obs_encoder.rgb_encoder.backbone
+            if tune_mode == "lora":
+                state = backbone.get_base_model().state_dict()
+                state = {key.replace(".base_layer.", "."): value for key, value in state.items() if ".lora_" not in key}
+            else:
+                state = backbone.state_dict()
+            torch.testing.assert_close(state, pretrained.state_dict())
         prior, = fresh.cfg.prior_data
         assert prior == {"source": None, "artifact": str(source), "budget_verified": False}
         assert fresh.cfg.agent.rgb_backbone_config.architecture.hidden_size == 16
@@ -2070,11 +2160,19 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
         monkeypatch.setattr(policy_training.initialization, "resolve_rgb_architecture", forbidden)
         latest = directory / "checkpoints/latest.pt"
         saved = load_checkpoint(latest)
-        with closing(prepare_resume(directory)) as resumed:
+        resume_cfg = OmegaConf.create(saved.effective_config)
+        resume_cfg.initialization.rgb = None
+        with closing(build_trainer(resume_cfg, checkpoint=saved)) as resumed:
             torch.testing.assert_close(resumed.model.state_dict(), saved.model_state)
             torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state)
         with closing(load_policy(latest, weights="raw", device="cpu")) as runtime:
-            torch.testing.assert_close(runtime.agent.state_dict(), saved.model_state)
+            if tune_mode == "lora":
+                deployed = copy.deepcopy(fresh.model)
+                rgb = deployed.obs_encoder.rgb_encoder
+                rgb.backbone = rgb.backbone.merge_and_unload()
+                torch.testing.assert_close(runtime.agent.state_dict(), deployed.state_dict())
+            else:
+                torch.testing.assert_close(runtime.agent.state_dict(), saved.model_state)
             assert runtime.info.observation_fields == tuple(cfg.dataset.sensor_modalities)
             obs = {key: data[key][:cfg.n_obs_steps] for key in cfg.dataset.sensor_modalities}
             with runtime.agent.action_decoder.model.context_embedder.register_forward_pre_hook(capture_context):
@@ -2089,6 +2187,7 @@ def test_sat_rgb_initialization_and_checkpoint_lifecycle(tmp_path, make_demo, mo
                 runtime.agent.predict_action({key: tensor.transpose(0, 1) for key, tensor in batched.items()})
         warm_cfg = copy.deepcopy(cfg)
         warm_cfg.initialization.policy = str(latest)
+        warm_cfg.initialization.rgb = None
         warm_cfg.workspace.output_dir = str(tmp_path / "warm")
         with closing(build_trainer(warm_cfg)) as warm:
             saved_rgb = saved.effective_config["agent"]["rgb_backbone_config"]
@@ -2461,6 +2560,70 @@ def test_sample_weighted_updates(tmp_path, monkeypatch, make_demo, count, batch_
     if count == 129:
         assert records[0]["train/loss"] == pytest.approx(1 / 129)
         assert float(actual_gradients[0]) == pytest.approx(-2 / 129)
+
+
+@pytest.mark.parametrize("valid", [
+    [True, False, True, True, True],
+    [False, False, True, False, True],
+    [False, False, False, False, False],
+])
+@pytest.mark.parametrize("batch_sizes", [(2, 3), (5,)])
+@pytest.mark.parametrize("log_metrics", [False, True])
+def test_interaction_flow_accumulation_matches_combined(monkeypatch, valid, batch_sizes, log_metrics):
+    from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
+
+    class Backbone(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.velocity = nn.Parameter(torch.tensor(0.6))
+            self.future = nn.Parameter(torch.tensor([0.3, -0.7, 0.8, 1.2]))
+
+        def forward(self, x, timestep, context, return_aux=False):
+            return self.velocity * x, context + self.future
+
+    torch.manual_seed(7)
+    model = InteractionFlow.__new__(InteractionFlow)
+    Policy.__init__(model, nn.Identity(), RectifiedFlow(Backbone()), 1, 1, 1, 1)
+    model.future_loss_weight = 0.1
+    model.normalizer = LinearNormalizer({"action": (1,)})
+    monkeypatch.setattr(model, "_encode_obs", lambda obs: obs["latent"])
+    monkeypatch.setattr(model.action_decoder, "_sample_training_pair", lambda actions: (
+        actions, actions[:, 0, 0], torch.zeros_like(actions),
+    ))
+    teacher = Mock(side_effect=lambda obs: obs["latent"])
+    ema = SimpleNamespace(obs_encoder=SimpleNamespace(interaction_encoder=teacher))
+    dataset = [
+        {"obs": {"latent": torch.randn(2, 4)}, "action": torch.tensor([[time]]),
+         "future_obs": {"latent": torch.randn(2, 4)}, "future_obs_valid": torch.tensor(mask)}
+        for time, mask in zip([0.1, 0.3, 0.5, 0.7, 0.9], valid)
+    ]
+    expected_loss, expected_metrics = model.compute_loss(
+        default_collate(dataset), ema_interaction_encoder=teacher, log_metrics=log_metrics,
+    )
+    parameters = tuple(model.parameters())
+    expected_gradients = torch.autograd.grad(expected_loss, parameters)
+    batches, start = [], 0
+    for size in batch_sizes:
+        batches.append(default_collate(dataset[start:start + size]))
+        start += size
+
+    def forward(item):
+        batch, options = item
+        loss, metrics = model.compute_loss(batch, log_metrics=log_metrics, **options)
+        return loss, metrics, len(batch["action"])
+
+    finite, metrics = backward_microbatches(
+        model.training_microbatches(iter(batches), ema), len(batches), parameters, forward,
+        device="cpu", log_metrics=log_metrics,
+    )
+    assert finite
+    torch.testing.assert_close([p.grad for p in parameters], list(expected_gradients))
+    # Metric aggregation deliberately accumulates in FP64.
+    torch.testing.assert_close(metrics, {key: value.double() for key, value in expected_metrics.items()})
+    assert model.action_decoder.model.velocity.grad.abs() > 0
+    if not any(valid):
+        assert teacher.call_count == 0
+        assert model.action_decoder.model.future.grad.count_nonzero() == 0
 
 
 @pytest.mark.parametrize("force_weight", [0.0, 0.7])

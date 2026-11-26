@@ -38,9 +38,13 @@ def denoised_estimate(output, sample, alpha, sigma, prediction_type):
     return alpha * sample - sigma * output
 
 
-def prefix_correction(denoised, sample, prefix, weights, offset):
+def prefix_correction(denoised, sample, prefix, weights, offset, clip_range=None):
     denoised = denoised[:, offset : offset + prefix.shape[1], : prefix.shape[2]]
-    residual = weights * (prefix - denoised.detach())
+    prediction = denoised.detach()
+    if clip_range is not None:
+        # Match DDIM's residual while retaining the raw prediction's VJP outside the clip range.
+        prediction = prediction.clamp(-clip_range, clip_range)
+    residual = weights * (prefix - prediction)
     # Weight the residual once; the VJP can affect the entire action chunk.
     return torch.autograd.grad(denoised, sample, grad_outputs=residual)[0]
 
@@ -51,6 +55,7 @@ def guided_ddim(
     decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, generator=None
 ):
     scheduler = decoder.noise_scheduler
+    clip_range = scheduler.config.clip_sample_range if scheduler.config.clip_sample else None
     scheduler.set_timesteps(steps)
     alpha_bar = scheduler.alphas_cumprod[scheduler.timesteps]
     timesteps = scheduler.timesteps.to(cond.device)
@@ -78,13 +83,16 @@ def guided_ddim(
             denoised = denoised_estimate(
                 output, sample, alpha[i], sigma[i], scheduler.config.prediction_type
             )
-            correction = prefix_correction(denoised, sample, prefix, weights, offset)
+            correction = prefix_correction(
+                denoised, sample, prefix, weights, offset,
+                clip_range=clip_range,
+            )
 
         sample = scheduler.step(output.detach(), timestep, sample, generator=generator).prev_sample
         sample.add_(guidance[i] * correction)
 
-    if scheduler.config.clip_sample:
-        sample.clamp_(-scheduler.config.clip_sample_range, scheduler.config.clip_sample_range)
+    if clip_range is not None:
+        sample.clamp_(-clip_range, clip_range)
     return sample
 
 

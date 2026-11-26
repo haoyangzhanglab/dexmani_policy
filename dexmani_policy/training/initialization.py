@@ -75,6 +75,12 @@ def build_policy(cfg, dataset, field_dims, *, checkpoint: Checkpoint | None = No
     if checkpoint is None:
         rgb_source = initialization.get("rgb")
         rgb_encoder = getattr(model.obs_encoder, "rgb_encoder", None)
+        if rgb_source is None and getattr(rgb_encoder, "tune_mode", None) in {"freeze", "lora"}:
+            raise ValueError(
+                "Fresh RGB training with tune_mode=freeze or lora would freeze a random backbone; "
+                "set initialization.rgb to pretrained weights or "
+                "agent.rgb_backbone_config.tune_mode=full to train from scratch"
+            )
         if rgb_source is not None and rgb_encoder is not None:
             rgb_encoder.initialize_weights(rgb_source)
             record_prior_data(cfg, dataset, rgb_source, {"source": None})

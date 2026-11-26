@@ -90,7 +90,7 @@ flowchart TD
 
 最后一层动作隐藏特征为 `[B,16,768]`。Future Head 只读取 `hidden[:, action_start_index:]`，其中 `action_start_index=n_obs_steps-1=1`，即未来动作位置 1–15，形状为 `[B,15,768]`，再投影到 192 维。历史位置 0 不进入 Head 的 Readout Memory；DiTX 内仍保留双向 Self-Attention。六个可学习 Query 通过一次 4-head Cross-Attention 读取动作特征，再经 LayerNorm 和 `192→384→192` MLP 输出 `[B,6,192]`。Query 身份顺序与 Interaction Encoder 相同。
 
-目标来自现有 EMA Policy 的 Interaction Encoder，在 `torch.no_grad()` 下仅编码 `future_obs_valid=True` 的单帧未来观测。先按 mask 筛选，再使用当前 Policy 的 LinearNormalizer 归一化，Teacher 输入保持 `[N_valid,...]`，不增加观测历史维度。当前与未来 RGB 使用相同的确定性预处理；预测值和时间权重取相同的有效子集。Trainer 的 EMA 更新保持原样，仅通过 `training_microbatches()` 传入 Teacher Encoder，不额外编译 EMA Action Backbone。
+目标来自现有 EMA Policy 的 Interaction Encoder，在 `torch.no_grad()` 下仅编码 `future_obs_valid=True` 的单帧未来观测。先按 mask 筛选，再使用当前 Policy 的 LinearNormalizer 归一化，Teacher 输入保持 `[N_valid,...]`，不增加观测历史维度。当前与未来 RGB 使用相同的确定性预处理；预测值和时间权重取相同的有效子集。`training_microbatches()` 传入 Teacher Encoder 及辅助损失缩放系数，Trainer 沿用现有 EMA 更新，不额外编译 EMA Action Backbone。
 
 全无效 Batch 跳过 Teacher，Student 仍计算动作速度和 Future Latent。辅助损失通过 `future.float().sum() * 0.0` 保留计算图并返回零，FM 正常训练。推理则完全跳过 Future Head。
 
@@ -121,12 +121,12 @@ $$
 
 实现对非空有效子集的 `τ²ℓ` 直接取均值，等价于除以有效样本数量，保留 `τ²` 的绝对衰减：只有一个有效样本且 `τ=0.2` 时，Future Loss 为 `0.04ℓ`。FM 和 Future Loss 均用 FP32 计算。无效样本不贡献 Future Loss 梯度；有效样本的梯度经过预测头、动作专家回到当前 Interaction Encoder，Teacher 不产生梯度。
 
-公式的求和范围为当前 microbatch。默认 `gradient_accumulation_steps=1`；若启用梯度累积，通用 Trainer 按各 microbatch 的样本数平均损失，不会按整个累积组的有效样本总数重新归一化。
+公式的求和范围为整个梯度累积组。`training_microbatches()` 先统计各批有效数 `v_i`、样本数 `n_i` 和组内总数 `V`、`N`，再将每批 Future Loss 及其日志乘以 `v_i*N/(n_i*V)`；`V=0` 时系数为零。通用 Trainer 按样本数汇总后，Future Loss 的梯度和日志均以组内有效样本总数为分母，FM 仍按全部样本平均。默认 `gradient_accumulation_steps=1` 时，有效批次的缩放系数为 1。
 
 | 日志指标 | 含义 |
 | --- | --- |
 | `fm_loss` | 整个动作窗口的 FP32 MSE |
-| `future_loss` | 有效样本的 `τ²ℓ` 均值，全无效时为零，尚未乘以 0.1 |
+| `future_loss` | 累积组内有效样本的 `τ²ℓ` 均值，全无效时为零，尚未乘以 0.1 |
 | `loss` | `fm_loss + 0.1 * future_loss` |
 
 ## 推理

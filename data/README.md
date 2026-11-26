@@ -16,6 +16,8 @@
 
 `all` 下载默认配方使用的 DINOv2-small、Uni3D 和 DexLatent 手部先验。切换 RGB 主干时，在配方中同时指定 `agent.rgb_backbone_name` 和对应的 `initialization.rgb`。DP 默认从头训练 ResNet18，配方中附有 DINOv2 的完整示例。 [DP 配方](../dexmani_policy/configs/dp.yaml)
 
+新训练使用 `agent.rgb_backbone_config.tune_mode=freeze` 或 `lora` 时，必须提供 `initialization.rgb`，否则会冻结随机初始化的主干，训练入口将报错。此约束同样适用于显式冻结的 ResNet。若要从零训练，使用 `tune_mode=full` 和 `initialization.rgb=null`；DINOv2、SigLIP 还需显式提供 `rgb_backbone_config.architecture`。通过 `initialization.policy` 热启动或恢复 checkpoint 时，RGB 权重来自 checkpoint，无需外部 RGB 权重来源。
+
 ## 上游源码与资产条款
 
 | 组件 | 来源与核验状态 |

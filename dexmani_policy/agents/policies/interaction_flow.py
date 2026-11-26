@@ -97,13 +97,21 @@ class InteractionFlow(Policy):
     def training_microbatches(self, batches, ema_agent):
         if ema_agent is None:
             raise ValueError("InteractionFlow requires training.use_ema=true")
-        options = {"ema_interaction_encoder": ema_agent.obs_encoder.interaction_encoder}
-        for batch in batches:
-            yield batch, options
+        batches = list(batches)
+        valid_counts = [int(batch["future_obs_valid"].sum()) for batch in batches]
+        total_valid = sum(valid_counts)
+        total_samples = sum(len(batch["action"]) for batch in batches)
+        for batch, valid in zip(batches, valid_counts):
+            # The trainer averages by samples; this objective averages by valid futures.
+            scale = valid * total_samples / (len(batch["action"]) * total_valid) if total_valid else 0.0
+            yield batch, {
+                "ema_interaction_encoder": ema_agent.obs_encoder.interaction_encoder,
+                "future_loss_scale": scale,
+            }
 
     def compute_loss(
         self, batch: dict, *, ema_interaction_encoder: HandObjectInteractionEncoder,
-        log_metrics: bool = True,
+        log_metrics: bool = True, future_loss_scale: float = 1.0,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         condition = self._encode_obs(batch["obs"])
         actions = self._encode_actions(batch["action"])
@@ -130,6 +138,7 @@ class InteractionFlow(Policy):
             future_loss = (weights * per_sample).mean()
         else:
             future_loss = future.float().sum() * 0.0
+        future_loss = future_loss * future_loss_scale
         loss = fm_loss + self.future_loss_weight * future_loss
         return loss, {
             "loss": loss.detach(), "fm_loss": fm_loss.detach(), "future_loss": future_loss.detach(),
