@@ -45,10 +45,10 @@ class CrossAttention(nn.Module):
 
 
 class AdaLNModulation(nn.Module):
-    def __init__(self, hidden_dim: int, n_layers: int):
+    def __init__(self, hidden_dim: int, n_layers: int, num_modulations: int = 9):
         super().__init__()
-        self.projection = nn.Linear(hidden_dim, n_layers * 9 * hidden_dim)
-        self.layer_shape = (n_layers, 9, hidden_dim)
+        self.projection = nn.Linear(hidden_dim, n_layers * num_modulations * hidden_dim)
+        self.layer_shape = (n_layers, num_modulations, hidden_dim)
 
     def forward(self, condition: torch.Tensor) -> torch.Tensor:
         return self.projection(F.silu(condition)).unflatten(-1, self.layer_shape)
@@ -91,6 +91,9 @@ class DiTXBlock(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+
+    def prepare_context_kv(self, context):
+        return self.cross_attn.prepare_kv(context)
 
     def forward(self, x, modulation, context_c, *, context_kv=None):
         (
@@ -141,6 +144,9 @@ class DiTXOutput(nn.Module):
 
 
 class DiTX(nn.Module):
+    block_cls: type[nn.Module] = DiTXBlock
+    num_modulations = 9
+
     def __init__(
         self,
         horizon: int,
@@ -166,9 +172,9 @@ class DiTX(nn.Module):
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.timestep_embedder = TimestepMLP(timestep_embed_dim, hidden_dim)
-        self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers)
+        self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers, self.num_modulations)
         self.ditx_blocks = nn.ModuleList(
-            DiTXBlock(
+            self.block_cls(
                 hidden_size=hidden_dim,
                 num_heads=n_head,
                 mlp_ratio=mlp_ratio,
@@ -215,7 +221,7 @@ class DiTX(nn.Module):
         if self.training:
             return None
         memory, state = self._encode_condition(context)
-        return state, tuple(block.cross_attn.prepare_kv(memory) for block in self.ditx_blocks)
+        return state, tuple(block.prepare_context_kv(memory) for block in self.ditx_blocks)
 
     def _forward_hidden(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
@@ -345,7 +351,7 @@ class ConsistencyDiTX(nn.Module):
         if self.training:
             return None
         context_c = self.embed_context(context)
-        return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
+        return tuple(block.prepare_context_kv(context_c) for block in self.ditx_blocks)
 
     def forward(self, x, timestep, target_t, context, *, context_kv=None):
         x = self.input_embedder(x)

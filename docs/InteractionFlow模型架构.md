@@ -28,21 +28,27 @@ DAI-Flow（Dynamic-aware Interaction Flow for Dexterous Imitation Learning）以
 
 ```mermaid
 flowchart TD
-    obs["两帧当前观测"] --> encoder["HandObjectInteractionEncoder"]
-    encoder --> scene["两帧 Scene: 256 tokens"]
-    encoder --> interaction["最新 Interaction: 6 tokens"]
-    scene --> memory["独立投影与归一化后拼接<br/>Unified Context: 262 × 768"]
-    interaction --> memory
-    joints["最新 Joint State"] --> state["StateEncoder + MLP"]
-    state --> adaln["AdaLNModulation"]
-    time["Flow 时间嵌入"] --> adaln
-    noisy["加噪动作: 16 × 19"] --> ditx["8 层 InteractionDiTX"]
-    memory --> ditx
-    adaln --> ditx
-    ditx --> velocity["Action Velocity"]
-    ditx -. "训练时取隐藏位置 1–15" .-> head["6 Query Future Head"]
-    future["有效样本的 t+15 单帧观测"] -.-> teacher["EMA Interaction Encoder<br/>no_grad"]
-    teacher -.-> loss["Future Latent Loss"]
+    obs["观测历史 t-1, t"] --> scene_encoder["Scene Encoder：批量 B×T，只编码一次"]
+    scene_encoder --> scene["Scene Projection + Frame Embedding + LN<br/>256 × 768"]
+    scene_encoder --> inter_encoder["Interaction Encoder：同帧场景、运动学、触觉"]
+    obs --> inter_encoder
+    inter_encoder --> interaction["Interaction Projection + Frame / Role Embedding + LN<br/>12 × 768"]
+    joints["最新 Joint State"] --> condition["State Embedding + Timestep Embedding"]
+    condition --> adaln["每层12组 AdaLN：Shift / Scale / Gate × 4"]
+    noisy["Noisy Actions：16 × 19"] --> embed["Action Embedding"]
+    subgraph block["Serial InteractionDiTX Block × 8"]
+        sa["AdaLN + Self-Attention + Gated Residual"] --> sca["AdaLN + Scene Cross-Attention + Gated Residual"]
+        sca --> ica["AdaLN + Interaction Cross-Attention + Gated Residual"]
+        ica --> ffn["AdaLN + FFN + Gated Residual"]
+    end
+    embed --> sa
+    adaln --> block
+    scene -->|独立 Scene K/V| sca
+    interaction -->|独立 Interaction K/V| ica
+    ffn --> velocity["Action Velocity：16 × 19"]
+    ffn -. "训练：hidden[:,1:]" .-> head["Future Head：6 × 192"]
+    future["t+15 单帧有效观测"] -.-> teacher["EMA Interaction Encoder：no_grad"]
+    teacher -.-> loss["Future Loss"]
     head -.-> loss
 ```
 
@@ -78,11 +84,17 @@ flowchart TD
 | --- | --- | --- |
 | 两帧 Scene，旧帧在前 | `[B,256,192]` | 独立 Linear 投影，加 Frame Embedding，再 LayerNorm |
 | 最新 Joint State | `[B,1,192]` | 独立 MLP 映射为 `[B,768]` |
-| 最新 Interaction | `[B,6,192]` | 独立 Linear 投影，加六个 Role Embeddings，再 LayerNorm |
+| 两帧 Interaction，旧帧在前 | `[B,12,192]` | 独立 Linear 投影，加 Interaction Frame Embedding 和六个 Role Embeddings，再 LayerNorm |
 
-场景编码器按帧批量执行；运动学、触觉与交互注意力仅处理最新帧，复用该帧场景特征。打包时保留两帧 Scene 和最新一帧的 Interaction 与 Joint State，不引入时间差分。Packed Condition 按表格顺序排列，为 `[B,263,192]`。Scene 和 Interaction 拼成唯一的 `[B,262,768]` Context Memory；Joint State 与 Flow 时间嵌入相加，进入原有 AdaLNModulation。
+Scene 和 Interaction 使用相同的观测窗口。展平的 `[B*T,...]` 观测一次性执行 `encode_scene()`，再将同帧 Scene Tokens、Scene Points 与完整观测传入 `encode_interaction()`，不重复编码场景。每帧六个 Interaction Tokens 保持 Wrist、Thumb、Index、Middle、Ring、Little 顺序；State 仅使用最新帧。
 
-动作专家保持 8 层、768 维、8 heads、MLP ratio 4。每层依次执行动作自注意力、唯一的 Context Cross-Attention 和 MLP，均由 AdaLN 调制。16 个时间动作 Token 的输入输出仍为 `[B,16,19]`。
+Packed Condition 顺序为 Scene、State、Interaction，计数为 `(T*num_scene_tokens, 1, T*6)`，默认 `[B,269,192]`，仅用于 Policy 与 Decoder 传递数据。Scene Context 为 `[B,256,768]`，Interaction Context 为 `[B,12,768]`，分别作为独立 Attention Memory。
+
+Interaction 先恢复 `[B,T,6,192]`，投影到768维，再广播加入独立的 `[1,T,1,768]` Frame Embedding 和 `[1,1,6,768]` Role Embedding，归一化后展平。两路 Frame Embedding 均零初始化，Role Embedding 沿用标准差0.02的正态初始化。
+
+动作专家保持8层、768维、8 heads、MLP ratio 4。每层顺序为 Self-Attention、Scene Cross-Attention、Interaction Cross-Attention、FFN，每个子层均为 Pre-Norm、AdaLN 和 Gated Residual。Interaction Query 来自 Scene Residual 更新后的 Hidden States；两路 Cross-Attention 拥有独立 Q/K/V/O 和 Softmax。每层12组 Shift/Scale/Gate 由最新 State Embedding 与 Flow Timestep Embedding 之和生成。AdaLN 与 Velocity 输出层保持零初始化，Attention 输出投影沿用 Xavier 初始化。
+
+16个时间动作 Tokens 的输入输出仍为 `[B,16,19]`，Hidden States 为 `[B,16,768]`。
 
 ## 训练期 Future Interaction Latent
 
@@ -133,7 +145,7 @@ $$
 
 `InteractionDiTX.forward(..., return_future=False)` 只返回动作速度；显式传入 `return_future=True` 时返回 `(velocity, future_latent)`。该辅助接口由训练损失调用，开关不依赖模块的 train/eval 状态。推理不读取未来观测、不调用 Teacher，也不预测未来 Latent。
 
-标准推理在 eval 模式下运行：观测编码一次，每层 Context K/V 缓存一次。5 次 Euler 迭代复用缓存及预计算的 AdaLN 调制。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
+各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，两路 Context Projection 各执行一次，每层 Scene K/V 与 Interaction K/V 各缓存一次，组织为 `(scene_kv, interaction_kv)`。5 次 Euler 迭代复用该请求内的缓存及预计算的12组 AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
 ## 运行与验证
 
@@ -181,24 +193,10 @@ python -m pytest dexmani_policy/test_tools/test_regression.py -q
 
 单元测试不衡量机器人任务成功率。
 
+### 串联架构验证
 
-### 实现优化验证（2026-11-26）
+完整回归测试271项通过，覆盖观测窗口1/2/3的批量与逐帧参考、串联查询、独立缓存、梯度和既有训练生命周期。普通 DiTX 与 ConsistencyDiTX 还与修改前代码逐项比较初始化参数及非零输出，结果完全一致。
 
-完整回归测试 262 项通过，包括新旧观测编码的输出/参数梯度等价性（观测窗口 1、2、3）、有效未来样本与梯度累积、保存恢复、EMA 检查，以及 RectifiedFlow/ConsistencyFlow 和 InteractionFlow 的编译路由。未运行完整策略训练或闭环成功率评测。
+在 RTX 4090、PyTorch 2.4.1+cu124 上验证默认尺寸前向和5步 Euler；使用32维、2层的小型 Backbone 验证真实 Inductor `torch.compile(fullgraph=True)` 的训练前向/反向、双路缓存及5步采样，与 eager 结果一致。编译验证只覆盖 Action Backbone，与现有训练编译边界一致。
 
-GPU 使用 RTX 4090、PyTorch 2.4.1+cu124，默认 FP32、5 步 Euler、DINOv2-small 权重和 `pick_apple_messy` 前 128 个窗口。动作主干随机初始化，归一化使用单位仿射；优化器以零学习率执行 AdamW，固定参数便于对比。训练计时包括前向、反向和优化器，不包括 DataLoader、CPU→GPU 传输、完整 EMA Policy 更新或日志。推理计时包含观测编码与动作解码。
-
-每项预热 5 次，再测 3 轮、每轮 10 次，取轮均值的中位数；前后版本各运行两次，下表列出两次中位数的范围。GPU 同时存在其他 `real_robot` 进程，因此耗时不具备独占 GPU 的可比性，不能据此宣称固定加速比例。
-
-| 模式 | 工作负载 | 优化前 ms | 优化后 ms |
-| --- | --- | --- | --- |
-| eager | 推理 B=1 | 15.91–16.27 | 14.13–15.89 |
-| eager | 推理 B=8 | 30.92–31.42 | 27.26–31.35 |
-| eager | 前向/反向/优化器 B=128 | 452.07–484.00 | 394.48–451.05 |
-| compile | 推理 B=1 | 12.36–14.45 | 12.46–12.57 |
-| compile | 推理 B=8 | 26.32–30.25 | 26.43–51.18 |
-| compile | 前向/反向/优化器 B=128 | 473.06–475.18 | 460.95–472.10 |
-
-两次测量的峰值 allocated 显存一致：eager 训练由 7.985 GiB 降至 7.914 GiB，compile 训练由 4.884 GiB 降至 4.809 GiB；推理显存基本不变。编译模式的 5 次首次预热耗时约为推理 3.7–4.6 s、训练 12.8–25.1 s，包含编译/缓存命中及 CUDA Graph 准备，不计入稳态耗时，也不是纯编译时间。
-
-Profiler 确认每次训练的 `aten::nonzero` 从 11 次降到 1 次；默认两帧输入的手部、触觉和交互注意力只处理最新一帧。上述计算量和显存变化可复现，延迟收益仍需独占 GPU 复测。
+默认 Action Backbone（含 Future Head）的参数量为153,720,787，较原实现120,664,531增加33,056,256。旧架构的延迟与显存测量不适用于本架构，因此移除旧性能表。本次未测量新架构性能、完整训练效果或机器人闭环成功率。
