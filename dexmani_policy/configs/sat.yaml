@@ -71,10 +71,10 @@ agent:
   mlp_ratio: 4.0
   p_drop_attn: 0.1
   qkv_bias: false
-  qk_norm: false
+  qk_norm: true
   timestep_embed_dim: 128
 
-  num_inference_steps: 5
+  num_inference_steps: 10
   time_shift_alpha: 3.0  # Training only; >1 shifts uniform samples toward noise (t=0).
 
 optimizer:

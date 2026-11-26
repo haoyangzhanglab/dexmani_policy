@@ -73,7 +73,7 @@ class RectifiedFlow(nn.Module):
     def __init__(
         self,
         model: nn.Module,
-        num_inference_steps: int = 4,
+        num_inference_steps: int = 10,
         time_shift_alpha: float = 1.0,
     ) -> None:
         super().__init__()

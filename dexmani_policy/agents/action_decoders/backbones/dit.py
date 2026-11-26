@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .modules import WEIGHT_INIT_STD, add_temporal_embedding, batch_timesteps
+from .modules import FlowTimestepEmbedding, WEIGHT_INIT_STD, add_temporal_embedding, batch_timesteps
 from .sat_action_io import SATActionIO
 
 
@@ -27,21 +27,6 @@ class RMSNorm(nn.Module):
         values = x.float()
         normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + self.eps)
         return normalized.to(x.dtype) * self.weight.to(x.dtype)
-
-
-class TimeEmbedding(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-        self.register_buffer("indices", torch.arange(dim // 2), persistent=False)
-
-    def forward(self, timestep):
-        # Integer indices retain precision even when the model is cast to BF16.
-        fraction = self.indices.double() / max(self.dim // 2 - 1, 1)
-        min_period, max_period = 4e-3, 4.0
-        periods = min_period * (max_period / min_period) ** fraction
-        angles = timestep.double()[:, None] * (2 * math.pi / periods)[None]
-        return torch.cat((angles.sin(), angles.cos()), dim=-1).float()
 
 
 class GatedMLP(nn.Module):
@@ -76,8 +61,8 @@ class ExpertBlock(nn.Module):
         if not cross_attention:
             self.k_proj = nn.Linear(dim, kv_dim, bias=qkv_bias)
             self.v_proj = nn.Linear(dim, kv_dim, bias=qkv_bias)
-        self.q_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
-        self.k_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
+        self.q_norm = nn.LayerNorm(head_dim) if qk_norm else nn.Identity()
+        self.k_norm = nn.LayerNorm(head_dim) if qk_norm else nn.Identity()
         self.o_proj = nn.Linear(n_head * head_dim, dim, bias=False)
         self.post_attention_norm = RMSNorm(dim)
         self.mlp = GatedMLP(dim, intermediate_dim)
@@ -137,7 +122,7 @@ class DiT(nn.Module):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.0,
         qkv_bias: bool = False,
-        qk_norm: bool = False,
+        qk_norm: bool = True,
         n_kv_head: int = 2,
         head_dim: int | None = None,
         self_attn_every_n_layers: int = 2,
@@ -156,8 +141,6 @@ class DiT(nn.Module):
         if head_dim <= 0:
             raise ValueError("head_dim must be positive")
         timestep_embed_dim = hidden_dim if timestep_embed_dim is None else timestep_embed_dim
-        if timestep_embed_dim <= 0 or timestep_embed_dim % 2:
-            raise ValueError("timestep_embed_dim must be positive and even")
         if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be finite and positive")
         # Match SmolVLA's gated-MLP parameter budget and 256-wide rounding.
@@ -168,7 +151,7 @@ class DiT(nn.Module):
         self.action_io = action_io
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
-        self.timestep_embedder = TimeEmbedding(timestep_embed_dim)
+        self.timestep_embedder = FlowTimestepEmbedding(timestep_embed_dim)
         self.action_time_mlp = nn.Sequential(
             nn.Linear(hidden_dim + timestep_embed_dim, hidden_dim),
             nn.SiLU(),

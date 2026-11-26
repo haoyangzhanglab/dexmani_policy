@@ -77,7 +77,7 @@ class ManiFlow(Policy):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
-        qk_norm: bool = False,
+        qk_norm: bool = True,
         num_inference_steps: int = 10,
         denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,

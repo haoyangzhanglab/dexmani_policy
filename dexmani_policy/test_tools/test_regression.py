@@ -1,4 +1,5 @@
 import copy
+import inspect
 import json
 import math
 import random
@@ -23,6 +24,9 @@ from dexmani_policy.agents.action_decoders.backbones import ditx, sat_action_io
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.factorized_action_io import FactorizedActionIO
 from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import InteractionDiTX
+from dexmani_policy.agents.action_decoders.backbones.modules import (
+    FlowTimestepEmbedding, SinusoidalTimestepEmbedding, TimestepMLP,
+)
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
 from dexmani_policy.agents.action_decoders.ode import ODE
@@ -616,6 +620,64 @@ def test_pretraining_checks_episode_layout(tmp_path, make_demo, changed):
         restore_data_records(recorded, EpisodeStore(derived, keys=()), train, saved=saved)
 
 
+@pytest.mark.parametrize("dim", [2, 8, 128, 256])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+def test_flow_time_embedding_reference_and_precision(dim, dtype, device):
+    embedding = FlowTimestepEmbedding(dim).to(device=device, dtype=dtype)
+    timestep = torch.tensor([0., 0.004, 0.1, 0.5, 0.9, 1., 1.1], device=device, dtype=dtype)
+    fraction = torch.linspace(0, 1, dim // 2, device=device, dtype=torch.float32)
+    period = 0.004 * (4.0 / 0.004) ** fraction
+    angles = timestep.float()[:, None] * (2 * math.pi / period)[None, :]
+    expected = torch.cat((angles.sin(), angles.cos()), dim=-1)
+    assert embedding.frequencies.dtype == torch.float32
+    assert not embedding.state_dict()
+    for autocast in (False, True):
+        with torch.autocast(device, dtype=torch.bfloat16, enabled=autocast):
+            actual = embedding(timestep)
+        assert actual.shape == (len(timestep), dim)
+        assert actual.dtype == torch.float32 and actual.device == timestep.device
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    mlp = TimestepMLP(dim, 16, embedding=embedding).to(device=device, dtype=dtype)
+    output = mlp(timestep)
+    assert output.dtype == dtype and output.device == timestep.device
+    assert torch.isfinite(output).all()
+    output.float().square().mean().backward()
+    assert all(torch.isfinite(p.grad).all() for p in mlp.parameters())
+
+
+def test_discrete_time_embedding_and_auxiliary_attention_unchanged():
+    from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import FutureInteractionHead
+
+    model = TimestepMLP(128, 16)
+    assert isinstance(model.net[0], SinusoidalTimestepEmbedding)
+    times = torch.tensor([0., 1., 50., 999.])
+    frequencies = torch.exp(torch.arange(64) * (-math.log(10000) / 63))
+    angles = times[:, None] * frequencies[None, :]
+    torch.testing.assert_close(model.net[0](times), torch.cat((angles.sin(), angles.cos()), dim=-1))
+    torch.testing.assert_close(model(times), model.net(times), rtol=0, atol=0)
+    head = FutureInteractionHead(16, 8)
+    assert isinstance(head.attention.q_norm, nn.Identity)
+    assert isinstance(head.attention.k_norm, nn.Identity)
+
+
+def test_cross_attention_qk_normalization_cache():
+    attention = ditx.CrossAttention(16, num_heads=2, qk_norm=True).eval()
+    query, context = torch.randn(2, 4, 16), torch.randn(2, 6, 16)
+    q = attention.q(query).unflatten(-1, (2, 8)).transpose(1, 2)
+    k, v = attention.kv(context).unflatten(-1, (2, 2, 8)).permute(2, 0, 3, 1, 4).unbind(0)
+    expected = F.scaled_dot_product_attention(attention.q_norm(q), attention.k_norm(k), v)
+    expected = attention.proj(expected.transpose(1, 2).flatten(2))
+    torch.testing.assert_close(attention(query, context), expected)
+    capture = Mock(return_value=None)
+    with attention.k_norm.register_forward_pre_hook(capture):
+        cache = attention.prepare_kv(context)
+        torch.testing.assert_close(cache[1], v)
+        for _ in range(10):
+            torch.testing.assert_close(attention(query, None, context_kv=cache), expected)
+    assert capture.call_count == 1
+
+
 class ConstantVelocity(nn.Module):
     def __init__(self, value):
         super().__init__()
@@ -629,6 +691,25 @@ class ConstantVelocity(nn.Module):
 
     def prepare_context_kv(self, context):
         return None
+
+
+@pytest.mark.parametrize("decoder_class", [RectifiedFlow, ConsistencyFlow])
+@pytest.mark.parametrize("steps", [5, 10])
+def test_flow_euler_grid_and_runtime_override(decoder_class, steps):
+    decoder = decoder_class(ConstantVelocity(0.25)).eval()
+    assert decoder.num_inference_steps == 10
+    cond, shape = torch.zeros(2, 3, 8), (2, 4, 19)
+    with patch.object(decoder.model, "forward", wraps=decoder.model.forward) as calls:
+        result = decoder.predict_action(cond, shape, inference_steps=steps,
+                                        generator=torch.Generator().manual_seed(37))
+    assert calls.call_count == steps
+    actual_times = torch.stack([call.kwargs["timestep"] for call in calls.call_args_list])
+    torch.testing.assert_close(actual_times, (torch.arange(steps) / steps)[:, None].expand(-1, 2))
+    noise = torch.randn(shape, generator=torch.Generator().manual_seed(37))
+    torch.testing.assert_close(result, noise + 0.25)
+    with patch.object(decoder.model, "forward", wraps=decoder.model.forward) as calls:
+        decoder.predict_action(cond, shape)
+    assert calls.call_count == 10
 
 
 def test_flow_direction_and_rtc_against_reference():
@@ -706,27 +787,33 @@ def test_ode_closed_form_and_detached_side_head(monkeypatch, solver):
     assert any(grad.abs().sum() > 0 for grad in grads[len(main):])
 
 
-@pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX])
+@pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX, ditx.ConsistencyDiTX])
 def test_context_cache_outputs_gradients_and_new_observation(monkeypatch, backbone_class):
-    action_io = sat_action_io.SATActionIO(4, 16)
-    layout = {"horizon": 4, "action_dim": 19} if backbone_class is ditx.DiTX else {}
+    torch.manual_seed(4)
+    layout = {"horizon": 4, "action_dim": 19} if backbone_class is not DiT else {}
+    if backbone_class is not ditx.ConsistencyDiTX:
+        layout["action_io"] = sat_action_io.SATActionIO(4, 16)
     backbone = backbone_class(
         n_obs_steps=1, obs_token_dim=8, hidden_dim=16, n_head=2, n_layers=2,
-        timestep_embed_dim=8, p_drop_attn=0, action_io=action_io, **layout,
+        timestep_embed_dim=8, p_drop_attn=0, **layout,
     ).eval()
     with torch.no_grad():
-        for parameter in backbone.parameters():
-            parameter.normal_(mean=0.2, std=0.15)
+        # Open zero-initialized gates/heads without saturating the time MLP.
+        for module in backbone.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
     actions = torch.randn(2, 4, 19, requires_grad=True)
     cond = torch.randn(2, 3, 8, requires_grad=True)
+    time_kwargs = {"target_t": 0.2} if backbone_class is ditx.ConsistencyDiTX else {}
 
     def gradients(cache):
-        output = backbone(actions, 0.4, cond, context_kv=cache)
+        output = backbone(actions, 0.4, context=cond, context_kv=cache, **time_kwargs)
         return output, torch.autograd.grad(output.square().mean(), (actions, cond, *backbone.parameters()),
                                           allow_unused=True)
 
     torch.testing.assert_close(gradients(backbone.prepare_context_kv(cond)), gradients(None))
-    decoder = RectifiedFlow(backbone, num_inference_steps=3).eval()
+    decoder_class = ConsistencyFlow if backbone_class is ditx.ConsistencyDiTX else RectifiedFlow
+    decoder = decoder_class(backbone, num_inference_steps=3).eval()
 
     def sample(context):
         return decoder.predict_action(context, actions.shape, generator=torch.Generator().manual_seed(3))
@@ -760,7 +847,7 @@ def test_adaln_modulation_matches_independent_layers(groups):
     )
 
 
-@pytest.mark.parametrize("batch,steps", [(1, 1), (2, 1), (1, 5), (2, 5), (2, 7)])
+@pytest.mark.parametrize("batch,steps", [(1, 1), (2, 1), (1, 5), (2, 5), (2, 7), (2, 10), (2, 11)])
 def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
     torch.manual_seed(5)
     model = InteractionDiTX(
@@ -775,7 +862,7 @@ def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
         model.adaln_modulation.projection.weight.normal_(std=0.1)
     packed = torch.randn(batch, 20, 8)
     assert model.prepare_context_kv(packed) is None
-    flow = RectifiedFlow(model, num_inference_steps=5).eval()
+    flow = RectifiedFlow(model).eval()
 
     def sample(context):
         return flow.predict_action(
@@ -869,8 +956,7 @@ def test_interaction_embeddings_and_forward_cache(frames, qkv_bias, qk_norm):
         model.interaction_frame_pos_embed.normal_()
         model.context_frame_pos_embed.normal_()
     packed = torch.randn(2, frames * 10, 8, requires_grad=True)
-    (global_context, interaction), state_condition = model._encode_condition(packed)
-    assert state_condition is None
+    global_context, interaction = model._encode_condition(packed)
     assert not any("state_mlp" in name for name, _ in model.named_modules())
     assert global_context.shape == (2, frames * 4, 16)
     scene_raw, state_raw, _ = packed.split(model.condition_counts, dim=1)
@@ -902,7 +988,7 @@ def test_interaction_embeddings_and_forward_cache(frames, qkv_bias, qk_norm):
         assert not torch.allclose(model(actions, 0.4, changed), expected)
 
 
-@pytest.mark.parametrize("batch,steps", [(1, 1), (3, 1), (1, 5), (3, 5), (3, 7)])
+@pytest.mark.parametrize("batch,steps", [(1, 1), (3, 1), (1, 5), (3, 5), (3, 7), (1, 10), (3, 10), (3, 11)])
 def test_interaction_time_only_modulations(batch, steps):
     torch.manual_seed(29)
     model = InteractionDiTX(
@@ -916,8 +1002,9 @@ def test_interaction_time_only_modulations(batch, steps):
     actions = torch.randn(batch, 4, 19)
     times = torch.arange(steps, dtype=torch.float32) / steps
     cache = model.prepare_context_kv(context)
-    assert cache[0] is None
-    precomputed = list(model.sampling_modulations(times, cache, 5))
+    assert len(cache) == len(model.ditx_blocks)
+    assert all(len(layer_kv) == 2 for layer_kv in cache)
+    precomputed = list(model.sampling_modulations(times, cache, 10))
     assert len(precomputed) == steps
     for time, modulation in zip(times, precomputed):
         assert modulation.shape == (1, 2, 12, 16)
@@ -929,7 +1016,7 @@ def test_interaction_time_only_modulations(batch, steps):
         )
     changed = context.clone()
     changed[:, 6:8] += torch.randn(batch, 2, 8)
-    other = list(model.sampling_modulations(times, model.prepare_context_kv(changed), 5))
+    other = list(model.sampling_modulations(times, model.prepare_context_kv(changed), 10))
     torch.testing.assert_close(precomputed, other, rtol=0, atol=0)
     captured = Mock(return_value=None)
     with model.adaln_modulation.register_forward_pre_hook(captured):
@@ -1015,9 +1102,8 @@ def test_interaction_flow_default_shapes_and_inference(monkeypatch):
         p_drop_attn=0,
     ).eval()
     assert len(model.ditx_blocks) == 8
-    (global_context, interaction), state = model._encode_condition(packed)
+    global_context, interaction = model._encode_condition(packed)
     assert global_context.shape == (2, 258, 768) and interaction.shape == (2, 12, 768)
-    assert state is None
     x = torch.randn(2, 16, 19)
     final_hidden, head_input = Mock(return_value=None), Mock(return_value=None)
     with (
@@ -2584,6 +2670,14 @@ def test_recipe_composition(method):
     assert cfg.agent.horizon == cfg.dataset.horizon == cfg.horizon
     assert cfg.dataset.obs_horizon == cfg.agent.n_obs_steps == cfg.n_obs_steps
     validate_config(cfg)
+    if method in {"sat", "flowmatch", "dqrise", "dexlatent", "interaction_flow", "maniflow"}:
+        assert cfg.agent.num_inference_steps == cfg.eval.inference_steps == 10
+        assert cfg.agent.qk_norm is True
+        defaults = inspect.signature(hydra.utils.get_class(cfg.agent._target_)).parameters
+        assert defaults["num_inference_steps"].default == 10
+        assert defaults["qk_norm"].default is True
+        overridden = load_config(method, ["agent.num_inference_steps=5"])
+        assert overridden.eval.inference_steps == 5
     if method == "flowmatch":
         assert cfg.agent.factorized is False
     if method == "interaction_flow":
@@ -2593,6 +2687,29 @@ def test_recipe_composition(method):
     hydra.utils.get_class(cfg.dataset._target_)
     if method == "r3d":
         assert cfg.dataset.use_aux_ee == cfg.agent.use_aux_ee == cfg.use_aux_ee
+
+
+@pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX, ditx.ConsistencyDiTX, InteractionDiTX])
+def test_flow_backbone_time_and_qk_defaults(backbone_class):
+    layout = {"horizon": 4, "action_dim": 19}
+    if backbone_class is DiT:
+        layout = {"action_io": sat_action_io.SATActionIO(4, 16)}
+    elif backbone_class is InteractionDiTX:
+        layout["num_scene_tokens"] = 3
+    model = backbone_class(n_obs_steps=2, obs_token_dim=8, hidden_dim=16, n_layers=2, n_head=2, **layout)
+    if backbone_class is DiT:
+        assert isinstance(model.timestep_embedder, FlowTimestepEmbedding)
+        attentions = model.dit_blocks
+    else:
+        assert isinstance(model.timestep_embedder.net[0], FlowTimestepEmbedding)
+        if backbone_class is ditx.ConsistencyDiTX:
+            assert isinstance(model.target_t_embedder.net[0], FlowTimestepEmbedding)
+        attentions = [module for module in model.ditx_blocks.modules() if isinstance(module, ditx.CrossAttention)]
+    assert len(attentions) == (4 if backbone_class is InteractionDiTX else 2)
+    for attention in attentions:
+        assert isinstance(attention.q_norm, nn.LayerNorm)
+        assert isinstance(attention.k_norm, nn.LayerNorm)
+        assert attention.q_norm.normalized_shape == attention.k_norm.normalized_shape == (8,)
 
 
 def test_fixed_ode_layout():
@@ -2688,7 +2805,7 @@ def test_factorized_action_io(horizon):
 
 
 @pytest.mark.parametrize("factorized", [False, True])
-@pytest.mark.parametrize("batch,obs_steps,steps", [(1, 1, 1), (2, 2, 5), (2, 3, 5)])
+@pytest.mark.parametrize("batch,obs_steps,steps", [(1, 1, 1), (2, 2, 5), (2, 3, 5), (2, 2, 10)])
 def test_joint_flow_coupling_and_sampling(factorized, batch, obs_steps, steps):
     torch.manual_seed(7)
     model = ditx.DiTX(

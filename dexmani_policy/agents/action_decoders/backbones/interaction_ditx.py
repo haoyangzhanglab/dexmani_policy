@@ -13,7 +13,7 @@ from .modules import WEIGHT_INIT_STD, initialize_linear, modulate
 class InteractionDiTXBlock(nn.Module):
     def __init__(
         self, hidden_size, num_heads, mlp_ratio=4.0, p_drop_attn=0.0,
-        qkv_bias=False, qk_norm=False,
+        qkv_bias=False, qk_norm=True,
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
@@ -109,7 +109,7 @@ class InteractionDiTX(DiTX):
             interaction + self.interaction_frame_pos_embed.to(interaction.dtype).unsqueeze(2)
             + self.role_embeddings.to(interaction.dtype).unsqueeze(1)
         ).flatten(1, 2)
-        return (global_context, interaction), None
+        return global_context, interaction
 
     @overload
     def forward(

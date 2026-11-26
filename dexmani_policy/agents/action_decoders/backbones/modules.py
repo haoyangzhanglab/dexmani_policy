@@ -37,7 +37,7 @@ def modulate(x, shift, scale):
 
 
 class SinusoidalTimestepEmbedding(nn.Module):
-    """Mish conditioning uses sin/cos with endpoint-inclusive log frequencies."""
+    """Discrete diffusion sin/cos features with endpoint-inclusive log frequencies."""
 
     def __init__(self, dim: int):
         super().__init__()
@@ -53,19 +53,47 @@ class SinusoidalTimestepEmbedding(nn.Module):
         return torch.cat((angles.sin(), angles.cos()), dim=-1)
 
 
+class FlowTimestepEmbedding(nn.Module):
+    """Continuous sin/cos features with OpenPI's 0.004–4.0 periods."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        if dim <= 0 or dim % 2:
+            raise ValueError("flow embedding dimension must be positive and even")
+        self.half_dim = dim // 2
+        self.register_buffer("frequencies", self._frequencies(), persistent=False)
+
+    def _frequencies(self, device=None):
+        fraction = torch.linspace(0, 1, self.half_dim, device=device, dtype=torch.float32)
+        period = 0.004 * (4.0 / 0.004) ** fraction
+        return 2 * math.pi / period
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        # Rebuild after dtype conversion: casting rounded BF16 frequencies back
+        # to FP32 would retain phase errors at the shortest periods.
+        self.frequencies = self._frequencies(self.frequencies.device)
+        return self
+
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
+        angles = timestep.float()[:, None] * self.frequencies[None, :]
+        return torch.cat((angles.sin(), angles.cos()), dim=-1)
+
+
 class TimestepMLP(nn.Module):
-    def __init__(self, pos_emb_dim: int, output_dim: int):
+    def __init__(self, pos_emb_dim: int, output_dim: int, *, embedding: nn.Module | None = None):
         super().__init__()
         hidden_dim = pos_emb_dim * 4
         self.net = nn.Sequential(
-            SinusoidalTimestepEmbedding(pos_emb_dim),
+            SinusoidalTimestepEmbedding(pos_emb_dim) if embedding is None else embedding,
             nn.Linear(pos_emb_dim, hidden_dim),
             nn.Mish(),
             nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
-        return self.net(t)
+        features = self.net[0](t).to(self.net[1].weight.dtype)
+        return self.net[3](self.net[2](self.net[1](features)))
 
 
 class DiTTimestepEmbedding(nn.Module):

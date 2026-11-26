@@ -42,7 +42,7 @@ class DQRISE(Policy):
         qk_norm: bool = True,
         p_drop_attn: float = 0.0,
         timestep_embed_dim: int = 128,
-        num_inference_steps: int = 5,
+        num_inference_steps: int = 10,
         time_shift_alpha: float = 1.0,
     ) -> None:
         if action_dim != 19:

@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from timm.layers import GELUTanh, Mlp, RmsNorm
 
 from .modules import (
+    FlowTimestepEmbedding,
     TimestepMLP,
     WEIGHT_INIT_STD,
     add_temporal_embedding,
@@ -62,7 +63,7 @@ class DiTXBlock(nn.Module):
         mlp_ratio=4.0,
         p_drop_attn=0.0,
         qkv_bias=False,
-        qk_norm=False,
+        qk_norm=True,
     ):
         super().__init__()
 
@@ -160,7 +161,7 @@ class DiTX(nn.Module):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
-        qk_norm: bool = False,
+        qk_norm: bool = True,
         action_io: nn.Module | None = None,
     ) -> None:
         super().__init__()
@@ -171,7 +172,9 @@ class DiTX(nn.Module):
             self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
-        self.timestep_embedder = TimestepMLP(timestep_embed_dim, hidden_dim)
+        self.timestep_embedder = TimestepMLP(
+            timestep_embed_dim, hidden_dim, embedding=FlowTimestepEmbedding(timestep_embed_dim),
+        )
         self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers, self.num_modulations)
         self.ditx_blocks = nn.ModuleList(
             self.block_cls(
@@ -215,28 +218,23 @@ class DiTX(nn.Module):
         return add_temporal_embedding(tokens, self.context_frame_pos_embed.to(tokens.dtype))
 
     def _encode_condition(self, context):
-        return self.embed_context(context), None
+        return self.embed_context(context)
 
     def prepare_context_kv(self, context):
         if self.training:
             return None
-        memory, state = self._encode_condition(context)
-        return state, tuple(block.prepare_context_kv(memory) for block in self.ditx_blocks)
+        memory = self._encode_condition(context)
+        return tuple(block.prepare_context_kv(memory) for block in self.ditx_blocks)
 
     def _forward_hidden(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
     ) -> torch.Tensor:
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
-        if context_kv is None:
-            memory, state = self._encode_condition(context)
-            layer_kv = None
-        else:
-            state, layer_kv = context_kv
-            memory = None
+        memory = self._encode_condition(context) if context_kv is None else None
         if modulations is None:
             time = self.timestep_embedder(batch_timesteps(timestep, x, dtype=torch.float32))
-            modulations = self.adaln_modulation(time if state is None else time + state)
+            modulations = self.adaln_modulation(time)
 
         if self.action_io is None:
             x = self.input_embedder(x)
@@ -246,7 +244,7 @@ class DiTX(nn.Module):
         for index, (block, modulation) in enumerate(zip(self.ditx_blocks, modulations.unbind(1))):
             x = block(
                 x, modulation, memory,
-                context_kv=None if layer_kv is None else layer_kv[index],
+                context_kv=None if context_kv is None else context_kv[index],
             )
         return x
 
@@ -274,7 +272,7 @@ class ConsistencyDiTX(nn.Module):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
-        qk_norm: bool = False,
+        qk_norm: bool = True,
     ):
         super().__init__()
 
@@ -283,8 +281,12 @@ class ConsistencyDiTX(nn.Module):
 
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
         self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
-        self.timestep_embedder = TimestepMLP(pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
-        self.target_t_embedder = TimestepMLP(pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
+        self.timestep_embedder = TimestepMLP(
+            timestep_embed_dim, hidden_dim, embedding=FlowTimestepEmbedding(timestep_embed_dim),
+        )
+        self.target_t_embedder = TimestepMLP(
+            target_t_embed_dim, hidden_dim, embedding=FlowTimestepEmbedding(target_t_embed_dim),
+        )
 
         self.timestep_and_target_t_fusion = nn.Linear(hidden_dim * 2, hidden_dim)
         self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers)

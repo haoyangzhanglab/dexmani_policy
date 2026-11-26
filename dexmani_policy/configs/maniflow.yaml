@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 # ManiFlow：结合 flow matching 与 EMA 一致性训练。
-# 本项目配方：窗口16、观测2、执行8；训练时间网格10，decoder 默认10步，评测4步 Euler。
+# 本项目配方：窗口16、观测2、执行8；训练时间网格10，decoder 和评测默认10步 Euler。
 # 位置编码适配：动作使用可学习位置 embedding；观测同一帧的点共享时间 embedding，无点序号编码。
 
 policy_name: maniflow
@@ -58,7 +58,7 @@ agent:
   p_drop_attn: 0.1
   # qkv_bias 和 qk_norm 仅作用于交叉注意力。
   qkv_bias: false
-  qk_norm: false
+  qk_norm: true
 
   timestep_embed_dim: 128
   target_t_embed_dim: 128
@@ -82,4 +82,4 @@ training:
   use_compile: true
 
 eval:
-  inference_steps: 4  # 评测 NFE，独立于训练时间网格。
+  inference_steps: ${agent.num_inference_steps}

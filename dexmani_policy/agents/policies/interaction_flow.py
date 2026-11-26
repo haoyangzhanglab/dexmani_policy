@@ -69,9 +69,9 @@ class InteractionFlow(Policy):
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.1,
         qkv_bias: bool = False,
-        qk_norm: bool = False,
+        qk_norm: bool = True,
         timestep_embed_dim: int = 128,
-        num_inference_steps: int = 5,
+        num_inference_steps: int = 10,
         time_shift_alpha: float = 1.0,
         future_loss_weight: float = 0.1,
     ) -> None:

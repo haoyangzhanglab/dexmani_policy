@@ -36,7 +36,7 @@ flowchart TD
     obs --> joints["两帧 Joint State：StateEncoder → State Projection<br/>共享 Scene Frame Embedding + 独立 LN：2 × 768"]
     scene --> global_context["Global Observation Context：258 × 768"]
     joints --> global_context
-    time["Flow Timestep Embedding"] --> adaln["每层12组 AdaLN：Shift / Scale / Gate × 4"]
+    time["Flow Timestep：π₀ 连续 Sin/Cos + MLP"] --> adaln["每层12组 AdaLN：Shift / Scale / Gate × 4"]
     noisy["Noisy Actions：16 × 19"] --> embed["Action Embedding"]
     subgraph block["Serial InteractionDiTX Block × 8"]
         sa["AdaLN + Self-Attention + Gated Residual"] --> sca["AdaLN + Global Cross-Attention + Gated Residual"]
@@ -96,6 +96,8 @@ Interaction 先恢复 `[B,T,6,192]`，投影到768维，再广播加入独立的
 
 动作专家保持8层、768维、8 heads、MLP ratio 4。每层顺序为 Self-Attention、Global Cross-Attention、Interaction Cross-Attention、FFN，每个子层均为 Pre-Norm、AdaLN 和 Gated Residual。Interaction Query 来自 Global Residual 更新后的 Hidden States；两路 Cross-Attention 拥有独立 Q/K/V/O 和 Softmax。每层12组 Shift/Scale/Gate 仅由 Flow Timestep Embedding 生成；State 只通过 Global Context 注入。AdaLN 与 Velocity 输出层保持零初始化，Attention 输出投影沿用 Xavier 初始化。
 
+两路 Cross-Attention 默认开启 `qk_norm`，Q/K 在每个 head 内做 LayerNorm，Value 和 SDPA 缩放不变；缓存 Key 只在准备 K/V 时归一化一次。Flow 时间特征使用共享的 π₀ 连续 Sin/Cos 编码，周期为0.004至4.0，相位和三角函数均用 FP32 计算，接入原有 Mish Time MLP。训练、普通推理和预计算 AdaLN 共用此路径；原始 Flow Time 及 Future Loss 的时间权重不变。[公共设置与公式](手部动作表示.md#flow-matching-的公共设置)
+
 16个时间动作 Tokens 的输入输出仍为 `[B,16,19]`，Hidden States 为 `[B,16,768]`。
 
 ## 训练期 Future Interaction Latent
@@ -147,7 +149,7 @@ $$
 
 `InteractionDiTX.forward(..., return_future=False)` 只返回动作速度；显式传入 `return_future=True` 时返回 `(velocity, future_latent)`。该辅助接口由训练损失调用，开关不依赖模块的 train/eval 状态。推理不读取未来观测、不调用 Teacher，也不预测未来 Latent。
 
-各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，Scene、State 和 Interaction 各投影一次，每层 Global K/V 与 Interaction K/V 各缓存一次，第一路缓存对应 Global Context，第二路对应 Interaction Context。5 次 Euler 迭代复用该请求内的缓存及分块预计算的12组 Time-only AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。每步调制形状为 `[1,L,12,D]`，直接广播到整个 Batch，不复制相同参数。单步采样沿用直接前向；训练仍使用各样本独立的 Flow Timestep。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
+各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，Scene、State 和 Interaction 各投影一次，每层 Global K/V 与 Interaction K/V 各缓存一次，每层直接缓存 `(global_kv, interaction_kv)`，不携带 State AdaLN 条件。10 次 Euler 迭代复用该请求内的缓存及分块预计算的12组 Time-only AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。每步调制形状为 `[1,L,12,D]`，直接广播到整个 Batch，不复制相同参数。单步采样沿用直接前向；训练仍使用各样本独立的 Flow Timestep。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
 ## 运行与验证
 
@@ -173,7 +175,8 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `agent.future_loss_weight` | `0.1` | Future Loss 系数 |
 | `training.use_ema` | `true` | 提供未来交互 Teacher，训练必须启用 |
 | `training.use_compile` | `true` | 编译 Student Action Backbone |
-| `agent.num_inference_steps` | `5` | Euler 积分次数 |
+| `agent.num_inference_steps` | `10` | Euler 积分次数 |
+| `agent.qk_norm` | `true` | 两路 Cross-Attention 的 Q/K LayerNorm |
 
 `dataset.future_obs_steps=null` 在配置组装时按 `horizon-n_obs_steps+1` 推导，随窗口参数自动变化；显式整数用于覆盖实验目标偏移。该推导属于策略配置组装；直接构造 `DemonstrationDataset(future_obs_steps=None)` 仍表示不读取未来观测。
 
@@ -197,8 +200,6 @@ python -m pytest dexmani_policy/test_tools/test_regression.py -q
 
 ### Time-only AdaLN 验证
 
-完整回归278项通过，覆盖真实 Encoder 的观测窗口1/2/3、逐帧 State 扰动隔离、完整 State 历史、共享 Frame Embedding、Time-only AdaLN、State 梯度，以及既有 EMA、梯度累积、保存恢复和其他策略测试。采样验证包含 Batch Size 1及大于1、1/5/7步 Euler，检查调制广播、跨 Chunk 顺序和 Cached/Uncached 输出及梯度等价性。
+回归测试覆盖真实 Encoder 的观测窗口1/2/3、逐帧 State 扰动隔离、完整 State 历史、共享 Frame Embedding、Time-only AdaLN、State 梯度，以及 EMA、梯度累积和保存恢复。采样覆盖 Batch Size 1及大于1、单步、5/10步及跨 Chunk 的 Euler，检查调制广播、顺序和 Cached/Uncached 输出及梯度等价性；缓存测试使用非零速度输出和 AdaLN 权重。
 
-在 RTX 4090、PyTorch 2.4.1+cu124 上验证默认尺寸前向和5步 Euler；使用32维、2层 Backbone 验证真实 Inductor `torch.compile(fullgraph=True)` 训练前向/反向与缓存采样，与 eager 结果一致。
-
-默认 Action Backbone（含 Future Head）参数量从153,720,787降至153,131,731，减少589,056。含 S 个时间步的预计算调制由 `[S,B,L,12,D]` 缩减为 `[S,1,L,12,D]`，计算不再随 Batch Size 重复；这不是整体性能加速的实测结论。本次未运行性能基准、完整策略训练或机器人闭环评估。
+默认 Action Backbone（含 Future Head）参数量为153,137,875。每层双路 QK LayerNorm 共新增768个参数，8层合计6,144。含 S 个时间步的预计算调制形状为 `[S,1,L,12,D]`，计算不随 Batch Size 重复。此处不将参数量或缓存机制视为延迟、完整训练效果或机器人闭环成功率的实测结论。
