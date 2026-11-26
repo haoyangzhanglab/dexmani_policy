@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, Dataset, default_collate
 
 from dexmani_policy.agents.action_decoders.backbones import ditx, sat_action_io
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
+from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import InteractionDiTX
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
 from dexmani_policy.agents.action_decoders.ode import ODE
@@ -760,7 +761,7 @@ def test_adaln_modulation_matches_independent_layers():
 @pytest.mark.parametrize("batch,steps", [(1, 1), (1, 5), (2, 7)])
 def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
     torch.manual_seed(5)
-    model = ditx.InteractionDiTX(
+    model = InteractionDiTX(
         horizon=4, action_dim=19, n_obs_steps=2, num_scene_tokens=3, obs_token_dim=8,
         hidden_dim=16, n_head=2, n_layers=2, p_drop_attn=0,
     )
@@ -839,16 +840,20 @@ def test_future_observation_alignment(make_demo, before, resize):
     assert not dataset.__getitems__([])
 
 
-def test_dai_default_shapes_and_inference(monkeypatch):
-    from dexmani_policy.agents.policies.interaction_flow import InteractionFlowEncoder
+def test_interaction_flow_default_shapes_and_inference(monkeypatch):
+    from dexmani_policy.agents.policies.interaction_flow import InteractionObservationEncoder
 
     class Tokens(nn.Module):
         out_dim = 192
 
-        def forward_with_aux(self, obs):
-            return {"scene_tokens": obs["scene"], "tokens": obs["interaction"]}
+        def encode_scene(self, obs):
+            return obs["scene"], obs["scene"][..., :3], None
 
-    encoder = InteractionFlowEncoder(Tokens(), 19, 2)
+        def encode_interaction(self, obs, scene_tokens, scene_points):
+            assert len(scene_tokens) == len(obs["interaction"]) == 2
+            return obs["interaction"]
+
+    encoder = InteractionObservationEncoder(Tokens(), 19, 2)
     obs = {"scene": torch.randn(4, 128, 192), "interaction": torch.randn(4, 6, 192),
            "joint_state": torch.randn(4, 19)}
     packed = encoder(obs)
@@ -859,7 +864,7 @@ def test_dai_default_shapes_and_inference(monkeypatch):
     changed["interaction"][::2] += 10
     changed["joint_state"][::2] += 10
     torch.testing.assert_close(encoder(changed), packed)
-    model = ditx.InteractionDiTX(
+    model = InteractionDiTX(
         horizon=16, action_dim=19, n_obs_steps=2, num_scene_tokens=128, obs_token_dim=192,
         p_drop_attn=0,
     ).eval()
@@ -873,7 +878,7 @@ def test_dai_default_shapes_and_inference(monkeypatch):
         model.ditx_blocks[-1].register_forward_hook(final_hidden),
         model.future_head.register_forward_pre_hook(head_input),
     ):
-        velocity, future = model(x, 0.5, packed, return_aux=True)
+        velocity, future = model(x, 0.5, packed, return_future=True)
     hidden = final_hidden.call_args.args[2]
     readout = head_input.call_args.args[1][0]
     assert hidden.shape == (2, 16, 768) and readout.shape == (2, 15, 768)
@@ -894,7 +899,7 @@ def test_dai_default_shapes_and_inference(monkeypatch):
     ([True], [0.2]),
     ([True], [1e-4]),
 ])
-def test_dai_future_loss_formula_and_normalization(monkeypatch, valid, times):
+def test_interaction_flow_future_loss_formula_and_normalization(monkeypatch, valid, times):
     from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
 
     batch_size = len(valid)
@@ -910,7 +915,7 @@ def test_dai_future_loss_formula_and_normalization(monkeypatch, valid, times):
     target = torch.randn(batch_size, 6, 192, requires_grad=True)
     velocity = torch.ones(batch_size, 16, 19, requires_grad=True)
     timestep = torch.tensor(times)
-    monkeypatch.setattr(policy.action_decoder, "_sample_training_pair", lambda actions: (
+    monkeypatch.setattr(policy.action_decoder, "sample_training_pair", lambda actions: (
         torch.zeros_like(actions), timestep, torch.zeros_like(actions)))
     monkeypatch.setattr(policy.action_decoder.model, "forward", lambda *args, **kw: (velocity, prediction))
     joints = torch.arange(batch_size, dtype=torch.float32)[:, None].expand(-1, 19)
@@ -956,10 +961,77 @@ def test_rectified_training_pair_preserves_sampling():
     noise = torch.randn_like(actions)
     time = shift_time_to_noise(torch.rand(3), 2.)
     torch.manual_seed(37)
-    xt, actual_time, velocity = flow._sample_training_pair(actions)
+    xt, actual_time, velocity = flow.sample_training_pair(actions)
     torch.testing.assert_close(actual_time, time)
     torch.testing.assert_close(xt, (1-time[:, None, None])*noise + time[:, None, None]*actions)
     torch.testing.assert_close(velocity, actions-noise)
+
+
+@pytest.mark.parametrize("n_obs_steps", [1, 2, 3])
+def test_interaction_observation_matches_full_history(n_obs_steps):
+    from dexmani_policy.agents.policies.interaction_flow import InteractionObservationEncoder
+
+    torch.manual_seed(5)
+    interaction = HandObjectInteractionEncoder(
+        patch_config={"num_patches": 4, "group_size": 4},
+        rgb_backbone_config={"architecture": tiny_hf_rgb_config("dino").to_dict(), "image_size": 8},
+    ).eval()
+    encoder = InteractionObservationEncoder(interaction, 19, n_obs_steps)
+    obs = {key: value.repeat_interleave(n_obs_steps, 0) for key, value in make_hand_scene_observation().items()}
+    obs["joint_state"] = torch.randn(2 * n_obs_steps, 19)
+    obs["finger_tactile_force"] = torch.randn(2 * n_obs_steps, 5, 3)
+    scene, centers, _ = interaction.encode_scene(obs)
+    full = interaction.encode_interaction(obs, scene, centers)
+    expected = torch.cat((
+        scene.reshape(2, -1, 192),
+        encoder.state_encoder(obs["joint_state"].reshape(2, n_obs_steps, 19)[:, -1]).unsqueeze(1),
+        full.reshape(2, n_obs_steps, 6, 192)[:, -1],
+    ), dim=1)
+    capture = Mock(return_value=None)
+    with interaction.hand_encoder.register_forward_pre_hook(capture):
+        actual = encoder(obs)
+    assert capture.call_args.args[1][0].shape[0] == 2
+    torch.testing.assert_close(actual, expected)
+    probe = torch.randn_like(actual)
+    parameters = [p for p in encoder.parameters() if p.requires_grad]
+    torch.testing.assert_close(
+        torch.autograd.grad(actual, parameters, probe),
+        torch.autograd.grad(expected, parameters, probe), atol=2e-5, rtol=2e-4,
+    )
+    if n_obs_steps > 1:
+        obs["point_cloud"][0].zero_()
+        with pytest.raises(ValueError, match="empty frame"):
+            encoder(obs)
+
+
+def test_interaction_future_offset_and_ema_contract():
+    cfg = load_config("interaction_flow", ["horizon=24", "n_obs_steps=3", "training.use_ema=false"])
+    assert cfg.dataset.future_obs_steps == 22
+    explicit = load_config("interaction_flow", ["horizon=24", "dataset.future_obs_steps=7"])
+    assert explicit.dataset.future_obs_steps == 7
+    from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
+    model = InteractionFlow.__new__(InteractionFlow)
+    with pytest.raises(ValueError, match="InteractionFlow requires training.use_ema=true"):
+        policy_training.PolicyTrainer(cfg, model, None)
+
+
+@pytest.mark.parametrize("decoder_type", [RectifiedFlow, ConsistencyFlow])
+def test_flow_decoder_ema_training_and_compile_routing(decoder_type):
+    model = Policy(nn.Identity(), decoder_type(nn.Identity()), 4, 1, 4, 3)
+    ema = copy.deepcopy(model)
+    requires_ema = decoder_type is ConsistencyFlow
+    assert model.requires_ema_for_loss == requires_ema
+    batch = {"action": torch.zeros(2, 4, 3)}
+    supplied, options = next(model.training_microbatches([batch], ema if requires_ema else None))
+    assert supplied is batch
+    assert options == ({"ema_decoder": ema.action_decoder} if requires_ema else {})
+    trainer = policy_training.PolicyTrainer.__new__(policy_training.PolicyTrainer)
+    trainer.model, trainer.ema_model = model, ema
+    trainer.cfg = OmegaConf.create({"training": {"use_compile": True, "compile_mode": "default"}})
+    with patch.object(model, "compile_backbone") as student, patch.object(ema, "compile_backbone") as teacher:
+        trainer.compile_models()
+    student.assert_called_once_with(mode="default")
+    assert teacher.call_count == int(requires_ema)
 
 
 # Data sampling
@@ -1565,28 +1637,17 @@ def test_hand_scene_encoder(scene_config, point_channels, samples_per_patch):
         tokens = encoder(obs)
     assert tokens.shape == (2, 6, 192)
     assert capture_scene.call_args.args[1][0].shape == (2, 128, 192)
-    result = encoder.forward_with_aux({
+    scene, centers, valid = encoder.encode_scene({
         **obs,
         "camera_intrinsic": obs["camera_intrinsic"].flatten(1),
         "camera_extrinsic": camera_extrinsic.flatten(1),
     })
-    assert {key: tuple(value.shape) for key, value in result.items()} == {
-        "tokens": (2, 6, 192),
-        "scene_tokens": (2, 128, 192),
-        "scene_points_base": (2, 128, 3),
-        "hand_landmarks_base": (2, 6, 3),
-        "local_tokens": (2, 5, 64),
-        "global_token": (2, 64),
-        "rgb_projection_valid": (2, 128, samples_per_patch),
-    }
-    torch.testing.assert_close(result["tokens"], tokens)
-    expected_landmarks = torch.cat((obs["eef_pose"][:, None, :3], obs["fingertip_xyz"]), dim=1)
-    assert torch.equal(result["hand_landmarks_base"], expected_landmarks)
-    patch_center_in_cloud = (result["scene_points_base"][:, :, None] == point_cloud[:, None, :, :3]).all(dim=-1)
+    torch.testing.assert_close(encoder.encode_interaction(obs, scene, centers), tokens)
+    assert scene.shape == (2, 128, 192) and scene.requires_grad
+    assert centers.shape == (2, 128, 3)
+    patch_center_in_cloud = (centers[:, :, None] == point_cloud[:, None, :, :3]).all(dim=-1)
     assert patch_center_in_cloud.any(dim=-1).all()
-    assert all(result[key].requires_grad for key in ("tokens", "scene_tokens", "local_tokens", "global_token"))
-    valid = result["rgb_projection_valid"]
-    assert valid.dtype == torch.bool
+    assert valid.shape == (2, 128, samples_per_patch) and valid.dtype == torch.bool
     assert valid[0].all() and not valid[1].any()
     with pytest.raises(ValueError, match="extrinsics"):
         encoder({**obs, "camera_extrinsic": camera_extrinsic.transpose(-1, -2)})
@@ -2008,7 +2069,7 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         batch = default_collate([fresh.train_loader.dataset[i] for i in (1, 2)])
         assert batch["future_obs_valid"].all()
         teacher = fresh.ema_model.obs_encoder.interaction_encoder
-        assert not model.requires_ema_for_loss
+        assert model.requires_ema_for_loss
         loss, metrics = model(batch, ema_interaction_encoder=teacher)
         assert all(torch.isfinite(v) for v in metrics.values())
         assert all(p.grad is None for p in teacher.parameters())
@@ -2024,8 +2085,8 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         backbone = model.action_decoder.model
         condition = model._encode_obs(batch["obs"])
         actions = model._encode_actions(batch["action"])
-        xt, times, target_v = model.action_decoder._sample_training_pair(actions)
-        velocity, predicted = backbone(xt, times, condition, return_aux=True)
+        xt, times, target_v = model.action_decoder.sample_training_pair(actions)
+        velocity, predicted = backbone(xt, times, condition, return_future=True)
         target = teacher(batch["future_obs"])
         fm = F.mse_loss(velocity, target_v)
         per_sample = F.l1_loss(
@@ -2071,7 +2132,7 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
                 packed = model._encode_obs(obs)
             assert scene_out.call_count == hand_out.call_count == 1
             torch.testing.assert_close(packed[:, :8], scene_out.call_args.args[2].unflatten(0, (2, 2)).flatten(1, 2))
-            torch.testing.assert_close(packed[:, 9:], hand_out.call_args.args[2].unflatten(0, (2, 2))[:, -1])
+            torch.testing.assert_close(packed[:, 9:], hand_out.call_args.args[2])
             joint_tokens = encoder.state_encoder(model.normalizer["joint_state"].normalize(obs["joint_state"]))
             torch.testing.assert_close(packed[:, 8], joint_tokens[:, -1])
             for field in ("finger_tactile_force", "fingertip_xyz"):
@@ -2578,7 +2639,7 @@ def test_interaction_flow_accumulation_matches_combined(monkeypatch, valid, batc
             self.velocity = nn.Parameter(torch.tensor(0.6))
             self.future = nn.Parameter(torch.tensor([0.3, -0.7, 0.8, 1.2]))
 
-        def forward(self, x, timestep, context, return_aux=False):
+        def forward(self, x, timestep, context, return_future=False):
             return self.velocity * x, context + self.future
 
     torch.manual_seed(7)
@@ -2587,7 +2648,7 @@ def test_interaction_flow_accumulation_matches_combined(monkeypatch, valid, batc
     model.future_loss_weight = 0.1
     model.normalizer = LinearNormalizer({"action": (1,)})
     monkeypatch.setattr(model, "_encode_obs", lambda obs: obs["latent"])
-    monkeypatch.setattr(model.action_decoder, "_sample_training_pair", lambda actions: (
+    monkeypatch.setattr(model.action_decoder, "sample_training_pair", lambda actions: (
         actions, actions[:, 0, 0], torch.zeros_like(actions),
     ))
     teacher = Mock(side_effect=lambda obs: obs["latent"])

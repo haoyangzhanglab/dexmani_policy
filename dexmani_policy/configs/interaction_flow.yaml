@@ -11,7 +11,7 @@ initialization:
   rgb: data/pretrained/dinov2-small
 
 dataset:
-  future_obs_steps: 15  # horizon - (n_obs_steps - 1): full predicted action chunk endpoint.
+  future_obs_steps: null  # Derived from horizon - n_obs_steps + 1 during config assembly.
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   sensor_modalities:
     - point_cloud

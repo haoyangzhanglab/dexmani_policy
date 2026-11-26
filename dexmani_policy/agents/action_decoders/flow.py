@@ -93,12 +93,12 @@ class RectifiedFlow(nn.Module):
         *,
         log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        xt, t, target_v = self._sample_training_pair(actions)
+        xt, t, target_v = self.sample_training_pair(actions)
         pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v.float(), target_v.float())
         return loss, {"loss": loss.detach()} if log_metrics else {}
 
-    def _sample_training_pair(
+    def sample_training_pair(
         self, actions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = actions.shape[0]

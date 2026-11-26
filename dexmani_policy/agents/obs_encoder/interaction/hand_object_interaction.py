@@ -60,25 +60,18 @@ class HandObjectInteractionEncoder(RGBPointSceneEncoder):
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Return six wrist-first interaction tokens [B, 6, 192]."""
-        return self.forward_with_aux(obs)["tokens"]
+        scene_tokens, scene_points, _ = self.encode_scene(obs)
+        return self.encode_interaction(obs, scene_tokens, scene_points)
 
-    def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Return tokens and intermediate tensors for geometry/projection diagnostics."""
+    def encode_scene(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if obs["point_cloud"][..., :3].eq(0).all(dim=(1, 2)).any():
             raise ValueError("point_cloud contains an empty frame (all XYZ coordinates are zero)")
-        scene_tokens, scene_points_base, projection_valid = self.encode_scene(obs)
-        hand_tokens, hand_landmarks_base = self.hand_encoder(obs["eef_pose"], obs["fingertip_xyz"])
+        return super().encode_scene(obs)
+
+    def encode_interaction(
+        self, obs: dict[str, torch.Tensor], scene_tokens: torch.Tensor, scene_points: torch.Tensor,
+    ) -> torch.Tensor:
+        hand_tokens, hand_landmarks = self.hand_encoder(obs["eef_pose"], obs["fingertip_xyz"])
         tactile_features = self.tactile_encoder(obs["finger_tactile_force"])
         hand_tokens = self.tactile_fusion(hand_tokens, tactile_features)
-        interaction_tokens = self.geometric_relation(
-            hand_tokens, scene_tokens, hand_landmarks_base, scene_points_base,
-        )
-        return {
-            "tokens": interaction_tokens,
-            "scene_tokens": scene_tokens,
-            "scene_points_base": scene_points_base,
-            "hand_landmarks_base": hand_landmarks_base,
-            "local_tokens": tactile_features["local_tokens"],
-            "global_token": tactile_features["global_token"],
-            "rgb_projection_valid": projection_valid,
-        }
+        return self.geometric_relation(hand_tokens, scene_tokens, hand_landmarks, scene_points)

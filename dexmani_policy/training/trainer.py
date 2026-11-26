@@ -116,7 +116,7 @@ class PolicyTrainer:
     def __init__(self, cfg, model, dataset, *, checkpoint=None):
         device = torch.device(cfg.training.device)
         if model.requires_ema_for_loss and not cfg.training.use_ema:
-            raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
+            raise ValueError(f"{type(model).__name__} requires training.use_ema=true")
 
         if cfg.training.use_ema:
             active_batchnorm = [
@@ -188,7 +188,7 @@ class PolicyTrainer:
     def compile_models(self):
         if self.cfg.training.use_compile:
             models = [self.model]
-            if self.model.requires_ema_for_loss:
+            if getattr(self.model.action_decoder, "requires_ema_for_loss", False):
                 models.append(self.ema_model)
             for model in models:
                 model.compile_backbone(mode=self.cfg.training.compile_mode)

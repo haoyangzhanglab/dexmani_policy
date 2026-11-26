@@ -6,14 +6,14 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.agents.action_decoders.backbones.ditx import InteractionDiTX
+from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import InteractionDiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.obs_encoder.interaction import HandObjectInteractionEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import Policy
 
 
-class InteractionFlowEncoder(nn.Module):
+class InteractionObservationEncoder(nn.Module):
     def __init__(
         self, interaction_encoder: HandObjectInteractionEncoder, state_dim: int, n_obs_steps: int,
     ) -> None:
@@ -31,15 +31,20 @@ class InteractionFlowEncoder(nn.Module):
         return self.interaction_encoder.effective_config
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        encoded = self.interaction_encoder.forward_with_aux(obs)
-        scene = encoded["scene_tokens"].unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
-        interaction = encoded["tokens"].unflatten(0, (-1, self.n_obs_steps))[:, -1]
-        joints = obs["joint_state"].unflatten(0, (-1, self.n_obs_steps))[:, -1]
-        state = self.state_encoder(joints).unsqueeze(1)
-        return torch.cat((scene, state, interaction), dim=1)  # [B, 256+1+6, 192]
+        scene_tokens, scene_points, _ = self.interaction_encoder.encode_scene(obs)
+        latest = slice(self.n_obs_steps - 1, None, self.n_obs_steps)
+        current_obs = {key: value[latest] for key, value in obs.items()}
+        interaction = self.interaction_encoder.encode_interaction(
+            current_obs, scene_tokens[latest], scene_points[latest],
+        )
+        scene = scene_tokens.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
+        state = self.state_encoder(current_obs["joint_state"]).unsqueeze(1)
+        return torch.cat((scene, state, interaction), dim=1)
 
 
 class InteractionFlow(Policy):
+    requires_ema_for_loss = True
+
     required_identity_fields = frozenset({
         "point_cloud", "camera_intrinsic", "camera_extrinsic", "eef_pose", "fingertip_xyz",
     })
@@ -77,7 +82,7 @@ class InteractionFlow(Policy):
             rgb_backbone_name=rgb_backbone_name, rgb_backbone_config=rgb_backbone_config,
             rgb_semantic_sampling=rgb_semantic_sampling,
         )
-        obs_encoder = InteractionFlowEncoder(interaction_encoder, state_dim, n_obs_steps)
+        obs_encoder = InteractionObservationEncoder(interaction_encoder, state_dim, n_obs_steps)
         backbone = InteractionDiTX(
             horizon=horizon, action_dim=action_dim, n_obs_steps=n_obs_steps,
             obs_token_dim=interaction_encoder.out_dim,
@@ -95,8 +100,6 @@ class InteractionFlow(Policy):
         self.future_loss_weight = future_loss_weight
 
     def training_microbatches(self, batches, ema_agent):
-        if ema_agent is None:
-            raise ValueError("InteractionFlow requires training.use_ema=true")
         batches = list(batches)
         valid_counts = [int(batch["future_obs_valid"].sum()) for batch in batches]
         total_valid = sum(valid_counts)
@@ -115,26 +118,26 @@ class InteractionFlow(Policy):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         condition = self._encode_obs(batch["obs"])
         actions = self._encode_actions(batch["action"])
-        xt, timestep, target_velocity = self.action_decoder._sample_training_pair(actions)
-        velocity, future = self.action_decoder.model(xt, timestep, condition, return_aux=True)
+        xt, timestep, target_velocity = self.action_decoder.sample_training_pair(actions)
+        velocity, future = self.action_decoder.model(xt, timestep, condition, return_future=True)
         fm_loss = F.mse_loss(velocity.float(), target_velocity.float())
-        valid = batch["future_obs_valid"]
-        if valid.any():
+        indices = batch["future_obs_valid"].nonzero(as_tuple=True)[0]
+        if indices.numel():
             with torch.no_grad():
                 # Single frames retain [N_valid,...], without an observation history dimension.
                 future_obs = {}
                 for key, value in batch["future_obs"].items():
-                    value = value[valid]
+                    value = value.index_select(0, indices)
                     if key in self.normalizer.fields:
                         value = self.normalizer[key].normalize(value)
                     future_obs[key] = value
                 target = ema_interaction_encoder(future_obs)  # [N_valid, 6, 192]
             latent_shape = (future.shape[-1],)
             per_sample = F.l1_loss(
-                F.layer_norm(future[valid].float(), latent_shape),
+                F.layer_norm(future.index_select(0, indices).float(), latent_shape),
                 F.layer_norm(target.float(), latent_shape), reduction="none",
             ).mean(dim=(1, 2))
-            weights = timestep[valid].float().square()
+            weights = timestep.index_select(0, indices).float().square()
             future_loss = (weights * per_sample).mean()
         else:
             future_loss = future.float().sum() * 0.0
