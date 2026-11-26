@@ -1,6 +1,4 @@
-"""Interaction-conditioned action expert and future latent readout."""
-
-from typing import Literal, overload
+"""Interaction-conditioned action expert."""
 
 import torch
 from torch import nn
@@ -50,28 +48,8 @@ class InteractionDiTXBlock(nn.Module):
         return x + gate_ffn * self.mlp(modulate(self.norm4(x), shift_ffn, scale_ffn))
 
 
-class FutureInteractionHead(nn.Module):
-    def __init__(self, hidden_dim: int, latent_dim: int) -> None:
-        super().__init__()
-        self.action_projection = nn.Linear(hidden_dim, latent_dim)
-        self.queries = nn.Parameter(torch.empty(1, 6, latent_dim))
-        self.attention = CrossAttention(latent_dim, num_heads=4)
-        self.norm = nn.LayerNorm(latent_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(latent_dim, 2 * latent_dim), nn.GELU(),
-            nn.Linear(2 * latent_dim, latent_dim),
-        )
-        self.apply(initialize_linear)
-        nn.init.normal_(self.queries, std=WEIGHT_INIT_STD)
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        memory = self.action_projection(hidden)
-        queries = self.queries.expand(hidden.shape[0], -1, -1)  # Wrist-first readout queries.
-        return self.mlp(self.norm(self.attention(queries, memory)))
-
-
 class InteractionDiTX(DiTX):
-    """DAI-Flow action expert with global-first serial conditioning and time-only AdaLN."""
+    """InteractionFlow action expert with global-first serial conditioning and time-only AdaLN."""
 
     block_cls = InteractionDiTXBlock
     num_modulations = 12
@@ -84,7 +62,6 @@ class InteractionDiTX(DiTX):
             n_obs_steps=n_obs_steps, obs_token_dim=obs_token_dim, hidden_dim=hidden_dim, **kwargs,
         )
         self.condition_counts = (n_obs_steps * num_scene_tokens, n_obs_steps, n_obs_steps * 6)
-        self.action_start_index = n_obs_steps - 1
         self.scene_norm = nn.LayerNorm(hidden_dim)
         self.interaction_projection = nn.Linear(obs_token_dim, hidden_dim)
         self.interaction_norm = nn.LayerNorm(hidden_dim)
@@ -95,7 +72,6 @@ class InteractionDiTX(DiTX):
         self.interaction_projection.apply(initialize_linear)
         self.state_projection.apply(initialize_linear)
         nn.init.normal_(self.role_embeddings, std=WEIGHT_INIT_STD)
-        self.future_head = FutureInteractionHead(hidden_dim, obs_token_dim)
 
     def _encode_condition(self, context):
         scene, state, interaction = context.split(self.condition_counts, dim=1)
@@ -111,32 +87,7 @@ class InteractionDiTX(DiTX):
         ).flatten(1, 2)
         return global_context, interaction
 
-    @overload
-    def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *,
-        context_kv=None, modulations=None, return_future: Literal[False] = False,
-    ) -> torch.Tensor: ...
-
-    @overload
-    def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *,
-        context_kv=None, modulations=None, return_future: Literal[True],
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-    def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *,
-        context_kv=None, modulations=None, return_future: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        hidden = self._forward_hidden(
-            x, timestep, context, context_kv=context_kv, modulations=modulations,
-        )
-        velocity = self.final_layer(hidden)
-        if return_future:
-            future_hidden = hidden[:, self.action_start_index:]
-            return velocity, self.future_head(future_hidden)
-        return velocity
-
-    def sampling_modulations(self, timesteps, context_kv, chunk_size):
+    def sampling_modulations(self, timesteps, chunk_size):
         # Bound the per-step modulation tensor when the caller requests a longer Euler grid.
         for chunk in timesteps.split(chunk_size):
             time = self.timestep_embedder(chunk)

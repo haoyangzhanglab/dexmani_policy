@@ -42,8 +42,6 @@ def assemble_policy_config(cfg):
             horizon=cfg.horizon, obs_horizon=cfg.n_obs_steps,
             pad_before=cfg.n_obs_steps - 1, pad_after=cfg.n_action_steps - 1,
         )
-        if "future_obs_steps" in cfg.dataset and cfg.dataset.future_obs_steps is None:
-            cfg.dataset.future_obs_steps = cfg.horizon - cfg.n_obs_steps + 1
         if "pc_dim" in cfg.agent:
             cfg.dataset.pc_dim = cfg.agent.pc_dim
         cfg.env_runner.task_name = cfg.task_name

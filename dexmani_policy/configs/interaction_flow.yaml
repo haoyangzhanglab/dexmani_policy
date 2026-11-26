@@ -11,7 +11,6 @@ initialization:
   rgb: data/pretrained/dinov2-small
 
 dataset:
-  future_obs_steps: null  # Derived from horizon - n_obs_steps + 1 during config assembly.
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   sensor_modalities:
     - point_cloud
@@ -38,7 +37,6 @@ dataloader:
   drop_last: true
 
 agent:
-  future_loss_weight: 0.1
   _target_: dexmani_policy.agents.policies.interaction_flow.InteractionFlow
   action_dim: null
   state_dim: 19

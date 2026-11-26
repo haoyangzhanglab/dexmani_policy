@@ -43,7 +43,7 @@ def _sample_flow(
     timesteps = euler_time_grid(num_steps, sample)
     prepare_modulations = getattr(decoder.model, "sampling_modulations", None)
     modulations = (
-        prepare_modulations(timesteps, context_kv, decoder.num_inference_steps)
+        prepare_modulations(timesteps, decoder.num_inference_steps)
         if context_kv is not None and prepare_modulations is not None else None
     )
     target_times = None

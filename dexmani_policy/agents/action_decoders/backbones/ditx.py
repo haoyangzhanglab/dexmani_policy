@@ -226,7 +226,7 @@ class DiTX(nn.Module):
         memory = self._encode_condition(context)
         return tuple(block.prepare_context_kv(memory) for block in self.ditx_blocks)
 
-    def _forward_hidden(
+    def forward(
         self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
     ) -> torch.Tensor:
         if context.shape[0] != x.shape[0]:
@@ -246,12 +246,6 @@ class DiTX(nn.Module):
                 x, modulation, memory,
                 context_kv=None if context_kv is None else context_kv[index],
             )
-        return x
-
-    def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
-    ) -> torch.Tensor:
-        x = self._forward_hidden(x, timestep, context, context_kv=context_kv, modulations=modulations)
         if self.action_io is None:
             return self.final_layer(x)
         return self.action_io.decode_velocity(x)

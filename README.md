@@ -44,17 +44,17 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `ode` | 从上一条实际应用的关节目标积分生成轨迹 |
 | `r3d` | 用预训练三维表征生成动作 |
 | `maniflow` | 结合 Flow Matching 与一致性学习 |
-| `interaction_flow` | DAI-Flow：结构化手物交互驱动 Rectified Flow，训练时由 EMA 未来交互 Latent 提供辅助监督。 [DAI-Flow 模型架构](docs/InteractionFlow模型架构.md) |
+| `interaction_flow` | InteractionFlow：结构化手物交互驱动 Rectified Flow，使用标准 Flow Matching Loss 训练。 [InteractionFlow 模型架构](docs/InteractionFlow模型架构.md) |
 | `flowmatch` | 原始19维关节空间的 Flow Matching，默认关闭 Factorized 模式；与 SAT、DQ-RISE、DexLatent 共享观测编码。 [动作表示](docs/手部动作表示.md#flowmatch) |
 | `sat` | 用 RGB、点云和关节状态观测生成关节轨迹 |
 | `dqrise` / `dexlatent` | 用 RGB、点云和关节状态观测生成手姿码本索引或连续手部潜变量 |
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |
 | `adaptac` | 用未来接触力引导动作生成 |
 
-DAI-Flow 的观测字段与未来目标对齐见[方法说明](docs/InteractionFlow模型架构.md)，训练、续训和评测命令见[运行与验证](docs/InteractionFlow模型架构.md#运行与验证)。其训练需要启用 EMA；未来观测由 Dataset 从原示教中读取，不需要额外生成标签。
+InteractionFlow 的观测字段与动作窗口见[方法说明](docs/InteractionFlow模型架构.md)，训练、续训和评测命令见[运行与验证](docs/InteractionFlow模型架构.md#运行与验证)。EMA 默认开启，用于权重平均与评测，也可通过 `training.use_ema=false` 关闭。
 
 ## 文档
 
 - 了解项目和数据　[项目架构](docs/项目架构.md) · [示教数据格式](docs/仿真数据集格式.md)
-- 理解策略　[DAI-Flow 模型架构](docs/InteractionFlow模型架构.md) · [触觉与交互建模](docs/触觉与交互建模.md) · [手部动作表示](docs/手部动作表示.md)
+- 理解策略　[InteractionFlow 模型架构](docs/InteractionFlow模型架构.md) · [触觉与交互建模](docs/触觉与交互建模.md) · [手部动作表示](docs/手部动作表示.md)
 - 运行实验　[预训练权重](data/README.md) · [观测预训练](docs/观测预训练.md) · [仿真评测与选模](docs/仿真评测机制.md) · [SSH 远程训练](docs/SSH服务器训练部署.md)

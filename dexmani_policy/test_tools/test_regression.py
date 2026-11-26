@@ -50,7 +50,7 @@ from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_c
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.inference import predict_actions, prepare_observations, restore_policy, select_inference_weights
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state, set_seed
+from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.afro import AFROPretrainDataset
@@ -646,9 +646,7 @@ def test_flow_time_embedding_reference_and_precision(dim, dtype, device):
     assert all(torch.isfinite(p.grad).all() for p in mlp.parameters())
 
 
-def test_discrete_time_embedding_and_auxiliary_attention_unchanged():
-    from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import FutureInteractionHead
-
+def test_discrete_time_embedding_unchanged():
     model = TimestepMLP(128, 16)
     assert isinstance(model.net[0], SinusoidalTimestepEmbedding)
     times = torch.tensor([0., 1., 50., 999.])
@@ -656,9 +654,6 @@ def test_discrete_time_embedding_and_auxiliary_attention_unchanged():
     angles = times[:, None] * frequencies[None, :]
     torch.testing.assert_close(model.net[0](times), torch.cat((angles.sin(), angles.cos()), dim=-1))
     torch.testing.assert_close(model(times), model.net(times), rtol=0, atol=0)
-    head = FutureInteractionHead(16, 8)
-    assert isinstance(head.attention.q_norm, nn.Identity)
-    assert isinstance(head.attention.k_norm, nn.Identity)
 
 
 def test_cross_attention_qk_normalization_cache():
@@ -976,9 +971,9 @@ def test_interaction_embeddings_and_forward_cache(frames, qkv_bias, qk_norm):
     actions = torch.randn(2, 4, 19, requires_grad=True)
 
     def gradients(cache):
-        velocity, future = model(actions, 0.4, packed, context_kv=cache, return_future=True)
-        loss = velocity.square().mean() + future.square().mean()
-        return (velocity, future), torch.autograd.grad(loss, (actions, packed, *model.parameters()))
+        velocity = model(actions, 0.4, packed, context_kv=cache)
+        loss = velocity.square().mean()
+        return velocity, torch.autograd.grad(loss, (actions, packed, *model.parameters()))
 
     torch.testing.assert_close(gradients(model.prepare_context_kv(packed)), gradients(None))
     expected = model(actions, 0.4, packed)
@@ -1004,7 +999,7 @@ def test_interaction_time_only_modulations(batch, steps):
     cache = model.prepare_context_kv(context)
     assert len(cache) == len(model.ditx_blocks)
     assert all(len(layer_kv) == 2 for layer_kv in cache)
-    precomputed = list(model.sampling_modulations(times, cache, 10))
+    precomputed = list(model.sampling_modulations(times, 10))
     assert len(precomputed) == steps
     for time, modulation in zip(times, precomputed):
         assert modulation.shape == (1, 2, 12, 16)
@@ -1016,8 +1011,6 @@ def test_interaction_time_only_modulations(batch, steps):
         )
     changed = context.clone()
     changed[:, 6:8] += torch.randn(batch, 2, 8)
-    other = list(model.sampling_modulations(times, model.prepare_context_kv(changed), 10))
-    torch.testing.assert_close(precomputed, other, rtol=0, atol=0)
     captured = Mock(return_value=None)
     with model.adaln_modulation.register_forward_pre_hook(captured):
         first = model(actions, 0.4, context)
@@ -1034,44 +1027,7 @@ def test_interaction_time_only_modulations(batch, steps):
     torch.testing.assert_close(captured.call_args.args[1][0], model.timestep_embedder(training_times))
 
 
-@pytest.mark.parametrize("before", [1, 15])
-@pytest.mark.parametrize("resize", [None, (4, 6)])
-def test_future_observation_alignment(make_demo, before, resize):
-    path = make_demo(episode_ends=(1, 33, 65))
-    group = zarr.open_group(str(path), mode="r+")
-    rows = np.arange(65, dtype=np.float32)
-    group["data/joint_state"][:] = np.broadcast_to(rows[:, None], (65, 19))
-    group.create_dataset("data/rgb", data=np.broadcast_to(
-        np.arange(65, dtype=np.uint8)[:, None, None, None], (65, 2, 3, 3)).copy())
-    dataset = DemonstrationDataset(
-        path, sensor_modalities=["joint_state", "rgb"], horizon=16, obs_horizon=2,
-        pad_before=before, pad_after=15, future_obs_steps=15, rgb_preprocess_size=resize,
-    )
-    indices = [*reversed(range(len(dataset))), 0]
-    for index, item in zip(indices, dataset.__getitems__(indices)):
-        window, start, end = dataset.sampler.indices[index]
-        current = min(max(window + 1, start), end - 1)
-        expected = min(current + 15, end - 1)
-        assert item["future_obs_valid"].item() == (current + 15 < end)
-        assert item["future_obs"]["joint_state"].shape == (19,)
-        assert (item["future_obs"]["joint_state"] == expected).all()
-        assert item["future_obs"]["rgb"].shape == (3, *(resize or (2, 3)))
-        assert (item["future_obs"]["rgb"] == expected).all()
-        torch.testing.assert_close(item["future_obs"]["rgb"], dataset[index]["future_obs"]["rgb"])
-    index = np.flatnonzero(dataset.sampler.indices[:, 0] == 1)[0]
-    assert dataset[index]["future_obs_valid"]
-    assert dataset[index]["future_obs"]["joint_state"][0] == 17  # Window index 16, after the last action.
-    # Episode [1,33): current row 17 -> target 32 is the last valid observation.
-    index = np.flatnonzero(dataset.sampler.indices[:, 0] == 16)[0]
-    assert dataset[index]["future_obs_valid"]
-    assert dataset[index]["future_obs"]["joint_state"][0] == 32
-    # Current row 18 -> target 33 is exactly the exclusive episode end.
-    index = np.flatnonzero(dataset.sampler.indices[:, 0] == 17)[0]
-    assert not dataset[index]["future_obs_valid"]
-    assert not dataset.__getitems__([])
-
-
-def test_interaction_flow_default_shapes_and_inference(monkeypatch):
+def test_interaction_flow_default_shapes_and_inference():
     from dexmani_policy.agents.policies.interaction_flow import InteractionObservationEncoder
 
     class Tokens(nn.Module):
@@ -1105,84 +1061,10 @@ def test_interaction_flow_default_shapes_and_inference(monkeypatch):
     global_context, interaction = model._encode_condition(packed)
     assert global_context.shape == (2, 258, 768) and interaction.shape == (2, 12, 768)
     x = torch.randn(2, 16, 19)
-    final_hidden, head_input = Mock(return_value=None), Mock(return_value=None)
-    with (
-        torch.no_grad(),
-        model.ditx_blocks[-1].register_forward_hook(final_hidden),
-        model.future_head.register_forward_pre_hook(head_input),
-    ):
-        velocity, future = model(x, 0.5, packed, return_future=True)
-    hidden = final_hidden.call_args.args[2]
-    readout = head_input.call_args.args[1][0]
-    assert hidden.shape == (2, 16, 768) and readout.shape == (2, 15, 768)
-    torch.testing.assert_close(readout, hidden[:, 1:])
-    assert velocity.shape == x.shape and future.shape == (2, 6, 192)
-    monkeypatch.setattr(model.future_head, "forward", Mock(side_effect=AssertionError("future head in inference")))
     with torch.no_grad():
-        torch.testing.assert_close(model(x, 0.5, packed), velocity)
+        velocity = model(x, 0.5, packed)
+        assert velocity.shape == x.shape
         assert RectifiedFlow(model, 5).eval().predict_action(packed, x.shape).shape == x.shape
-
-
-@pytest.mark.parametrize("valid,times", [
-    ([True, False, True], [0.2, 0.9, 0.8]),
-    ([False, False], [0.7, 0.8]),
-    ([True, True], [0., 0.]),
-    ([True, True], [0.9, 0.9]),
-    ([True, True], [0.2, 0.4]),
-    ([True], [0.2]),
-    ([True], [1e-4]),
-])
-def test_interaction_flow_future_loss_formula_and_normalization(monkeypatch, valid, times):
-    from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
-
-    batch_size = len(valid)
-    mask = torch.tensor(valid)
-    policy = InteractionFlow.__new__(InteractionFlow)
-    Policy.__init__(policy, nn.Identity(), RectifiedFlow(nn.Identity()), 16, 2, 8, 19)
-    policy.future_loss_weight = 0.1
-    policy.normalizer = LinearNormalizer({"action": (19,), "joint_state": (19,)})
-    policy.normalizer["joint_state"].scale.fill_(2)
-    policy.normalizer["joint_state"].offset.fill_(3)
-    monkeypatch.setattr(policy, "_encode_obs", lambda obs: torch.zeros(batch_size, 270, 192))
-    prediction = torch.randn(batch_size, 6, 192, requires_grad=True)
-    target = torch.randn(batch_size, 6, 192, requires_grad=True)
-    velocity = torch.ones(batch_size, 16, 19, requires_grad=True)
-    timestep = torch.tensor(times)
-    monkeypatch.setattr(policy.action_decoder, "sample_training_pair", lambda actions: (
-        torch.zeros_like(actions), timestep, torch.zeros_like(actions)))
-    monkeypatch.setattr(policy.action_decoder.model, "forward", lambda *args, **kw: (velocity, prediction))
-    joints = torch.arange(batch_size, dtype=torch.float32)[:, None].expand(-1, 19)
-    # Invalid placeholders must never reach the teacher or affect the future loss.
-    future_joints = joints.clone()
-    future_joints[~mask] = float("nan")
-
-    def encode_future(obs):
-        assert not torch.is_grad_enabled()
-        torch.testing.assert_close(obs["joint_state"], joints[mask] * 2 + 3)
-        return target[mask] * 1
-
-    teacher = Mock(side_effect=encode_future)
-    batch = {"obs": {}, "action": torch.zeros_like(velocity),
-             "future_obs": {"joint_state": future_joints}, "future_obs_valid": mask}
-    loss, metrics = policy(batch, ema_interaction_encoder=teacher)
-    errors = (F.layer_norm(prediction, (192,)) - F.layer_norm(target, (192,))).abs().mean((1, 2))
-    expected = sum(t * t * errors[i] for i, (m, t) in enumerate(zip(valid, times)) if m) / max(sum(valid), 1)
-    expected = torch.as_tensor(expected)
-    torch.testing.assert_close(metrics["future_loss"], expected, atol=0, rtol=1e-5)
-    torch.testing.assert_close(loss, 1 + 0.1 * expected)
-    if valid == [True] and times == [0.2]:
-        torch.testing.assert_close(metrics["future_loss"], 0.04 * errors[0])
-    teacher_count = int(any(valid))
-    assert teacher.call_count == teacher_count
-    loss.backward()
-    assert target.grad is None
-    assert prediction.grad[~mask].count_nonzero() == 0
-    if not any(valid) or not any(times):
-        assert prediction.grad.count_nonzero() == 0
-    # FM still updates every sample, including those without a valid future.
-    assert (velocity.grad > 0).all()
-    assert policy(batch, ema_interaction_encoder=teacher, log_metrics=False)[1] == {}
-    assert teacher.call_count == 2 * teacher_count
 
 
 def test_rectified_training_pair_preserves_sampling():
@@ -1257,17 +1139,6 @@ def test_interaction_observation_matches_full_history(n_obs_steps):
         obs["point_cloud"][0].zero_()
         with pytest.raises(ValueError, match="empty frame"):
             encoder(obs)
-
-
-def test_interaction_future_offset_and_ema_contract():
-    cfg = load_config("interaction_flow", ["horizon=24", "n_obs_steps=3", "training.use_ema=false"])
-    assert cfg.dataset.future_obs_steps == 22
-    explicit = load_config("interaction_flow", ["horizon=24", "dataset.future_obs_steps=7"])
-    assert explicit.dataset.future_obs_steps == 7
-    from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
-    model = InteractionFlow.__new__(InteractionFlow)
-    with pytest.raises(ValueError, match="InteractionFlow requires training.use_ema=true"):
-        policy_training.PolicyTrainer(cfg, model, None)
 
 
 @pytest.mark.parametrize("decoder_type", [RectifiedFlow, ConsistencyFlow])
@@ -2295,7 +2166,9 @@ def save_tiny_hf_rgb(directory, kind):
     return source
 
 
-def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
+@pytest.mark.parametrize("use_ema", [False, True])
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo, use_ema, device):
     source, directory = tmp_path / "rgb", tmp_path / "interaction"
     pretrained = save_tiny_hf_rgb(source, "dino")
     path = make_demo(auxiliary=False, episode_ends=(32,))
@@ -2308,7 +2181,8 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         data[name] = value.numpy()[np.arange(len(data["action"])) % len(value)]
     cfg = load_config("interaction_flow", [
         f"zarr_path='{path}'", "task_name=test", f"workspace.output_dir='{directory}'",
-        "workspace.wandb_cfg=null", "training.device=cpu", "training.use_compile=false",
+        "workspace.wandb_cfg=null", f"training.device={device}", "training.use_compile=false",
+        f"training.use_ema={str(use_ema).lower()}",
         "dataloader.num_workers=0", "dataloader.batch_size=2", "training.lr_warmup_steps=0",
         f"initialization.rgb='{source}'", "agent.rgb_backbone_config.image_size=[8,8]",
         "agent.patch_config.num_patches=4", "agent.patch_config.group_size=4",
@@ -2317,66 +2191,45 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
     with closing(build_trainer(cfg)) as fresh:
         model = fresh.model
         encoder = model.obs_encoder
-        torch.testing.assert_close(encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict())
+        torch.testing.assert_close(
+            encoder.rgb_encoder.backbone.state_dict(), pretrained.state_dict(), check_device=False,
+        )
         assert not any(p.requires_grad for p in encoder.rgb_encoder.parameters())
         assert isinstance(model.action_decoder, RectifiedFlow) and model.action_decoder.model.action_io is None
         fresh.train(max_updates=2)
         batch = default_collate([fresh.train_loader.dataset[i] for i in (1, 2)])
-        assert batch["future_obs_valid"].all()
-        teacher = fresh.ema_model.obs_encoder.interaction_encoder
-        assert model.requires_ema_for_loss
-        loss, metrics = model(batch, ema_interaction_encoder=teacher)
-        assert all(torch.isfinite(v) for v in metrics.values())
-        assert all(p.grad is None for p in teacher.parameters())
+        assert set(batch) == {"obs", "action"}
+        batch = dict_apply(batch, lambda value: value.to(device))
+        assert not model.requires_ema_for_loss
+        loss, metrics = model(batch)
+        assert set(metrics) == {"loss"}
+        torch.testing.assert_close(loss.detach(), metrics["loss"])
+        assert model(batch, log_metrics=False)[1] == {}
+        assert torch.isfinite(loss)
         interaction = encoder.interaction_encoder
         gradients = torch.autograd.grad(loss, (
             encoder.state_encoder.mlp[0].weight, interaction.hand_encoder.finger_mlp[0].weight,
             interaction.tactile_encoder.force_encoder[0].weight,
             interaction.patch_encoder.geometry_embedding.projection.weight,
             model.action_decoder.model.context_embedder.weight, model.action_decoder.model.state_projection.weight,
+            model.action_decoder.model.ditx_blocks[0].scene_cross_attn.kv.weight,
+            model.action_decoder.model.ditx_blocks[0].interaction_cross_attn.kv.weight,
         ))
         assert all(g.isfinite().all() and g.abs().max() > 0 for g in gradients)
-        torch.testing.assert_close(fresh.ema_model.state_dict(), model.state_dict())
-        backbone = model.action_decoder.model
-        condition = model._encode_obs(batch["obs"])
-        actions = model._encode_actions(batch["action"])
-        xt, times, target_v = model.action_decoder.sample_training_pair(actions)
-        velocity, predicted = backbone(xt, times, condition, return_future=True)
-        target = teacher(batch["future_obs"])
-        fm = F.mse_loss(velocity, target_v)
-        per_sample = F.l1_loss(
-            F.layer_norm(predicted.float(), (192,)), F.layer_norm(target.float(), (192,)),
-            reduction="none",
-        ).mean((1, 2))
-        future_loss = (times.float().square() * per_sample).mean()
-        hand_weight = interaction.hand_encoder.finger_mlp[0].weight
-        fm_grads = torch.autograd.grad(fm, (
-            hand_weight, encoder.state_encoder.mlp[0].weight, backbone.state_projection.weight,
-        ), retain_graph=True)
-        assert all(g.isfinite().all() and g.abs().max() > 0 for g in fm_grads)
-        future_grads = torch.autograd.grad(future_loss, (
-            hand_weight, backbone.ditx_blocks[0].scene_cross_attn.kv.weight,
-            backbone.ditx_blocks[0].interaction_cross_attn.kv.weight,
-            backbone.future_head.queries, backbone.future_head.action_projection.weight,
-        ))
-        assert all(g.isfinite().all() and g.abs().max() > 0 for g in future_grads)
-        assert all(p.grad is None for p in teacher.parameters())
-        invalid_batch = default_collate([fresh.train_loader.dataset[i] for i in (-2, -1)])
-        assert not invalid_batch["future_obs_valid"].any()
-        with patch.object(teacher, "forward", side_effect=AssertionError("invalid teacher input")):
-            invalid_loss, invalid_metrics = model(invalid_batch, ema_interaction_encoder=teacher)
-        assert invalid_metrics["future_loss"].item() == 0
-        torch.testing.assert_close(invalid_loss, invalid_metrics["fm_loss"])
-        hand_grad, head_grad = torch.autograd.grad(invalid_loss, (hand_weight, backbone.future_head.queries))
-        assert hand_grad.isfinite().all() and hand_grad.abs().max() > 0
-        assert head_grad.count_nonzero() == 0
-        with patch.object(model, "compile_backbone") as student_compile, patch.object(
-            fresh.ema_model, "compile_backbone",
-        ) as teacher_compile:
+        if use_ema:
+            torch.testing.assert_close(fresh.ema_model.state_dict(), model.state_dict())
+            assert all(p.grad is None for p in fresh.ema_model.parameters())
+        else:
+            assert fresh.ema_model is None and fresh.ema_updater is None
+        with ExitStack() as stack:
+            student_compile = stack.enter_context(patch.object(model, "compile_backbone"))
+            if use_ema:
+                ema_compile = stack.enter_context(patch.object(fresh.ema_model, "compile_backbone"))
             fresh.cfg.training.use_compile = True
             fresh.compile_models()
             student_compile.assert_called_once()
-            teacher_compile.assert_not_called()
+            if use_ema:
+                ema_compile.assert_not_called()
             fresh.cfg.training.use_compile = False
 
         model.eval()
@@ -2404,21 +2257,30 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         physical_obs = {key: data[key][:2] for key in cfg.dataset.sensor_modalities}
         inputs = prepare_observations(
             physical_obs, normalization_dims=model.normalization_dims,
-            n_obs_steps=2, rgb_preprocessing=rgb_preprocessing_kwargs(cfg.dataset), device="cpu",
+            n_obs_steps=2, rgb_preprocessing=rgb_preprocessing_kwargs(cfg.dataset), device=device,
         )
-        with (
-            patch.object(backbone.future_head, "forward", side_effect=AssertionError("future head in inference")),
-            patch.object(teacher, "forward", side_effect=AssertionError("teacher in inference")),
-        ):
-            expected = predict_actions(model, inputs, generator=torch.Generator().manual_seed(17))
+        expected = predict_actions(model, inputs, generator=torch.Generator(device).manual_seed(17))
+        if use_ema:
+            ema_expected = predict_actions(
+                fresh.ema_model, inputs, generator=torch.Generator(device).manual_seed(17),
+            )
 
     source.rename(tmp_path / "detached_rgb_source")
     latest = directory / "checkpoints/latest.pt"
-    with closing(load_policy(latest, weights="raw", device="cpu", seed=17)) as runtime:
+    with closing(load_policy(latest, weights="raw", device=device, seed=17)) as runtime:
         result = runtime.predict(physical_obs)
         assert result.shape == (15, 19)
         np.testing.assert_allclose(result, expected)
+    if use_ema:
+        with closing(load_policy(latest, weights="ema", device=device, seed=17)) as runtime:
+            np.testing.assert_allclose(runtime.predict(physical_obs), ema_expected)
     with closing(prepare_resume(directory)) as resumed:
+        saved = load_checkpoint(latest)
+        torch.testing.assert_close(resumed.model.state_dict(), saved.model_state, check_device=False)
+        if use_ema:
+            torch.testing.assert_close(resumed.ema_model.state_dict(), saved.ema_model_state, check_device=False)
+        else:
+            assert saved.ema_model_state is None and resumed.ema_model is None
         assert resumed.global_step == 2
         resumed.train(max_updates=1)
         assert resumed.global_step == 3
@@ -2683,9 +2545,8 @@ def test_recipe_composition(method):
     if method == "flowmatch":
         assert cfg.agent.factorized is False
     if method == "interaction_flow":
-        assert cfg.dataset.future_obs_steps == cfg.horizon - (cfg.n_obs_steps - 1) == 15
         assert cfg.n_action_steps == 8
-        assert cfg.training.use_ema and cfg.agent.future_loss_weight == 0.1
+        assert cfg.training.use_ema
     hydra.utils.get_class(cfg.dataset._target_)
     if method == "r3d":
         assert cfg.dataset.use_aux_ee == cfg.agent.use_aux_ee == cfg.use_aux_ee
@@ -3011,43 +2872,33 @@ def test_sample_weighted_updates(tmp_path, monkeypatch, make_demo, count, batch_
         assert float(actual_gradients[0]) == pytest.approx(-2 / 129)
 
 
-@pytest.mark.parametrize("valid", [
-    [True, False, True, True, True],
-    [False, False, True, False, True],
-    [False, False, False, False, False],
-])
 @pytest.mark.parametrize("batch_sizes", [(2, 3), (5,)])
 @pytest.mark.parametrize("log_metrics", [False, True])
-def test_interaction_flow_accumulation_matches_combined(monkeypatch, valid, batch_sizes, log_metrics):
+def test_interaction_flow_accumulation_matches_combined(monkeypatch, batch_sizes, log_metrics):
     from dexmani_policy.agents.policies.interaction_flow import InteractionFlow
 
     class Backbone(nn.Module):
         def __init__(self):
             super().__init__()
             self.velocity = nn.Parameter(torch.tensor(0.6))
-            self.future = nn.Parameter(torch.tensor([0.3, -0.7, 0.8, 1.2]))
 
-        def forward(self, x, timestep, context, return_future=False):
-            return self.velocity * x, context + self.future
+        def forward(self, x, timestep, context):
+            return self.velocity * x
 
     torch.manual_seed(7)
     model = InteractionFlow.__new__(InteractionFlow)
     Policy.__init__(model, nn.Identity(), RectifiedFlow(Backbone()), 1, 1, 1, 1)
-    model.future_loss_weight = 0.1
     model.normalizer = LinearNormalizer({"action": (1,)})
     monkeypatch.setattr(model, "_encode_obs", lambda obs: obs["latent"])
     monkeypatch.setattr(model.action_decoder, "sample_training_pair", lambda actions: (
         actions, actions[:, 0, 0], torch.zeros_like(actions),
     ))
-    teacher = Mock(side_effect=lambda obs: obs["latent"])
-    ema = SimpleNamespace(obs_encoder=SimpleNamespace(interaction_encoder=teacher))
     dataset = [
-        {"obs": {"latent": torch.randn(2, 4)}, "action": torch.tensor([[time]]),
-         "future_obs": {"latent": torch.randn(2, 4)}, "future_obs_valid": torch.tensor(mask)}
-        for time, mask in zip([0.1, 0.3, 0.5, 0.7, 0.9], valid)
+        {"obs": {"latent": torch.randn(2, 4)}, "action": torch.tensor([[time]])}
+        for time in [0.1, 0.3, 0.5, 0.7, 0.9]
     ]
     expected_loss, expected_metrics = model.compute_loss(
-        default_collate(dataset), ema_interaction_encoder=teacher, log_metrics=log_metrics,
+        default_collate(dataset), log_metrics=log_metrics,
     )
     parameters = tuple(model.parameters())
     expected_gradients = torch.autograd.grad(expected_loss, parameters)
@@ -3062,7 +2913,7 @@ def test_interaction_flow_accumulation_matches_combined(monkeypatch, valid, batc
         return loss, metrics, len(batch["action"])
 
     finite, metrics = backward_microbatches(
-        model.training_microbatches(iter(batches), ema), len(batches), parameters, forward,
+        model.training_microbatches(iter(batches), None), len(batches), parameters, forward,
         device="cpu", log_metrics=log_metrics,
     )
     assert finite
@@ -3070,9 +2921,6 @@ def test_interaction_flow_accumulation_matches_combined(monkeypatch, valid, batc
     # Metric aggregation deliberately accumulates in FP64.
     torch.testing.assert_close(metrics, {key: value.double() for key, value in expected_metrics.items()})
     assert model.action_decoder.model.velocity.grad.abs() > 0
-    if not any(valid):
-        assert teacher.call_count == 0
-        assert model.action_decoder.model.future.grad.count_nonzero() == 0
 
 
 @pytest.mark.parametrize("force_weight", [0.0, 0.7])

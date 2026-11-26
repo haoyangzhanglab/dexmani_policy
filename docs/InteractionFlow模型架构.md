@@ -1,6 +1,6 @@
-# DAI-Flow 模型架构
+# InteractionFlow 模型架构
 
-DAI-Flow（Dynamic-aware Interaction Flow for Dexterous Imitation Learning）以模仿学习为主体，将结构化手–物交互 Token 直接送入动作专家，并通过动作隐藏特征预测未来交互 Latent。未来预测仅作为训练监督，不重建观测，也不使用历史交互差分。
+InteractionFlow 是 Interaction-conditioned Rectified Flow Policy，将结构化手–物交互 Token 与场景、关节状态共同作为动作专家的条件，以标准 Rectified Flow Matching Loss 训练。
 
 配置入口为 `interaction_flow`，实现类为 `InteractionFlow`。下文维度取自[默认配方](../dexmani_policy/configs/interaction_flow.yaml)：动作窗口 16、观测窗口 2、执行窗口 8。
 
@@ -22,7 +22,7 @@ DAI-Flow（Dynamic-aware Interaction Flow for Dexterous Imitation Learning）以
 
 五指顺序固定为 Thumb、Index、Middle、Ring、Little。交互 Token 在五指之前增加 Wrist。`joint_state` 和 `action` 使用训练数据拟合的 limits 归一化；几何、相机、触觉字段使用 identity，RGB 由 ImageProcessor 处理。
 
-训练 batch 另含单帧 `future_obs`（每个字段为 `[B,...]`，没有时间维）和布尔 `future_obs_valid: [B]`。`predict_action()` 只接收观测字典，返回 `future_actions: [B,15,19]`，执行器每轮使用前 8 步。
+训练 batch 包含观测历史 `obs` 和完整动作窗口 `action`。`predict_action()` 只接收观测字典，返回 `future_actions: [B,15,19]`，执行器每轮使用前 8 步。
 
 ## 信息流
 
@@ -48,13 +48,11 @@ flowchart TD
     global_context -->|Global K/V| sca
     interaction -->|独立 Interaction K/V| ica
     ffn --> velocity["Action Velocity：16 × 19"]
-    ffn -. "训练：hidden[:,1:]" .-> head["Future Head：6 × 192"]
-    future["t+15 单帧有效观测"] -.-> teacher["EMA Interaction Encoder：no_grad"]
-    teacher -.-> loss["Future Loss"]
-    head -.-> loss
+    velocity --> loss["训练：Rectified Flow Matching Loss"]
+    velocity --> sampling["推理：Euler Sampling → 动作反归一化"]
 ```
 
-虚线为训练期辅助路径。推理以噪声初始化动作，反复计算 Action Velocity 并做 Euler 积分。
+训练和推理共用同一 Action Backbone Forward。推理以噪声初始化动作，反复计算 Action Velocity 并做 Euler 积分。
 
 ## 单帧观测编码
 
@@ -96,58 +94,27 @@ Interaction 先恢复 `[B,T,6,192]`，投影到768维，再广播加入独立的
 
 动作专家保持8层、768维、8 heads、MLP ratio 4。每层顺序为 Self-Attention、Global Cross-Attention、Interaction Cross-Attention、FFN，每个子层均为 Pre-Norm、AdaLN 和 Gated Residual。Interaction Query 来自 Global Residual 更新后的 Hidden States；两路 Cross-Attention 拥有独立 Q/K/V/O 和 Softmax。每层12组 Shift/Scale/Gate 仅由 Flow Timestep Embedding 生成；State 只通过 Global Context 注入。AdaLN 与 Velocity 输出层保持零初始化，Attention 输出投影沿用 Xavier 初始化。
 
-两路 Cross-Attention 默认开启 `qk_norm`，Q/K 在每个 head 内做 LayerNorm，Value 和 SDPA 缩放不变；缓存 Key 只在准备 K/V 时归一化一次。Flow 时间特征使用共享的 π₀ 连续 Sin/Cos 编码，周期为0.004至4.0，相位和三角函数均用 FP32 计算，接入原有 Mish Time MLP。训练、普通推理和预计算 AdaLN 共用此路径；原始 Flow Time 及 Future Loss 的时间权重不变。[公共设置与公式](手部动作表示.md#flow-matching-的公共设置)
+两路 Cross-Attention 默认开启 `qk_norm`，Q/K 在每个 head 内做 LayerNorm，Value 和 SDPA 缩放不变；缓存 Key 只在准备 K/V 时归一化一次。Flow 时间特征使用共享的 π₀ 连续 Sin/Cos 编码，周期为0.004至4.0，相位和三角函数均用 FP32 计算，接入原有 Mish Time MLP。训练、普通推理和预计算 AdaLN 共用此路径；Flow Time 采样保持不变。[公共设置与公式](手部动作表示.md#flow-matching-的公共设置)
 
 16个时间动作 Tokens 的输入输出仍为 `[B,16,19]`，Hidden States 为 `[B,16,768]`。
 
-## 训练期 Future Interaction Latent
+## 动作窗口与训练目标
 
-### 预测头与 Teacher
+默认观测历史为 t−1、t，动作窗口包含历史对齐位置 t−1 及 t 至 t+14。Policy 返回后 15 步动作，执行器每轮执行前 8 步。Dataset 在回合边界重复首尾帧进行 Padding。
 
-最后一层动作隐藏特征为 `[B,16,768]`。Future Head 只读取 `hidden[:, action_start_index:]`，其中 `action_start_index=n_obs_steps-1=1`，即未来动作位置 1–15，形状为 `[B,15,768]`，再投影到 192 维。历史位置 0 不进入 Head 的 Readout Memory；DiTX 内仍保留双向 Self-Attention。六个可学习 Query 通过一次 4-head Cross-Attention 读取动作特征，再经 LayerNorm 和 `192→384→192` MLP 输出 `[B,6,192]`。Query 身份顺序与 Interaction Encoder 相同。
+InteractionFlow 直接复用 `Policy.compute_loss()` 和 `RectifiedFlow.compute_loss()`。观测与动作归一化后，`RectifiedFlow.sample_training_pair()` 采样高斯噪声及 Flow 时间。默认 `time_shift_alpha=1`，每个样本的时间在 [0,1) 上均匀采样，16 个动作位置共用该时间。
 
-目标来自现有 EMA Policy 的 Interaction Encoder，在 `torch.no_grad()` 下仅编码 `future_obs_valid=True` 的单帧未来观测。有效索引只计算一次，以 `index_select` 复用索引筛选后，使用当前 Policy 的 LinearNormalizer 归一化，Teacher 输入保持 `[N_valid,...]`，不增加观测历史维度。当前与未来 RGB 使用相同的确定性预处理；预测值和时间权重取相同的有效子集。`training_microbatches()` 传入 Teacher Encoder 及辅助损失缩放系数，Trainer 在初始化时检查 Policy 的 EMA 依赖，并沿用现有 EMA 更新；是否编译 EMA Action Backbone 则由 Decoder 的依赖决定，InteractionFlow 不需要编译它。
+```python
+loss = F.mse_loss(pred_velocity.float(), target_velocity.float())
+```
 
-全无效 Batch 跳过 Teacher，Student 仍计算动作速度和 Future Latent。辅助损失通过 `future.float().sum() * 0.0` 保留计算图并返回零，FM 正常训练。推理则完全跳过 Future Head。
+其中 `target_velocity = actions - noise`。损失覆盖完整动作窗口，以 FP32 计算。梯度经过动作专家回到当前观测编码器的可训练参数。日志沿用 RectifiedFlow，仅报告 `loss`；关闭指标时返回空字典。梯度累积使用通用 Trainer 按样本数汇总。
 
-### 时间对齐与有效性
-
-Dataset 先通过 `SequenceSampler.source_rows()` 找到最新观测的真实 Zarr 行号 `r`，再计算 `r + future_obs_steps`；默认推导得到 `future_obs_steps=15`，计算关系为 `horizon-(n_obs_steps-1)=16-(2-1)`。它对应完整预测 Action Chunk 的终点：最新观测为 `t`，15 个未来动作对应 `t` 至 `t+14`，目标为 `t+15`，普通窗口索引为 16。实际闭环仍只执行前 8 步动作。目标达到或超过 exclusive Episode End 时，读取本 Episode 末行并置 `future_obs_valid=False`。样本仍参与 FM 训练，不将 Padding 后的未来帧当成有效监督。
-
-| 窗口相对索引 | 0 | 1–8 | 9–15 | 16 |
-| --- | --- | --- | --- | --- |
-| 时刻 | t−1 | t 至 t+7 | t+8 至 t+14 | t+15 |
-| 用途 | 历史对齐位置 | 本轮执行的动作 | 预测 Chunk 的其余动作 | Future Target，另行读取观测 |
-
-### 训练目标
-
-`RectifiedFlow.sample_training_pair()` 供普通 FM 和辅助训练共用，保持高斯噪声采样与 Flow 时间采样。默认 `time_shift_alpha=1`，每个样本的时间在 `[0,1)` 上均匀采样，16 个动作位置共用该时间。FM Loss 覆盖整个动作窗口：
-
-$$
-x_\tau=(1-\tau)\epsilon+\tau a^*,\qquad
-\mathcal L_{FM}=\operatorname{MSE}(v_\theta,a^*-\epsilon).
-$$
-
-Future Loss 在每个 Token 的特征维做无参数 LayerNorm，再对 Token 和特征维取 L1 均值，得到每个样本的误差 $\ell_b$。Teacher 停止梯度，预测路径保持梯度：
-
-$$
-\mathcal L_{future}=\frac{\sum_b m_b\tau_b^2\ell_b}{\max(\sum_b m_b,1)},\qquad
-\mathcal L=\mathcal L_{FM}+0.1\mathcal L_{future}.
-$$
-
-实现对非空有效子集的 `τ²ℓ` 直接取均值，等价于除以有效样本数量，保留 `τ²` 的绝对衰减：只有一个有效样本且 `τ=0.2` 时，Future Loss 为 `0.04ℓ`。FM 和 Future Loss 均用 FP32 计算。无效样本不贡献 Future Loss 梯度；有效样本的梯度经过预测头、动作专家回到当前 Interaction Encoder，Teacher 不产生梯度。
-
-公式的求和范围为整个梯度累积组。`training_microbatches()` 先统计各批有效数 `v_i`、样本数 `n_i` 和组内总数 `V`、`N`，再将每批 Future Loss 及其日志乘以 `v_i*N/(n_i*V)`；`V=0` 时系数为零。通用 Trainer 按样本数汇总后，Future Loss 的梯度和日志均以组内有效样本总数为分母，FM 仍按全部样本平均。默认 `gradient_accumulation_steps=1` 时，有效批次的缩放系数为 1。
-
-| 日志指标 | 含义 |
-| --- | --- |
-| `fm_loss` | 整个动作窗口的 FP32 MSE |
-| `future_loss` | 累积组内有效样本的 `τ²ℓ` 均值，全无效时为零，尚未乘以 0.1 |
-| `loss` | `fm_loss + 0.1 * future_loss` |
+EMA 默认开启，用于权重平均、checkpoint 保存恢复和 EMA Policy 评测；训练损失不依赖 EMA，设置 `training.use_ema=false` 仍可正常训练。
 
 ## 推理
 
-`InteractionDiTX.forward(..., return_future=False)` 只返回动作速度；显式传入 `return_future=True` 时返回 `(velocity, future_latent)`。该辅助接口由训练损失调用，开关不依赖模块的 train/eval 状态。推理不读取未来观测、不调用 Teacher，也不预测未来 Latent。
+`InteractionDiTX` 继承 `DiTX.forward()`，训练和推理均只返回动作速度。
 
 各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，Scene、State 和 Interaction 各投影一次，每层 Global K/V 与 Interaction K/V 各缓存一次，每层直接缓存 `(global_kv, interaction_kv)`，不携带 State AdaLN 条件。10 次 Euler 迭代复用该请求内的缓存及分块预计算的12组 Time-only AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。每步调制形状为 `[1,L,12,D]`，直接广播到整个 Batch，不复制相同参数。单步采样沿用直接前向；训练仍使用各样本独立的 Flow Timestep。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
@@ -171,19 +138,15 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
-| `dataset.future_obs_steps` | `null` → `15` | 完整预测动作跨度 `horizon-(n_obs_steps-1)` |
-| `agent.future_loss_weight` | `0.1` | Future Loss 系数 |
-| `training.use_ema` | `true` | 提供未来交互 Teacher，训练必须启用 |
-| `training.use_compile` | `true` | 编译 Student Action Backbone |
+| `training.use_ema` | `true` | 可选的 EMA 权重平均与评测 |
+| `training.use_compile` | `true` | 编译训练用 Action Backbone |
 | `training.use_bfloat16` | `false` | 默认 FP32；显式开启才使用 BF16 autocast 训练 |
 | `agent.num_inference_steps` | `10` | Euler 积分次数 |
 | `agent.qk_norm` | `true` | 两路 Cross-Attention 的 Q/K LayerNorm |
 
-`dataset.future_obs_steps=null` 在配置组装时按 `horizon-n_obs_steps+1` 推导，随窗口参数自动变化；显式整数用于覆盖实验目标偏移。该推导属于策略配置组装；直接构造 `DemonstrationDataset(future_obs_steps=None)` 仍表示不读取未来观测。
+默认标定数据路径在 Dataset 中保留 RGB 分辨率，由 Encoder 内的 ImageProcessor 做 resize 和归一化。
 
-默认标定数据路径在 Dataset 中保留 RGB 分辨率，由 Encoder 内的 ImageProcessor 做 resize 和归一化。启用未来观测采样时，Dataset 不接受随机 RGB 裁剪或颜色增强；当前和未来目标均使用确定性预处理。
-
-相关实现：[Policy 与损失](../dexmani_policy/agents/policies/interaction_flow.py)、[DiTX 与 Future Head](../dexmani_policy/agents/action_decoders/backbones/interaction_ditx.py)、[Flow 采样](../dexmani_policy/agents/action_decoders/flow.py)、[Dataset](../dexmani_policy/datasets/demonstration.py)。
+相关实现：[Policy 与损失](../dexmani_policy/agents/policies/interaction_flow.py)、[InteractionDiTX](../dexmani_policy/agents/action_decoders/backbones/interaction_ditx.py)、[Flow 采样](../dexmani_policy/agents/action_decoders/flow.py)、[Dataset](../dexmani_policy/datasets/demonstration.py)。
 
 ```bash
 python -m pytest dexmani_policy/test_tools/test_regression.py -q
@@ -191,11 +154,10 @@ python -m pytest dexmani_policy/test_tools/test_regression.py -q
 
 相关回归测试覆盖：
 
-- Condition Packing、Context K/V 缓存等价性，以及 Future Head 的实际输入等于最后一层隐藏特征的 `[:,1:]`。
-- Future Target 的窗口索引 16、回合末行占位和有效性 mask。
-- 全有效、部分有效、全无效、单样本、极小及不同 Flow 时间下的损失公式；Teacher 仅接收有效样本且不产生梯度。
-- FM 和 Future Loss 的梯度路径、全无效 Batch 的 FM 训练、EMA 更新、训练保存和恢复。
-- Rectified Flow 采样及推理跳过 Future Head。
+- Condition Packing、串行 Cross-Attention、Context K/V 缓存的输出与梯度等价性。
+- FM 梯度传播、普通日志与不等长 microbatch 的梯度累积。
+- EMA 开关、训练保存恢复、raw/EMA 权重推理和动作输出形状。
+- Time-only AdaLN、Rectified Flow 采样和观测历史。
 
 单元测试不衡量机器人任务成功率。
 
@@ -203,4 +165,4 @@ python -m pytest dexmani_policy/test_tools/test_regression.py -q
 
 回归测试覆盖真实 Encoder 的观测窗口1/2/3、逐帧 State 扰动隔离、完整 State 历史、共享 Frame Embedding、Time-only AdaLN、State 梯度，以及 EMA、梯度累积和保存恢复。采样覆盖 Batch Size 1及大于1、单步、5/10步及跨 Chunk 的 Euler，检查调制广播、顺序和 Cached/Uncached 输出及梯度等价性；缓存测试使用非零速度输出和 AdaLN 权重。
 
-默认 Action Backbone（含 Future Head）参数量为153,137,875。每层双路 QK LayerNorm 共包含768个参数，8层合计6,144。含 S 个时间步的预计算调制形状为 `[S,1,L,12,D]`，计算不随 Batch Size 重复。此处不将参数量或缓存机制视为延迟、完整训练效果或机器人闭环成功率的实测结论。
+默认 Action Backbone 参数量为152,693,011。每层双路 QK LayerNorm 共包含768个参数，8层合计6,144。含 S 个时间步的预计算调制形状为 `[S,1,L,12,D]`，计算不随 Batch Size 重复。此处不将参数量或缓存机制视为延迟、完整训练效果或机器人闭环成功率的实测结论。
