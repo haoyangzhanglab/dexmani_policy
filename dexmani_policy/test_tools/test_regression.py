@@ -2671,13 +2671,15 @@ def test_recipe_composition(method):
     assert cfg.dataset.obs_horizon == cfg.agent.n_obs_steps == cfg.n_obs_steps
     validate_config(cfg)
     if method in {"sat", "flowmatch", "dqrise", "dexlatent", "interaction_flow", "maniflow"}:
+        assert cfg.training.use_bfloat16 is False
         assert cfg.agent.num_inference_steps == cfg.eval.inference_steps == 10
         assert cfg.agent.qk_norm is True
         defaults = inspect.signature(hydra.utils.get_class(cfg.agent._target_)).parameters
         assert defaults["num_inference_steps"].default == 10
         assert defaults["qk_norm"].default is True
-        overridden = load_config(method, ["agent.num_inference_steps=5"])
+        overridden = load_config(method, ["agent.num_inference_steps=5", "training.use_bfloat16=true"])
         assert overridden.eval.inference_steps == 5
+        assert overridden.training.use_bfloat16 is True
     if method == "flowmatch":
         assert cfg.agent.factorized is False
     if method == "interaction_flow":

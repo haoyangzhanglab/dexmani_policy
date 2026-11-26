@@ -175,6 +175,7 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `agent.future_loss_weight` | `0.1` | Future Loss 系数 |
 | `training.use_ema` | `true` | 提供未来交互 Teacher，训练必须启用 |
 | `training.use_compile` | `true` | 编译 Student Action Backbone |
+| `training.use_bfloat16` | `false` | 默认 FP32；显式开启才使用 BF16 autocast 训练 |
 | `agent.num_inference_steps` | `10` | Euler 积分次数 |
 | `agent.qk_norm` | `true` | 两路 Cross-Attention 的 Q/K LayerNorm |
 
@@ -202,4 +203,4 @@ python -m pytest dexmani_policy/test_tools/test_regression.py -q
 
 回归测试覆盖真实 Encoder 的观测窗口1/2/3、逐帧 State 扰动隔离、完整 State 历史、共享 Frame Embedding、Time-only AdaLN、State 梯度，以及 EMA、梯度累积和保存恢复。采样覆盖 Batch Size 1及大于1、单步、5/10步及跨 Chunk 的 Euler，检查调制广播、顺序和 Cached/Uncached 输出及梯度等价性；缓存测试使用非零速度输出和 AdaLN 权重。
 
-默认 Action Backbone（含 Future Head）参数量为153,137,875。每层双路 QK LayerNorm 共新增768个参数，8层合计6,144。含 S 个时间步的预计算调制形状为 `[S,1,L,12,D]`，计算不随 Batch Size 重复。此处不将参数量或缓存机制视为延迟、完整训练效果或机器人闭环成功率的实测结论。
+默认 Action Backbone（含 Future Head）参数量为153,137,875。每层双路 QK LayerNorm 共包含768个参数，8层合计6,144。含 S 个时间步的预计算调制形状为 `[S,1,L,12,D]`，计算不随 Batch Size 重复。此处不将参数量或缓存机制视为延迟、完整训练效果或机器人闭环成功率的实测结论。
