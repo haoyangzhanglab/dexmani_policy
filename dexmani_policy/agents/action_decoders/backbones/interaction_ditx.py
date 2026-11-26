@@ -71,7 +71,7 @@ class FutureInteractionHead(nn.Module):
 
 
 class InteractionDiTX(DiTX):
-    """DAI-Flow action expert with scene-first serial conditioning."""
+    """DAI-Flow action expert with global-first serial conditioning and time-only AdaLN."""
 
     block_cls = InteractionDiTXBlock
     num_modulations = 12
@@ -83,31 +83,33 @@ class InteractionDiTX(DiTX):
         super().__init__(
             n_obs_steps=n_obs_steps, obs_token_dim=obs_token_dim, hidden_dim=hidden_dim, **kwargs,
         )
-        self.condition_counts = (n_obs_steps * num_scene_tokens, 1, n_obs_steps * 6)
+        self.condition_counts = (n_obs_steps * num_scene_tokens, n_obs_steps, n_obs_steps * 6)
         self.action_start_index = n_obs_steps - 1
         self.scene_norm = nn.LayerNorm(hidden_dim)
         self.interaction_projection = nn.Linear(obs_token_dim, hidden_dim)
         self.interaction_norm = nn.LayerNorm(hidden_dim)
         self.interaction_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         self.role_embeddings = nn.Parameter(torch.empty(1, 6, hidden_dim))
-        self.state_mlp = nn.Sequential(
-            nn.Linear(obs_token_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),
-        )
+        self.state_projection = nn.Linear(obs_token_dim, hidden_dim)
+        self.state_norm = nn.LayerNorm(hidden_dim)
         self.interaction_projection.apply(initialize_linear)
-        self.state_mlp.apply(initialize_linear)
+        self.state_projection.apply(initialize_linear)
         nn.init.normal_(self.role_embeddings, std=WEIGHT_INIT_STD)
         self.future_head = FutureInteractionHead(hidden_dim, obs_token_dim)
 
     def _encode_condition(self, context):
         scene, state, interaction = context.split(self.condition_counts, dim=1)
         scene = self.scene_norm(self.embed_context(scene))
+        state = self.state_projection(state)
+        state = self.state_norm(state + self.context_frame_pos_embed.to(state.dtype))
+        global_context = torch.cat((scene, state), dim=1)
         interaction = interaction.unflatten(1, (self.interaction_frame_pos_embed.shape[1], 6))
         interaction = self.interaction_projection(interaction)
         interaction = self.interaction_norm(
             interaction + self.interaction_frame_pos_embed.to(interaction.dtype).unsqueeze(2)
             + self.role_embeddings.to(interaction.dtype).unsqueeze(1)
         ).flatten(1, 2)
-        return (scene, interaction), self.state_mlp(state[:, 0])
+        return (global_context, interaction), None
 
     @overload
     def forward(
@@ -135,8 +137,7 @@ class InteractionDiTX(DiTX):
         return velocity
 
     def sampling_modulations(self, timesteps, context_kv, chunk_size):
-        state, _ = context_kv
         # Bound the per-step modulation tensor when the caller requests a longer Euler grid.
         for chunk in timesteps.split(chunk_size):
-            time = self.timestep_embedder(chunk).unsqueeze(1)
-            yield from self.adaln_modulation(time + state).unbind(0)
+            time = self.timestep_embedder(chunk)
+            yield from self.adaln_modulation(time).unsqueeze(1).unbind(0)

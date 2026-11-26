@@ -32,13 +32,12 @@ class InteractionObservationEncoder(nn.Module):
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         scene_tokens, scene_points, _ = self.interaction_encoder.encode_scene(obs)
-        latest = slice(self.n_obs_steps - 1, None, self.n_obs_steps)
         interaction = self.interaction_encoder.encode_interaction(
             obs, scene_tokens, scene_points,
         )
         scene = scene_tokens.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
-        state = self.state_encoder(obs["joint_state"][latest]).unsqueeze(1)
+        state = self.state_encoder(obs["joint_state"]).unflatten(0, (-1, self.n_obs_steps))
         return torch.cat((scene, state, interaction), dim=1)
 
 

@@ -759,7 +759,7 @@ def test_adaln_modulation_matches_independent_layers(groups):
     )
 
 
-@pytest.mark.parametrize("batch,steps", [(1, 1), (1, 5), (2, 7)])
+@pytest.mark.parametrize("batch,steps", [(1, 1), (2, 1), (1, 5), (2, 5), (2, 7)])
 def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
     torch.manual_seed(5)
     model = InteractionDiTX(
@@ -772,7 +772,7 @@ def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
         assert model.adaln_modulation.projection.bias.count_nonzero() == 0
         model.final_layer.ffn_final.fc2.weight.normal_(std=0.1)
         model.adaln_modulation.projection.weight.normal_(std=0.1)
-    packed = torch.randn(batch, 19, 8)
+    packed = torch.randn(batch, 20, 8)
     assert model.prepare_context_kv(packed) is None
     flow = RectifiedFlow(model, num_inference_steps=5).eval()
 
@@ -785,7 +785,7 @@ def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
     with (
         ExitStack() as stack,
         model.context_embedder.register_forward_pre_hook(scene_input),
-        model.state_mlp.register_forward_pre_hook(state_input),
+        model.state_projection.register_forward_pre_hook(state_input),
         model.adaln_modulation.register_forward_pre_hook(modulation),
     ):
         captures, queries = [], []
@@ -806,7 +806,7 @@ def test_interaction_ditx_frame_layout_and_cache(monkeypatch, batch, steps):
         assert capture.call_count == 1
     assert modulation.call_count == math.ceil(steps / flow.num_inference_steps)
     torch.testing.assert_close(scene_input.call_args.args[1][0], packed[:, :6])
-    torch.testing.assert_close(state_input.call_args.args[1][0], packed[:, 6])
+    torch.testing.assert_close(state_input.call_args.args[1][0], packed[:, 6:8])
 
     changed = packed.clone()
     changed[:, -1, 0] += 1
@@ -866,10 +866,20 @@ def test_interaction_embeddings_and_forward_cache(frames, qkv_bias, qk_norm):
         model.adaln_modulation.projection.weight.normal_(std=0.1)
         model.final_layer.ffn_final.fc2.weight.normal_(std=0.1)
         model.interaction_frame_pos_embed.normal_()
-    packed = torch.randn(2, frames * 9 + 1, 8, requires_grad=True)
-    (scene, interaction), _ = model._encode_condition(packed)
-    assert scene.shape == (2, frames * 3, 16)
-    raw = packed[:, frames * 3 + 1:].reshape(2, frames, 6, 8)
+        model.context_frame_pos_embed.normal_()
+    packed = torch.randn(2, frames * 10, 8, requires_grad=True)
+    (global_context, interaction), state_condition = model._encode_condition(packed)
+    assert state_condition is None
+    assert not any("state_mlp" in name for name, _ in model.named_modules())
+    assert global_context.shape == (2, frames * 4, 16)
+    scene_raw, state_raw, _ = packed.split(model.condition_counts, dim=1)
+    scene_reference = model.scene_norm(
+        model.context_embedder(scene_raw).reshape(2, frames, 3, 16)
+        + model.context_frame_pos_embed[:, :, None]
+    ).flatten(1, 2)
+    state_reference = model.state_norm(model.state_projection(state_raw) + model.context_frame_pos_embed)
+    torch.testing.assert_close(global_context, torch.cat((scene_reference, state_reference), dim=1))
+    raw = packed[:, frames * 4:].reshape(2, frames, 6, 8)
     reference = model.interaction_norm(
         model.interaction_projection(raw)
         + model.interaction_frame_pos_embed[:, :, None]
@@ -885,10 +895,55 @@ def test_interaction_embeddings_and_forward_cache(frames, qkv_bias, qk_norm):
 
     torch.testing.assert_close(gradients(model.prepare_context_kv(packed)), gradients(None))
     expected = model(actions, 0.4, packed)
-    for index in (0, frames * 3 + 1):
+    for index in (0, *range(frames * 3, frames * 4), frames * 4):
         changed = packed.clone()
         changed[:, index] += torch.randn(8)
         assert not torch.allclose(model(actions, 0.4, changed), expected)
+
+
+@pytest.mark.parametrize("batch,steps", [(1, 1), (3, 1), (1, 5), (3, 5), (3, 7)])
+def test_interaction_time_only_modulations(batch, steps):
+    torch.manual_seed(29)
+    model = InteractionDiTX(
+        horizon=4, action_dim=19, n_obs_steps=2, num_scene_tokens=3, obs_token_dim=8,
+        hidden_dim=16, n_head=2, n_layers=2, p_drop_attn=0,
+    ).eval()
+    with torch.no_grad():
+        model.adaln_modulation.projection.weight.normal_(std=0.1)
+        model.final_layer.ffn_final.fc2.weight.normal_(std=0.1)
+    context = torch.randn(batch, 20, 8)
+    actions = torch.randn(batch, 4, 19)
+    times = torch.arange(steps, dtype=torch.float32) / steps
+    cache = model.prepare_context_kv(context)
+    assert cache[0] is None
+    precomputed = list(model.sampling_modulations(times, cache, 5))
+    assert len(precomputed) == steps
+    for time, modulation in zip(times, precomputed):
+        assert modulation.shape == (1, 2, 12, 16)
+        expected = model.adaln_modulation(model.timestep_embedder(time.expand(batch)))
+        torch.testing.assert_close(modulation.expand(batch, -1, -1, -1), expected)
+        torch.testing.assert_close(
+            model(actions, time, context, context_kv=cache, modulations=modulation),
+            model(actions, time, context),
+        )
+    changed = context.clone()
+    changed[:, 6:8] += torch.randn(batch, 2, 8)
+    other = list(model.sampling_modulations(times, model.prepare_context_kv(changed), 5))
+    torch.testing.assert_close(precomputed, other, rtol=0, atol=0)
+    captured = Mock(return_value=None)
+    with model.adaln_modulation.register_forward_pre_hook(captured):
+        first = model(actions, 0.4, context)
+        second = model(actions, 0.4, changed)
+    expected_time = model.timestep_embedder(torch.full((batch,), 0.4))
+    for call in captured.call_args_list:
+        torch.testing.assert_close(call.args[1][0], expected_time, rtol=0, atol=0)
+    assert not torch.allclose(first, second)
+    # Training retains one time per sample instead of broadcasting the sampling grid.
+    model.train()
+    training_times = torch.linspace(0.1, 0.9, batch)
+    with model.adaln_modulation.register_forward_pre_hook(captured):
+        model(actions, training_times, context)
+    torch.testing.assert_close(captured.call_args.args[1][0], model.timestep_embedder(training_times))
 
 
 @pytest.mark.parametrize("before", [1, 15])
@@ -945,23 +1000,23 @@ def test_interaction_flow_default_shapes_and_inference(monkeypatch):
     obs = {"scene": torch.randn(4, 128, 192), "interaction": torch.randn(4, 6, 192),
            "joint_state": torch.randn(4, 19)}
     packed = encoder(obs)
-    assert packed.shape == (2, 269, 192)
+    assert packed.shape == (2, 270, 192)
     torch.testing.assert_close(packed[:, :256], obs["scene"].reshape(2, 256, 192))
-    torch.testing.assert_close(packed[:, 257:], obs["interaction"].reshape(2, 12, 192))
-    changed = {k: v.clone() for k, v in obs.items()}
+    torch.testing.assert_close(packed[:, 258:], obs["interaction"].reshape(2, 12, 192))
+    torch.testing.assert_close(packed[:, 256:258], encoder.state_encoder(obs["joint_state"]).reshape(2, 2, 192))
+    changed = {**obs, "interaction": obs["interaction"].clone()}
     changed["interaction"][::2] += 10
-    changed["joint_state"][::2] += 10
     updated = encoder(changed)
-    torch.testing.assert_close(updated[:, :257], packed[:, :257])
-    assert not torch.equal(updated[:, 257:], packed[:, 257:])
+    torch.testing.assert_close(updated[:, :258], packed[:, :258])
+    assert not torch.equal(updated[:, 258:], packed[:, 258:])
     model = InteractionDiTX(
         horizon=16, action_dim=19, n_obs_steps=2, num_scene_tokens=128, obs_token_dim=192,
         p_drop_attn=0,
     ).eval()
     assert len(model.ditx_blocks) == 8
-    (scene, interaction), state = model._encode_condition(packed)
-    assert scene.shape == (2, 256, 768) and interaction.shape == (2, 12, 768)
-    assert state.shape == (2, 768)
+    (global_context, interaction), state = model._encode_condition(packed)
+    assert global_context.shape == (2, 258, 768) and interaction.shape == (2, 12, 768)
+    assert state is None
     x = torch.randn(2, 16, 19)
     final_hidden, head_input = Mock(return_value=None), Mock(return_value=None)
     with (
@@ -1001,7 +1056,7 @@ def test_interaction_flow_future_loss_formula_and_normalization(monkeypatch, val
     policy.normalizer = LinearNormalizer({"action": (19,), "joint_state": (19,)})
     policy.normalizer["joint_state"].scale.fill_(2)
     policy.normalizer["joint_state"].offset.fill_(3)
-    monkeypatch.setattr(policy, "_encode_obs", lambda obs: torch.zeros(batch_size, 269, 192))
+    monkeypatch.setattr(policy, "_encode_obs", lambda obs: torch.zeros(batch_size, 270, 192))
     prediction = torch.randn(batch_size, 6, 192, requires_grad=True)
     target = torch.randn(batch_size, 6, 192, requires_grad=True)
     velocity = torch.ones(batch_size, 16, 19, requires_grad=True)
@@ -1075,22 +1130,26 @@ def test_interaction_observation_matches_full_history(n_obs_steps):
     obs["finger_tactile_force"] = torch.randn(2 * n_obs_steps, 5, 3)
     scene, centers, _ = interaction.encode_scene(obs)
     full = interaction.encode_interaction(obs, scene, centers)
+    scene_count = n_obs_steps * scene.shape[1]
+    interaction_start = scene_count + n_obs_steps
     expected = torch.cat((
         scene.reshape(2, -1, 192),
-        encoder.state_encoder(obs["joint_state"].reshape(2, n_obs_steps, 19)[:, -1]).unsqueeze(1),
+        encoder.state_encoder(obs["joint_state"].reshape(2, n_obs_steps, 19)),
         full.reshape(2, n_obs_steps * 6, 192),
     ), dim=1)
     capture = Mock(return_value=None)
     with (
         interaction.hand_encoder.register_forward_pre_hook(capture),
+        patch.object(encoder.state_encoder, "forward", wraps=encoder.state_encoder.forward) as state_encode,
         patch.object(interaction, "encode_scene", wraps=interaction.encode_scene) as encode_scene,
         patch.object(interaction, "encode_interaction", wraps=interaction.encode_interaction) as encode_interaction,
     ):
         actual = encoder(obs)
-    assert encode_scene.call_count == encode_interaction.call_count == 1
+    assert encode_scene.call_count == encode_interaction.call_count == state_encode.call_count == 1
+    torch.testing.assert_close(state_encode.call_args.args[0], obs["joint_state"])
     per_frame = torch.cat([interaction({key: value[i:i+1] for key, value in obs.items()})
                            for i in range(2 * n_obs_steps)])
-    torch.testing.assert_close(actual[:, n_obs_steps * 4 + 1:], per_frame.reshape(2, -1, 192))
+    torch.testing.assert_close(actual[:, interaction_start:], per_frame.reshape(2, -1, 192))
     assert capture.call_args.args[1][0].shape[0] == 2 * n_obs_steps
     torch.testing.assert_close(actual, expected)
     probe = torch.randn_like(actual)
@@ -1099,6 +1158,14 @@ def test_interaction_observation_matches_full_history(n_obs_steps):
         torch.autograd.grad(actual, parameters, probe),
         torch.autograd.grad(expected, parameters, probe), atol=2e-5, rtol=2e-4,
     )
+    for frame in range(n_obs_steps):
+        changed = {**obs, "joint_state": obs["joint_state"].clone()}
+        changed["joint_state"][frame::n_obs_steps] += 1
+        updated = encoder(changed)
+        token = scene_count + frame
+        assert not torch.allclose(updated[:, token], actual[:, token])
+        torch.testing.assert_close(updated[:, :token], actual[:, :token], rtol=0, atol=0)
+        torch.testing.assert_close(updated[:, token + 1:], actual[:, token + 1:], rtol=0, atol=0)
     if n_obs_steps > 1:
         obs["point_cloud"][0].zero_()
         with pytest.raises(ValueError, match="empty frame"):
@@ -2179,7 +2246,7 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
             encoder.state_encoder.mlp[0].weight, interaction.hand_encoder.finger_mlp[0].weight,
             interaction.tactile_encoder.force_encoder[0].weight,
             interaction.patch_encoder.geometry_embedding.projection.weight,
-            model.action_decoder.model.context_embedder.weight, model.action_decoder.model.state_mlp[0].weight,
+            model.action_decoder.model.context_embedder.weight, model.action_decoder.model.state_projection.weight,
         ))
         assert all(g.isfinite().all() and g.abs().max() > 0 for g in gradients)
         torch.testing.assert_close(fresh.ema_model.state_dict(), model.state_dict())
@@ -2196,8 +2263,10 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
         ).mean((1, 2))
         future_loss = (times.float().square() * per_sample).mean()
         hand_weight = interaction.hand_encoder.finger_mlp[0].weight
-        fm_grad, = torch.autograd.grad(fm, (hand_weight,), retain_graph=True)
-        assert fm_grad.isfinite().all() and fm_grad.abs().max() > 0
+        fm_grads = torch.autograd.grad(fm, (
+            hand_weight, encoder.state_encoder.mlp[0].weight, backbone.state_projection.weight,
+        ), retain_graph=True)
+        assert all(g.isfinite().all() and g.abs().max() > 0 for g in fm_grads)
         future_grads = torch.autograd.grad(future_loss, (
             hand_weight, backbone.ditx_blocks[0].scene_cross_attn.kv.weight,
             backbone.ditx_blocks[0].interaction_cross_attn.kv.weight,
@@ -2234,14 +2303,14 @@ def test_interaction_flow_training_routing_and_restore(tmp_path, make_demo):
                 packed = model._encode_obs(obs)
             assert scene_out.call_count == hand_out.call_count == 1
             torch.testing.assert_close(packed[:, :8], scene_out.call_args.args[2].unflatten(0, (2, 2)).flatten(1, 2))
-            torch.testing.assert_close(packed[:, 9:], hand_out.call_args.args[2].unflatten(0, (2, 2)).flatten(1, 2))
+            torch.testing.assert_close(packed[:, 10:], hand_out.call_args.args[2].unflatten(0, (2, 2)).flatten(1, 2))
             joint_tokens = encoder.state_encoder(model.normalizer["joint_state"].normalize(obs["joint_state"]))
-            torch.testing.assert_close(packed[:, 8], joint_tokens[:, -1])
+            torch.testing.assert_close(packed[:, 8:10], joint_tokens)
             for field in ("finger_tactile_force", "fingertip_xyz"):
                 changed = {**obs, field: obs[field] + 0.1}
                 updated = model._encode_obs(changed)
-                torch.testing.assert_close(updated[:, :9], packed[:, :9], rtol=0, atol=0)
-                assert not torch.allclose(updated[:, 9:], packed[:, 9:])
+                torch.testing.assert_close(updated[:, :10], packed[:, :10], rtol=0, atol=0)
+                assert not torch.allclose(updated[:, 10:], packed[:, 10:])
         with pytest.raises(ValueError, match="fingertip_xyz"):
             model._encode_obs({**obs, "fingertip_xyz": obs["fingertip_xyz"].flatten(0, 1).unsqueeze(0)})
 

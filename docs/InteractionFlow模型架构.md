@@ -33,17 +33,19 @@ flowchart TD
     scene_encoder --> inter_encoder["Interaction Encoder：同帧场景、运动学、触觉"]
     obs --> inter_encoder
     inter_encoder --> interaction["Interaction Projection + Frame / Role Embedding + LN<br/>12 × 768"]
-    joints["最新 Joint State"] --> condition["State Embedding + Timestep Embedding"]
-    condition --> adaln["每层12组 AdaLN：Shift / Scale / Gate × 4"]
+    obs --> joints["两帧 Joint State：StateEncoder → State Projection<br/>共享 Scene Frame Embedding + 独立 LN：2 × 768"]
+    scene --> global_context["Global Observation Context：258 × 768"]
+    joints --> global_context
+    time["Flow Timestep Embedding"] --> adaln["每层12组 AdaLN：Shift / Scale / Gate × 4"]
     noisy["Noisy Actions：16 × 19"] --> embed["Action Embedding"]
     subgraph block["Serial InteractionDiTX Block × 8"]
-        sa["AdaLN + Self-Attention + Gated Residual"] --> sca["AdaLN + Scene Cross-Attention + Gated Residual"]
+        sa["AdaLN + Self-Attention + Gated Residual"] --> sca["AdaLN + Global Cross-Attention + Gated Residual"]
         sca --> ica["AdaLN + Interaction Cross-Attention + Gated Residual"]
         ica --> ffn["AdaLN + FFN + Gated Residual"]
     end
     embed --> sa
     adaln --> block
-    scene -->|独立 Scene K/V| sca
+    global_context -->|Global K/V| sca
     interaction -->|独立 Interaction K/V| ica
     ffn --> velocity["Action Velocity：16 × 19"]
     ffn -. "训练：hidden[:,1:]" .-> head["Future Head：6 × 192"]
@@ -83,16 +85,16 @@ flowchart TD
 | Packed Condition 内容 | 默认形状 | 用途 |
 | --- | --- | --- |
 | 两帧 Scene，旧帧在前 | `[B,256,192]` | 独立 Linear 投影，加 Frame Embedding，再 LayerNorm |
-| 最新 Joint State | `[B,1,192]` | 独立 MLP 映射为 `[B,768]` |
+| 两帧 Joint State，旧帧在前 | `[B,2,192]` | 独立 Linear 投影，共享 Scene Frame Embedding，再独立 LayerNorm |
 | 两帧 Interaction，旧帧在前 | `[B,12,192]` | 独立 Linear 投影，加 Interaction Frame Embedding 和六个 Role Embeddings，再 LayerNorm |
 
-Scene 和 Interaction 使用相同的观测窗口。展平的 `[B*T,...]` 观测一次性执行 `encode_scene()`，再将同帧 Scene Tokens、Scene Points 与完整观测传入 `encode_interaction()`，不重复编码场景。每帧六个 Interaction Tokens 保持 Wrist、Thumb、Index、Middle、Ring、Little 顺序；State 仅使用最新帧。
+Scene、State 和 Interaction 使用相同的观测窗口。展平的 `[B*T,...]` 观测一次性执行 `encode_scene()`，再将同帧 Scene Tokens、Scene Points 与完整观测传入 `encode_interaction()`，不重复编码场景。每帧六个 Interaction Tokens 保持 Wrist、Thumb、Index、Middle、Ring、Little 顺序；StateEncoder 一次性编码完整 `[B*T,19]` 关节历史，并恢复为 `[B,T,192]`，沿用原有 limits 归一化。
 
-Packed Condition 顺序为 Scene、State、Interaction，计数为 `(T*num_scene_tokens, 1, T*6)`，默认 `[B,269,192]`，仅用于 Policy 与 Decoder 传递数据。Scene Context 为 `[B,256,768]`，Interaction Context 为 `[B,12,768]`，分别作为独立 Attention Memory。
+Packed Condition 顺序为 Scene、State、Interaction，计数为 `(T*num_scene_tokens, T, T*6)`，默认 `[B,270,192]`，仅用于 Policy 与 Decoder 传递数据。Scene `[B,256,768]` 与 State `[B,2,768]` 分别投影、加入同一个 `context_frame_pos_embed` 并独立归一化，再按 Scene、State 顺序组成 `[B,258,768]` Global Observation Context。Interaction Context 为 `[B,12,768]`，作为第二路独立 Attention Memory。
 
 Interaction 先恢复 `[B,T,6,192]`，投影到768维，再广播加入独立的 `[1,T,1,768]` Frame Embedding 和 `[1,1,6,768]` Role Embedding，归一化后展平。两路 Frame Embedding 均零初始化，Role Embedding 沿用标准差0.02的正态初始化。
 
-动作专家保持8层、768维、8 heads、MLP ratio 4。每层顺序为 Self-Attention、Scene Cross-Attention、Interaction Cross-Attention、FFN，每个子层均为 Pre-Norm、AdaLN 和 Gated Residual。Interaction Query 来自 Scene Residual 更新后的 Hidden States；两路 Cross-Attention 拥有独立 Q/K/V/O 和 Softmax。每层12组 Shift/Scale/Gate 由最新 State Embedding 与 Flow Timestep Embedding 之和生成。AdaLN 与 Velocity 输出层保持零初始化，Attention 输出投影沿用 Xavier 初始化。
+动作专家保持8层、768维、8 heads、MLP ratio 4。每层顺序为 Self-Attention、Global Cross-Attention、Interaction Cross-Attention、FFN，每个子层均为 Pre-Norm、AdaLN 和 Gated Residual。Interaction Query 来自 Global Residual 更新后的 Hidden States；两路 Cross-Attention 拥有独立 Q/K/V/O 和 Softmax。每层12组 Shift/Scale/Gate 仅由 Flow Timestep Embedding 生成；State 只通过 Global Context 注入。AdaLN 与 Velocity 输出层保持零初始化，Attention 输出投影沿用 Xavier 初始化。
 
 16个时间动作 Tokens 的输入输出仍为 `[B,16,19]`，Hidden States 为 `[B,16,768]`。
 
@@ -145,7 +147,7 @@ $$
 
 `InteractionDiTX.forward(..., return_future=False)` 只返回动作速度；显式传入 `return_future=True` 时返回 `(velocity, future_latent)`。该辅助接口由训练损失调用，开关不依赖模块的 train/eval 状态。推理不读取未来观测、不调用 Teacher，也不预测未来 Latent。
 
-各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，两路 Context Projection 各执行一次，每层 Scene K/V 与 Interaction K/V 各缓存一次，组织为 `(scene_kv, interaction_kv)`。5 次 Euler 迭代复用该请求内的缓存及预计算的12组 AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
+各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，Scene、State 和 Interaction 各投影一次，每层 Global K/V 与 Interaction K/V 各缓存一次，第一路缓存对应 Global Context，第二路对应 Interaction Context。5 次 Euler 迭代复用该请求内的缓存及分块预计算的12组 Time-only AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。每步调制形状为 `[1,L,12,D]`，直接广播到整个 Batch，不复制相同参数。单步采样沿用直接前向；训练仍使用各样本独立的 Flow Timestep。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
 ## 运行与验证
 
@@ -193,10 +195,10 @@ python -m pytest dexmani_policy/test_tools/test_regression.py -q
 
 单元测试不衡量机器人任务成功率。
 
-### 串联架构验证
+### Time-only AdaLN 验证
 
-完整回归测试271项通过，覆盖观测窗口1/2/3的批量与逐帧参考、串联查询、独立缓存、梯度和既有训练生命周期。普通 DiTX 与 ConsistencyDiTX 还与修改前代码逐项比较初始化参数及非零输出，结果完全一致。
+完整回归278项通过，覆盖真实 Encoder 的观测窗口1/2/3、逐帧 State 扰动隔离、完整 State 历史、共享 Frame Embedding、Time-only AdaLN、State 梯度，以及既有 EMA、梯度累积、保存恢复和其他策略测试。采样验证包含 Batch Size 1及大于1、1/5/7步 Euler，检查调制广播、跨 Chunk 顺序和 Cached/Uncached 输出及梯度等价性。
 
-在 RTX 4090、PyTorch 2.4.1+cu124 上验证默认尺寸前向和5步 Euler；使用32维、2层的小型 Backbone 验证真实 Inductor `torch.compile(fullgraph=True)` 的训练前向/反向、双路缓存及5步采样，与 eager 结果一致。编译验证只覆盖 Action Backbone，与现有训练编译边界一致。
+在 RTX 4090、PyTorch 2.4.1+cu124 上验证默认尺寸前向和5步 Euler；使用32维、2层 Backbone 验证真实 Inductor `torch.compile(fullgraph=True)` 训练前向/反向与缓存采样，与 eager 结果一致。
 
-默认 Action Backbone（含 Future Head）的参数量为153,720,787，较原实现120,664,531增加33,056,256。旧架构的延迟与显存测量不适用于本架构，因此移除旧性能表。本次未测量新架构性能、完整训练效果或机器人闭环成功率。
+默认 Action Backbone（含 Future Head）参数量从153,720,787降至153,131,731，减少589,056。含 S 个时间步的预计算调制由 `[S,B,L,12,D]` 缩减为 `[S,1,L,12,D]`，计算不再随 Batch Size 重复；这不是整体性能加速的实测结论。本次未运行性能基准、完整策略训练或机器人闭环评估。
