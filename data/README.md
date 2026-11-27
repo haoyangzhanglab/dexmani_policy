@@ -26,7 +26,6 @@
 | CordViP 接触与协调 | Aureleo 的实现，MIT。 [上游 LICENSE](https://github.com/xuanxuanzzzii/cordvip/blob/ad6d441abe7b0480cf79b0311db266965c1313b6/LICENSE) |
 | DQ-RISE VQ-VAE 与码本 | DQ-RISE 上游源码采用 CC BY-NC-SA 4.0。 [上游 LICENSE](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/LICENSE) |
 | DexLatent XHand 先验 | 本地改编保留 Yutong Liang 的 MIT 声明。 [本地声明](../dexmani_policy/agents/hand_prior/dexlatent.py) · [上游版本](https://github.com/EmptyBlueBox/DexLatent/tree/502750df34b9fa6a1b56a66481586887ec722f9c) |
-| ODE-Policy | 上游源码采用 Apache-2.0。 [上游 LICENSE](https://github.com/NTUMARS/ODE-POLICY/blob/bcea95a299dc3fa8b2a571603a5e8b50e1c449e9/LICENSE) |
 | R3D / Uni3D | Shenrui Wu 的 R3D 上游源码采用 MIT。Uni3D 发布权重的单独许可待确认。 [上游 LICENSE](https://github.com/Wushr-Lance/R3D-Policy/blob/e637c0148376ddc4b5e667fa8f8e108cb8ff7a85/LICENSE) · [权重页](https://huggingface.co/eddie-cui/r3d-weights) |
 | AdapTac 力引导 | 上游包元数据写 MIT，签入的 LICENSE 写 CC BY-NC-SA 4.0，适用条款待确认。 [包元数据](https://github.com/kingchou007/adaptac-dex/blob/60e2ef1b7b0a29f5d29f5d755e8fe6d048f69fa5/pyproject.toml) · [上游 LICENSE](https://github.com/kingchou007/adaptac-dex/blob/60e2ef1b7b0a29f5d29f5d755e8fe6d048f69fa5/LICENSE) |
 | DINOv3 权重 | 适用发布资产随附的 DINOv3 条款。 [权重 LICENSE](https://huggingface.co/timm/vit_small_patch16_dinov3.lvd1689m/blob/3bf4720a82ec2066db88137180ff1f83a675cef0/LICENSE.md) |

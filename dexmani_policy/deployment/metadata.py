@@ -17,7 +17,6 @@ class PolicyInfo:
     action_mode: str
     rgb_preprocessing: dict
     supports_rtc: bool
-    requires_prev_action: bool
     control_dt_s: float
     data_processing: dict | None
 
@@ -37,7 +36,6 @@ def policy_info(path, cfg, agent, *, weights, inference_steps) -> PolicyInfo:
         action_mode={"action": "joint", "action_ee": "eef", "action_rotvec": "eef_rotvec"}[cfg["action_key"]],
         rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]) if "rgb" in fields else {},
         supports_rtc=agent.supports_rtc,
-        requires_prev_action=agent.requires_prev_action,
         control_dt_s=cfg["control_dt_s"],
         data_processing=cfg["data_processing"],
     )

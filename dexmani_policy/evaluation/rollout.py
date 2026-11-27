@@ -31,7 +31,6 @@ def resolve_rollout_options(cfg, *, action_steps, skip_intermediate_observations
     agent = cfg["agent"]
     steps = resolve_action_steps(
         action_steps, n_action_steps=agent["n_action_steps"], future_steps=agent["horizon"] - agent["n_obs_steps"] + 1,
-        requires_prev_action=get_class(agent["_target_"]).requires_prev_action,
     )
     return runner_class, steps
 

@@ -29,7 +29,6 @@ from dexmani_policy.agents.action_decoders.backbones.modules import (
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
-from dexmani_policy.agents.action_decoders.ode import ODE
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, load_codebook
 from dexmani_policy.agents.obs_encoder import rgb_point
 from dexmani_policy.agents.obs_encoder.interaction import (
@@ -58,7 +57,6 @@ from dexmani_policy.datasets.pretrain.cordvip import CordViPPretrainDataset
 from dexmani_policy.datasets.preprocess.contact_map import batched_contact_maps, compute_contact_map
 from dexmani_policy.datasets.preprocess.contact_map import generate as generate_contacts
 from dexmani_policy.datasets.sampler import SequenceSampler
-from dexmani_policy.datasets.variants.ode import ODEDataset
 from dexmani_policy.datasets.variants.r3d import R3DDataset
 from dexmani_policy.datasets.variants.tactile import AdapTacDataset
 from dexmani_policy.deployment import load_policy
@@ -291,9 +289,8 @@ def test_ddim_config_and_checkpoint_overrides(small_dp3_checkpoint):
         load_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
     with pytest.raises(ValueError, match="leading DDIM"):
         rollout.evaluate_policy(small_dp3_checkpoint, inference_steps=1, device="cpu")
-    for name in ("ode", "maniflow"):
-        checkpoint.effective_config = load_config(name, ["eval.inference_steps=1"])
-        assert select_inference_weights(checkpoint)[1] == 1
+    checkpoint.effective_config = load_config("maniflow", ["eval.inference_steps=1"])
+    assert select_inference_weights(checkpoint)[1] == 1
 
 
 def test_ddim_training_grid_bounds_direct_sampling():
@@ -492,24 +489,6 @@ def test_bn_to_gn_copies_learned_affines():
     torch.testing.assert_close(model[0].weight, batch_norm.weight)
     torch.testing.assert_close(model[0].bias, batch_norm.bias)
     assert set(model[0].state_dict()) == {"weight", "bias"}
-
-
-def test_ode_reads_real_held_joint_targets_from_action(make_demo):
-    path = make_demo(episode_ends=(4, 12))
-    root = zarr.open_group(str(path), mode="a")
-    root.attrs.update(
-        format="dexmani.real.canonical", action_semantics="held_accepted_joint_target",
-        source_episodes=["capture", "capture"], source_row_ranges=[[0, 4], [4, 12]],
-    )
-    action = root["data/action"]
-    joint_state = root["data/joint_state"]
-    action[1] = action[0]
-    dataset = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
-
-    np.testing.assert_array_equal(dataset[0]["prev_action"], joint_state[0])
-    np.testing.assert_array_equal(dataset[1]["action"][0], action[0])
-    np.testing.assert_array_equal(dataset[2]["prev_action"], action[1])
-    np.testing.assert_array_equal(dataset[4]["prev_action"], joint_state[4])
 
 
 def test_afro_default_frames_use_only_complete_windows(segments):
@@ -758,28 +737,6 @@ def test_consistency_teacher_target_matches_reference(monkeypatch, mode):
     torch.testing.assert_close(result["target_t"], dt if mode == "relative" else next_t)
     torch.testing.assert_close(result["vt_target"], (final - start) / (1 - t[:, None, None]))
     assert not result["vt_target"].requires_grad
-
-
-@pytest.mark.parametrize("solver", ["euler", "rk4"])
-def test_ode_closed_form_and_detached_side_head(monkeypatch, solver):
-    decoder = ODE(4, 2, 3, 4, cond_dim=8, hidden_dim=8, num_layers=1,
-                  solver=solver, vel_scale=0.2, perturb_prob=0, side_head=2)
-    state, initial, condition = torch.randn(2, 3), torch.randn(2, 2), torch.randn(2, 4)
-    with monkeypatch.context() as patch:
-        patch.setattr(decoder.model, "forward", lambda action, *args: torch.full_like(action, 0.75))
-        actual = decoder.integrate(initial, state, None, substeps=3)
-        expected = initial[:, None] + 0.15 * torch.arange(1, 5).view(1, 4, 1)
-        torch.testing.assert_close(actual, expected)
-    reference = copy.deepcopy(decoder)
-    reference.num_components = 0
-    target = torch.randn(2, 4, 2)
-    loss, _ = decoder.compute_loss(condition, initial, state, target, perturb_std=0)
-    expected, _ = reference.compute_loss(condition, initial, state, target, perturb_std=0)
-    main = (*decoder.model.parameters(), *decoder.condition_encoder.parameters())
-    ref = (*reference.model.parameters(), *reference.condition_encoder.parameters())
-    grads = torch.autograd.grad(loss, (*main, *decoder.side_head.parameters()))
-    torch.testing.assert_close(grads[:len(main)], torch.autograd.grad(expected, ref))
-    assert any(grad.abs().sum() > 0 for grad in grads[len(main):])
 
 
 @pytest.mark.parametrize("backbone_class", [DiT, ditx.DiTX, ditx.ConsistencyDiTX])
@@ -1301,21 +1258,17 @@ def test_mean_std_deployment_matches_training_model(tmp_path, small_dp3_config):
             np.testing.assert_array_equal(runtime.predict(obs), expected)
 
 
-def test_ode_tactile_and_afro_temporal_targets(segments, monkeypatch):
+def test_tactile_and_afro_temporal_targets(segments):
     path, fields = segments
     group = zarr.open_group(str(path), mode="a")
     group["meta/episode_ends"][:] = [3, 6, 9, 12]
     options = dict(horizon=4, obs_horizon=2, pad_before=1, pad_after=3)
-    ode = ODEDataset(path, sensor_modalities=["joint_state"], **options)
     tactile = AdapTacDataset(path, sensor_modalities=["finger_tactile_force"], **options)
     afro = AFROPretrainDataset(path, frame_stride=2, horizon=4, pad_before=1, pad_after=3)
-    assert len(ode) == len(afro) == 16
+    assert len(afro) == 16
     assert len(tactile) == 8
     for episode in range(4):
         start = episode * 3
-        for offset, query in enumerate([start, start + 1, start + 2, start + 2]):
-            expected = fields["joint_state"][query] if query == start else fields["action"][query - 1]
-            np.testing.assert_array_equal(ode[episode * 4 + offset]["prev_action"], expected)
         for offset in range(2):
             sample = tactile[episode * 2 + offset]
             expected = [start + 1, start + 2, 0] if offset == 0 else [start + 2, 0, 0]
@@ -1323,21 +1276,6 @@ def test_ode_tactile_and_afro_temporal_targets(segments, monkeypatch):
             np.testing.assert_array_equal(sample["future_force_valid"], [True, offset == 0, False])
         for offset, rows in enumerate([[start, start + 1], [start, start + 2], [start + 1, start + 2], [start + 2] * 2]):
             np.testing.assert_array_equal(afro[episode * 4 + offset]["obs"]["point_cloud"], fields["point_cloud"][rows, :, :3])
-
-    read = ode.episode_store.read
-    action_reads = []
-
-    def record_read(key, index, **kwargs):
-        if key == "action":
-            action_reads.append(index)
-        return read(key, index, **kwargs)
-
-    monkeypatch.setattr(ode.episode_store, "read", record_read)
-    np.testing.assert_array_equal(ode[1]["prev_action"], fields["action"][0])
-    assert action_reads == [slice(0, 2), slice(2, 3)]
-    single = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=1)
-    np.testing.assert_array_equal(single[0]["prev_action"], fields["joint_state"][0])
-    np.testing.assert_array_equal(single[1]["prev_action"], fields["action"][0])
 
 
 def assert_loader_matches_items(dataset, monkeypatch):
@@ -1357,16 +1295,6 @@ def assert_loader_matches_items(dataset, monkeypatch):
     first["obs"][key].fill_(-1)
     torch.testing.assert_close(second["obs"][key], original, rtol=0, atol=0)
     return actual
-
-
-@pytest.mark.parametrize("obs_horizon", [1, 2])
-def test_ode_batch_uses_clean_previous_target(segments, monkeypatch, obs_horizon):
-    path, fields = segments
-    dataset = ODEDataset(path, sensor_modalities=["joint_state"], obs_horizon=obs_horizon, horizon=4,
-                         pad_before=2, pad_after=3, augmentation_cfg={"state": {"noise": {"noise_std": 0.2}}})
-    batch = assert_loader_matches_items(dataset, monkeypatch)
-    np.testing.assert_array_equal(batch["prev_action"][-1], fields["joint_state"][0])
-    assert not torch.equal(batch["prev_action"][-1], batch["obs"]["joint_state"][-1, 0])
 
 
 @pytest.mark.parametrize("key", ["finger_tactile_force", "taxel_tactile_force"])
@@ -2524,7 +2452,7 @@ def test_observation_identity_constraints(method, fields):
 
 @pytest.mark.parametrize("method", [
     "dp", "dp3", "r3d", "maniflow", "interaction_flow", "sat", "dqrise", "dexlatent", "flowmatch",
-    "afro", "cordvip", "adaptac", "ode",
+    "afro", "cordvip", "adaptac",
 ])
 def test_recipe_composition(method):
     cfg = load_config(method)
@@ -2573,13 +2501,6 @@ def test_flow_backbone_time_and_qk_defaults(backbone_class):
         assert isinstance(attention.q_norm, nn.LayerNorm)
         assert isinstance(attention.k_norm, nn.LayerNorm)
         assert attention.q_norm.normalized_shape == attention.k_norm.normalized_shape == (8,)
-
-
-def test_fixed_ode_layout():
-    from dexmani_policy.agents.policies.ode import ODEPolicy
-
-    with pytest.raises(ValueError, match="19"):
-        ODEPolicy(horizon=4, n_obs_steps=1, n_action_steps=4, action_dim=20)
 
 
 @pytest.mark.parametrize("tactile", ["force", "taxel"])
@@ -3615,6 +3536,37 @@ def test_restoration_inherits_host_settings(small_dp3_checkpoint, tmp_path, api,
     assert backend_settings() == (True, False, precision)
 
 
+def test_deployment_rtc_uses_physical_prefix_and_preserves_warmup_rng(small_dp3_checkpoint):
+    observation = {
+        "joint_state": np.zeros((1, 19), dtype=np.float32),
+        "point_cloud": np.zeros((1, 8, 6), dtype=np.float32),
+    }
+    prefix = np.full((2, 19), 0.1, dtype=np.float64)
+    with closing(load_policy(small_dp3_checkpoint, device="cpu", seed=73, inference_steps=2)) as runtime:
+        tensors = prepare_observations(
+            observation, normalization_dims=runtime.agent.normalization_dims,
+            n_obs_steps=runtime.info.n_obs_steps, rgb_preprocessing={}, device="cpu",
+        )
+        expected = predict_actions(
+            runtime.agent, tensors, inference_steps=2, generator=torch.Generator().manual_seed(73),
+            rtc_prefix=torch.from_numpy(prefix).float().unsqueeze(0), delay_steps=1, rtc_guidance_cap=0.2,
+        )
+        generator_state = runtime.generator.get_state()
+        runtime.warmup(observation, rtc_delay=1, rtc_guidance_cap=0.2)
+        torch.testing.assert_close(runtime.generator.get_state(), generator_state)
+        actual = runtime.predict(observation, rtc_prefix=prefix, delay_steps=1, rtc_guidance_cap=0.2)
+        np.testing.assert_array_equal(actual, expected)
+
+        for invalid, delay, message in (
+            (None, 1, "No prefix"),
+            (prefix[:, :-1], 0, "Invalid physical RTC prefix"),
+            (prefix, 3, "Invalid physical RTC prefix"),
+            (np.full_like(prefix, np.nan), 0, "Nonfinite physical RTC prefix"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                runtime.predict(observation, rtc_prefix=invalid, delay_steps=delay)
+
+
 # Simulation evaluation
 
 
@@ -3624,7 +3576,6 @@ class SmallPolicy(torch.nn.Module):
     future_steps = 3
     control_action_dim = 19
     normalization_dims = {"joint_state": 19, "action": 19}
-    requires_prev_action = True
     uses_ddim = False
 
     def __init__(self):
@@ -3632,8 +3583,8 @@ class SmallPolicy(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.zeros(()))
         self.calls = []
 
-    def predict_action(self, obs, *, generator, prev_action=None, **kwargs):
-        self.calls.append((obs["joint_state"].clone(), prev_action, generator.initial_seed()))
+    def predict_action(self, obs, *, generator, inference_steps=None):
+        self.calls.append((obs["joint_state"].clone(), generator.initial_seed()))
         return {"future_actions": torch.tensor([10., 20., 30.])[None, :, None].expand(1, 3, 19)}
 
 
@@ -3659,7 +3610,6 @@ class SmallEnv:
         return {"joint_state": self.state}, 0, done, False, {
             "success_condition": self.action_cnt >= 2,
             "success": done,
-            "executed_joint_action": action + 1,
         }
 
     def get_video(self):
@@ -3704,7 +3654,7 @@ def test_observation_history_owns_snapshots():
     np.testing.assert_array_equal(runner.get_stacked_obs()["joint_state"][:, 0], [9, 9, 9])
 
 
-def test_rollout_uses_executed_action_and_stops_mid_chunk(environments):
+def test_rollout_preserves_history_and_stops_mid_chunk(environments):
     agent = SmallPolicy()
     results = list(make_runner(env_rebuild_interval=1).run(
         agent, seeds=[7, 8], inference_steps=2, action_steps=2,
@@ -3714,10 +3664,9 @@ def test_rollout_uses_executed_action_and_stops_mid_chunk(environments):
     ]
     assert [env.close_count for env in environments] == [1, 1]
     for offset, seed in ((0, 7), (2, 8)):
-        assert agent.calls[offset][1] is None
-        torch.testing.assert_close(agent.calls[offset + 1][1], torch.full((1, 19), 21.))
+        np.testing.assert_array_equal(agent.calls[offset][0][0, :, 0], [0, 0, 0])
         np.testing.assert_array_equal(agent.calls[offset + 1][0][0, :, 0], [0, 1, 2])
-        assert agent.calls[offset][2] == agent.calls[offset + 1][2] == seed
+        assert agent.calls[offset][1] == agent.calls[offset + 1][1] == seed
 
 
 def test_stopping_rollout_iteration_closes_env(environments):
@@ -3905,13 +3854,13 @@ def test_selection_rejects_different_env_kwargs(checkpoints, tmp_path):
     (1, False, "leading DDIM"), (9, False, "num_training_steps"), (2, True, "EMA weights are absent"),
 ])
 def test_selection_checks_later_candidate_before_rollout(checkpoints, environments, tmp_path, steps, missing_ema, message):
-    for path, recipe in zip(checkpoints, ("ode", "dp3")):
-        ckpt = load_checkpoint(path)
-        ckpt.effective_config["agent"].update(_target_=load_config(recipe).agent._target_, horizon=4)
-        if recipe == "dp3":
-            ckpt.effective_config["agent"]["num_training_steps"] = 8
-            ckpt.effective_config["eval"]["use_ema"] = missing_ema
-        save_checkpoint(path, ckpt)
+    checkpoint = load_checkpoint(checkpoints[1])
+    agent = load_config("dp3", [
+        "horizon=4", "n_obs_steps=3", "n_action_steps=2", "agent.action_dim=19", "agent.num_training_steps=8",
+    ]).agent
+    checkpoint.effective_config["agent"] = OmegaConf.to_container(agent, resolve=True)
+    checkpoint.effective_config["eval"]["use_ema"] = missing_ema
+    save_checkpoint(checkpoints[1], checkpoint)
     output = tmp_path / "eval"
     with pytest.raises(ValueError, match=message) as caught:
         selection.run_pipeline(checkpoints, inference_steps=steps, selection_episodes=2, test_episodes=2,
@@ -3920,16 +3869,15 @@ def test_selection_checks_later_candidate_before_rollout(checkpoints, environmen
     assert not environments and not output.exists()
 
 
-@pytest.mark.parametrize("recipe,steps,message", [("dp3", 4, "future_steps"), ("ode", 1, "n_action_steps")])
-def test_selection_checks_execution_window_before_rollout(checkpoints, environments, tmp_path, recipe, steps, message):
-    for path, name, horizon in zip(checkpoints, ("maniflow", recipe), (8, 4)):
+def test_selection_checks_execution_window_before_rollout(checkpoints, environments, tmp_path):
+    for path, name, horizon in zip(checkpoints, ("maniflow", "dp3"), (8, 4)):
         checkpoint = load_checkpoint(path)
         agent = load_config(name, [f"horizon={horizon}", "n_obs_steps=2", "n_action_steps=3"]).agent
         checkpoint.effective_config["agent"] = OmegaConf.to_container(agent, resolve=True)
         save_checkpoint(path, checkpoint)
     output = tmp_path / "eval"
-    with pytest.raises(ValueError, match=message) as caught:
-        selection.run_pipeline(checkpoints, action_steps=steps, output_dir=output)
+    with pytest.raises(ValueError, match="future_steps") as caught:
+        selection.run_pipeline(checkpoints, action_steps=4, output_dir=output)
     assert str(checkpoints[1]) in str(caught.value)
     assert not environments and not output.exists()
 

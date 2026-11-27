@@ -9,16 +9,14 @@ import numpy as np
 import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, positive_int
-from dexmani_policy.common.inference import prepare_numeric_tensor, prepare_observations, predict_actions
+from dexmani_policy.common.inference import prepare_observations, predict_actions
 from dexmani_policy.common.io_util import cleanup_after_error, cleanup_on_exit
 
 
-def resolve_action_steps(steps: int | None, *, n_action_steps: int, future_steps: int, requires_prev_action: bool) -> int:
+def resolve_action_steps(steps: int | None, *, n_action_steps: int, future_steps: int) -> int:
     steps = positive_int(n_action_steps if steps is None else steps, "action_steps")
     if steps > future_steps:
         raise ValueError(f"action_steps must not exceed future_steps ({future_steps})")
-    if requires_prev_action and steps != n_action_steps:
-        raise ValueError("ODE execution requires action_steps == n_action_steps")
     return steps
 
 
@@ -70,19 +68,6 @@ class SimRunner:
     def reset(self):
         self.obs_buffer.clear()
 
-    def predict_action_chunk(
-        self, obs_batch, agent, inference_steps: int | None = None, *,
-        action_steps: int, generator=None, prev_action=None,
-    ) -> np.ndarray:
-        kwargs = {}
-        if prev_action is not None:
-            kwargs["prev_action"] = prepare_numeric_tensor(
-                prev_action, device=next(agent.parameters()).device, label="previous executed action",
-            )
-        return predict_actions(
-            agent, obs_batch, inference_steps=inference_steps, generator=generator, **kwargs,
-        )[:action_steps]
-
     def _run_episode(
         self,
         agent,
@@ -101,7 +86,6 @@ class SimRunner:
         generator = torch.Generator(device=device).manual_seed(episode_seed)
 
         task_done_step = None
-        prev_action = None
         skip_observations = self.skip_intermediate_observations and action_steps > self.n_obs_steps
         if skip_observations:
             from dexmani_sim import TACTILE_OBSERVATION_KEYS
@@ -110,10 +94,9 @@ class SimRunner:
 
         while True:
             obs_batch = self.get_obs_batch(device=device, normalization_dims=agent.normalization_dims)
-            action_chunk = self.predict_action_chunk(
-                obs_batch, agent, inference_steps=inference_steps,
-                action_steps=action_steps, generator=generator, prev_action=prev_action,
-            )
+            action_chunk = predict_actions(
+                agent, obs_batch, inference_steps=inference_steps, generator=generator,
+            )[:action_steps]
             skip_steps = len(action_chunk) - self.n_obs_steps if skip_observations else 0
             for index, action in enumerate(action_chunk):
                 if index < skip_steps:
@@ -121,9 +104,6 @@ class SimRunner:
                 else:
                     obs, _, done, truncated, info = env.step(action)
                     self.update_obs(obs)
-                if agent.requires_prev_action:
-                    prev_action = info["executed_joint_action"]
-
                 if info["success_condition"] and task_done_step is None:
                     task_done_step = env.action_cnt
 
@@ -135,7 +115,6 @@ class SimRunner:
             raise ValueError("Skipping intermediate observations requires video=False")
         action_steps = resolve_action_steps(
             action_steps, n_action_steps=agent.n_action_steps, future_steps=agent.future_steps,
-            requires_prev_action=agent.requires_prev_action,
         )
         unsupported = (TACTILE_FEATURE_SHAPES.keys() & set(self.sensor_modalities)) - {"finger_tactile_force"}
         if unsupported:

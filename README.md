@@ -41,7 +41,6 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | 配方名 | 方法 |
 | --- | --- |
 | `dp` / `dp3` | 分别基于 RGB 和点云的扩散策略 |
-| `ode` | 从上一条实际应用的关节目标积分生成轨迹 |
 | `r3d` | 用预训练三维表征生成动作 |
 | `maniflow` | 结合 Flow Matching 与一致性学习 |
 | `interaction_flow` | InteractionFlow：结构化手物交互驱动 Rectified Flow，使用标准 Flow Matching Loss 训练。 [InteractionFlow 模型架构](docs/InteractionFlow模型架构.md) |

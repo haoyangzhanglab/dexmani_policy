@@ -36,44 +36,31 @@ class PolicyRuntime:
     def reset_episode(self):
         self.generator.manual_seed(self.generator.initial_seed())
 
-    def _prepare_rtc(self, rtc_prefix, delay_steps, rtc_guidance_cap):
-        if type(delay_steps) is not int or delay_steps < 0:
-            raise ValueError("delay_steps must be a non-negative integer")
-        if rtc_prefix is None:
-            if delay_steps:
-                raise ValueError("No prefix requires delay_steps=0")
-            return {"rtc_guidance_cap": rtc_guidance_cap}
-        prefix = np.asarray(rtc_prefix)
-        if (
-            prefix.ndim != 2
-            or prefix.shape[1] != self.info.control_action_dim
-            or prefix.dtype.kind not in "fiu"
-            or not delay_steps <= len(prefix) <= self.info.future_steps
-        ):
-            raise ValueError("Invalid physical RTC prefix")
-        return {
-            "rtc_prefix": prepare_numeric_tensor(prefix, device=self.generator.device, label="physical RTC prefix"),
-            "delay_steps": delay_steps,
-            "rtc_guidance_cap": rtc_guidance_cap,
-        }
-
-    def predict(self, observation, *, prev_action=None, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
+    def predict(self, observation, *, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         tensors = prepare_observations(
             observation, normalization_dims=self.agent.normalization_dims,
             n_obs_steps=self.agent.n_obs_steps, rgb_preprocessing=self.info.rgb_preprocessing,
             device=self.generator.device,
         )
-        kwargs = self._prepare_rtc(rtc_prefix, delay_steps, rtc_guidance_cap)
-        if prev_action is not None:
-            previous = np.asarray(prev_action)
-            if previous.shape != (self.info.control_action_dim,) or previous.dtype.kind not in "fiu":
-                raise ValueError(f"prev_action requires a physical target of shape ({self.info.control_action_dim},)")
-            kwargs["prev_action"] = prepare_numeric_tensor(
-                previous, device=self.generator.device, label="physical prev_action",
-            )
+        if type(delay_steps) is not int or delay_steps < 0:
+            raise ValueError("delay_steps must be a non-negative integer")
+        if rtc_prefix is None:
+            if delay_steps:
+                raise ValueError("No prefix requires delay_steps=0")
+        else:
+            prefix = np.asarray(rtc_prefix)
+            if (
+                prefix.ndim != 2
+                or prefix.shape[1] != self.info.control_action_dim
+                or prefix.dtype.kind not in "fiu"
+                or not delay_steps <= len(prefix) <= self.info.future_steps
+            ):
+                raise ValueError("Invalid physical RTC prefix")
+            rtc_prefix = prepare_numeric_tensor(prefix, device=self.generator.device, label="physical RTC prefix")
         return predict_actions(
             self.agent, tensors, inference_steps=self.info.inference_steps,
-            generator=self.generator, **kwargs,
+            generator=self.generator, rtc_prefix=rtc_prefix,
+            delay_steps=delay_steps, rtc_guidance_cap=rtc_guidance_cap,
         )
 
     def warmup(self, observation, *, rtc_delay=0, rtc_guidance_cap=None):

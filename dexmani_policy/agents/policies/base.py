@@ -48,7 +48,6 @@ class Policy(nn.Module):
     uses_ddim: bool = False
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
     supports_rtc: bool = False
-    requires_prev_action: bool = False
 
     def __init__(
         self,
@@ -169,7 +168,6 @@ class Policy(nn.Module):
         inference_steps: int | None = None,
         *,
         generator: torch.Generator | None = None,
-        prev_action: torch.Tensor | None = None,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
