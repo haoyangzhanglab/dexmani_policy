@@ -34,30 +34,30 @@ from dexmani_policy.training.runtime import training_signals
 
 def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTrainer":
     cfg = copy.deepcopy(cfg)
-    normalize_output_dir(cfg)
+    output_dir = normalize_output_dir(cfg)
     with open_dict(cfg):
         remote_source = os.environ.get("DEXMANI_POLICY_REMOTE_SOURCE")
         cfg.pop("remote_source", None)
         if remote_source is not None:
             cfg.remote_source = remote_source
-    source = cfg.initialization.policy if checkpoint is None else None
+    warm_start = cfg.initialization.policy if checkpoint is None else None
     validate_config(cfg)
     model_checkpoint = checkpoint
-    if source is not None:
-        source = Path(source).expanduser().resolve()
-        model_checkpoint = load_checkpoint(source)
-        saved = model_checkpoint.effective_config
-        if cfg.agent._target_ != saved["agent"]["_target_"] or cfg.action_key != saved["action_key"]:
+    if warm_start is not None:
+        warm_start = Path(warm_start).expanduser().resolve()
+        model_checkpoint = load_checkpoint(warm_start)
+        warm_config = model_checkpoint.effective_config
+        if cfg.agent._target_ != warm_config["agent"]["_target_"] or cfg.action_key != warm_config["action_key"]:
             raise ValueError("Policy initialization requires the same policy and action semantics")
-        if cfg.agent.get("center_rotvec", False) != saved["agent"].get("center_rotvec", False):
+        if cfg.agent.get("center_rotvec", False) != warm_config["agent"].get("center_rotvec", False):
             raise ValueError("Policy initialization requires the same agent.center_rotvec setting")
         with open_dict(cfg):
-            cfg.normalization = saved["normalization"]
-            cfg.normalization_dims = saved["normalization_dims"]
+            cfg.normalization = warm_config["normalization"]
+            cfg.normalization_dims = warm_config["normalization_dims"]
             cfg.initialization.policy = None
-        initialization.prepare_warm_start(cfg.policy_name, cfg.agent, saved["agent"])
+        initialization.inherit_rgb_architecture(cfg.agent, warm_config["agent"])
     if checkpoint is None:
-        check_fresh_output(cfg.workspace.output_dir)
+        check_fresh_output(output_dir)
     if model_checkpoint is None:
         initialization.resolve_rgb_architecture(cfg.agent, cfg.initialization.get("rgb"))
     set_seed(cfg.training.seed + (checkpoint.global_step if checkpoint is not None else 0))
@@ -66,13 +66,14 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
     dataset, data_description = build_dataset(cfg)
     store = dataset.episode_store
     data_dt = data_description["control_dt_s"]
-    dexjoco = cfg.env_runner._target_ == f"{DexJoCoRunner.__module__}.{DexJoCoRunner.__name__}"
+    runner_class = hydra.utils.get_class(cfg.env_runner._target_)
+    dexjoco = issubclass(runner_class, DexJoCoRunner)
     record_data_processing(cfg, dataset, dexjoco=dexjoco)
     if checkpoint is None:
         record_training_data(cfg, store, dataset.train_mask)
         policy_dt = data_dt
-        if source is not None:
-            record_prior_data(cfg, dataset, source, saved["training_data"], from_policy=True)
+        if warm_start is not None:
+            record_prior_data(cfg, dataset, warm_start, warm_config["training_data"], from_policy=True)
     else:
         saved = checkpoint.effective_config
         restore_data_records(cfg, store, dataset.train_mask, saved=saved)
@@ -187,11 +188,10 @@ class PolicyTrainer:
 
     def compile_models(self):
         if self.cfg.training.use_compile:
-            models = [self.model]
-            if getattr(self.model.action_decoder, "requires_ema_for_loss", False):
-                models.append(self.ema_model)
-            for model in models:
-                model.compile_backbone(mode=self.cfg.training.compile_mode)
+            mode = self.cfg.training.compile_mode
+            self.model.compile_backbone(mode=mode)
+            if self.model.requires_ema_for_loss:
+                self.ema_model.compile_backbone(mode=mode)
 
     def close(self):
         self.logger.close()

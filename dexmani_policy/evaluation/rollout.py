@@ -8,9 +8,9 @@ from hydra.utils import get_class
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
-from dexmani_policy.common.inference import restore_policy, select_inference_weights
 from dexmani_policy.common.io_util import cleanup_on_exit, write_json
 from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.deployment import restore_policy, select_inference_weights
 from dexmani_policy.env_runner.dexjoco_runner import DexJoCoRunner
 from dexmani_policy.env_runner.sim_runner import SimRunner, resolve_action_steps
 from dexmani_policy.evaluation.metrics import summarize_episodes
@@ -24,8 +24,8 @@ def resolve_rollout_options(cfg, *, action_steps, skip_intermediate_observations
     action_key = cfg["action_key"]
     if runner_class is SimRunner and action_key == "action_rotvec":
         raise ValueError("The built-in SimRunner does not support action_rotvec; use a compatible custom runner")
-    if runner_class is DexJoCoRunner and action_key != "action_rotvec":
-        raise ValueError(f"DexJoCoRunner does not support {action_key}; use action_rotvec")
+    if issubclass(runner_class, DexJoCoRunner) and action_key != "action_rotvec":
+        raise ValueError(f"{runner_class.__name__} does not support {action_key}; use action_rotvec")
     if skip_intermediate_observations and (runner_class is not SimRunner or video):
         raise ValueError("--skip-intermediate-observations requires the built-in SimRunner and video=False")
     agent = cfg["agent"]
@@ -81,14 +81,17 @@ def evaluate_policy(checkpoint, *, weights=None, inference_steps=None, action_st
     torch.set_float32_matmul_precision("highest")
     agent = restore_policy(cfg, state_dict, device)
     del state_dict
-    options.update(control_dt_s=cfg["control_dt_s"],
-                   n_obs_steps=agent.n_obs_steps,
-                   sensor_modalities=[key for key in cfg["normalization_dims"] if key != "action"],
-                   rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]))
-    if runner_class is SimRunner:
-        options["skip_intermediate_observations"] = skip_intermediate_observations
-    elif runner_class is DexJoCoRunner:
+    fields = [key for key in agent.normalization_dims if key != "action"]
+    options.update(
+        control_dt_s=cfg["control_dt_s"],
+        n_obs_steps=agent.n_obs_steps,
+        sensor_modalities=fields,
+        rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]) if "rgb" in fields else {},
+    )
+    if issubclass(runner_class, DexJoCoRunner):
         options["data_processing"] = cfg["data_processing"]
+    elif runner_class is SimRunner:
+        options["skip_intermediate_observations"] = skip_intermediate_observations
     runner = runner_class(**options)
     record = dict(checkpoint=os.path.relpath(checkpoint, path.parent), global_step=global_step, weights=weights,
                   control_dt_s=cfg["control_dt_s"],

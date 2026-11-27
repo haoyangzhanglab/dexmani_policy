@@ -227,14 +227,15 @@ class DiTX(nn.Module):
         return tuple(block.prepare_context_kv(memory) for block in self.ditx_blocks)
 
     def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None, modulations=None,
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
     ) -> torch.Tensor:
+        time = self.timestep_embedder(batch_timesteps(timestep, x, dtype=torch.float32))
+        return self.forward_with_modulations(x, context, self.adaln_modulation(time), context_kv=context_kv)
+
+    def forward_with_modulations(self, x, context, modulations, *, context_kv=None):
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
         memory = self._encode_condition(context) if context_kv is None else None
-        if modulations is None:
-            time = self.timestep_embedder(batch_timesteps(timestep, x, dtype=torch.float32))
-            modulations = self.adaln_modulation(time)
 
         if self.action_io is None:
             x = self.input_embedder(x)

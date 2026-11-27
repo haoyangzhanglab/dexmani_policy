@@ -5,7 +5,7 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.obs_encoder.interaction import ContactCoordinationEncoder
+from dexmani_policy.agents.obs_encoder.interaction.correspondence import ContactCoordinationEncoder
 from dexmani_policy.agents.policies.base import Policy, module_parameter_group
 
 
@@ -31,6 +31,21 @@ class CordViP(Policy):
     uses_ddim = True
     supports_rtc = True
     supported_action_keys = ("action",)
+
+    @classmethod
+    def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
+        from dexmani_policy.training.initialization import create_policy, initialize_policy, load_encoder_prior
+
+        model = create_policy(cfg, dataset, checkpoint=checkpoint)
+        state, fields = None, ()
+        if checkpoint is None and cfg.initialization.encoder is not None:
+            state, fields = load_encoder_prior(
+                cfg, dataset, model.obs_encoder.interaction_encoder,
+                ("hand_pointcloud", "object_pointcloud", "joint_state"),
+            )
+        return initialize_policy(
+            model, cfg, dataset, field_dims, checkpoint=checkpoint, pretrained_state=state, inherited_fields=fields,
+        )
 
     def __init__(
         self,

@@ -9,8 +9,8 @@ import numpy as np
 import torch
 
 from dexmani_policy.common.config import TACTILE_FEATURE_SHAPES, positive_int
-from dexmani_policy.common.inference import prepare_observations, predict_actions
 from dexmani_policy.common.io_util import cleanup_after_error, cleanup_on_exit
+from dexmani_policy.deployment import prepare_observations, predict_actions
 
 
 def resolve_action_steps(steps: int | None, *, n_action_steps: int, future_steps: int) -> int:
@@ -59,12 +59,6 @@ class SimRunner:
         history = [history[0]] * (self.n_obs_steps - len(history)) + history
         return {name: np.stack([obs[name] for obs in history]) for name in self.sensor_modalities}
 
-    def get_obs_batch(self, device, *, normalization_dims) -> dict[str, torch.Tensor]:
-        return prepare_observations(
-            self.get_stacked_obs(), normalization_dims=normalization_dims,
-            n_obs_steps=self.n_obs_steps, rgb_preprocessing=self.rgb_preprocessing, device=device,
-        )
-
     def reset(self):
         self.obs_buffer.clear()
 
@@ -93,7 +87,10 @@ class SimRunner:
             collect_tactile = not set(self.sensor_modalities).isdisjoint(TACTILE_OBSERVATION_KEYS)
 
         while True:
-            obs_batch = self.get_obs_batch(device=device, normalization_dims=agent.normalization_dims)
+            obs_batch = prepare_observations(
+                self.get_stacked_obs(), normalization_dims=agent.normalization_dims,
+                n_obs_steps=self.n_obs_steps, rgb_preprocessing=self.rgb_preprocessing, device=device,
+            )
             action_chunk = predict_actions(
                 agent, obs_batch, inference_steps=inference_steps, generator=generator,
             )[:action_steps]

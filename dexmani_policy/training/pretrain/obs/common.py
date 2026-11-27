@@ -17,7 +17,6 @@ from dexmani_policy.common.pytorch_util import (
     set_rng_state,
     set_seed,
 )
-from dexmani_policy.datasets.preprocess.contact_map import contact_zarr_path
 from dexmani_policy.training.config import check_fresh_output, load_config, normalize_output_dir
 from dexmani_policy.training.data import (
     build_train_loader,
@@ -26,7 +25,6 @@ from dexmani_policy.training.data import (
     record_data_processing,
     record_training_data,
     restore_data_records,
-    use_policy_split,
 )
 from dexmani_policy.training.logging import (
     ExperimentLogger,
@@ -80,14 +78,9 @@ def load_run(method, argv=None):
         cfg.dataloader.num_workers = args.num_workers
     if args.log_interval is not None:
         cfg.training.loop.log_interval_steps = args.log_interval
-    if args.policy_config is not None:
-        source = use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
-        if method == "cordvip" and args.zarr_path is None and cfg.model.contact_loss_weight > 0:
-            cfg.zarr_path = cfg.dataset.zarr_path = str(contact_zarr_path(source))
-    elif args.zarr_path is not None:
-        cfg.zarr_path = args.zarr_path
-        cfg.dataset.zarr_path = cfg.zarr_path
-    return cfg, checkpoint, args.max_updates
+    if args.zarr_path is not None and args.policy_config is None:
+        cfg.zarr_path = cfg.dataset.zarr_path = args.zarr_path
+    return cfg, checkpoint, args
 
 
 def export_encoder(checkpoint, output_path):
@@ -142,33 +135,31 @@ def evaluate(model, dataset, batch_size, device, *, stop):
         set_rng_state(rng_state, device)
 
 
-def train(method, model_class, argv=None):
-    cfg, checkpoint, max_updates = load_run(method, argv)
+def train(cfg, build_model, *, checkpoint=None, max_updates=None, before_optimizer_step=None):
     resuming = checkpoint is not None
-    if resuming and checkpoint.global_step >= cfg.training.loop.total_train_steps:
-        print(f"Pretraining already completed at step {checkpoint.global_step}")
+    step = checkpoint.global_step if resuming else 0
+    if resuming and step >= cfg.training.loop.total_train_steps:
+        print(f"Pretraining already completed at step {step}")
         return
     if not resuming:
         check_fresh_output(normalize_output_dir(cfg), "encoder.pt")
     if max_updates is not None:
         positive_int(max_updates, "max_updates")
     positive_int(cfg.training.loop.log_interval_steps, "training.loop.log_interval_steps")
-    is_afro = method == "afro"
-    if is_afro:
+    epoch_schedule = "num_epochs" in cfg.training
+    if epoch_schedule:
         positive_int(cfg.training.num_epochs, "training.num_epochs")
-        positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
-        if cfg.training.loop.gradient_accumulation_steps != 1:
-            raise ValueError("AFRO VICReg requires accumulation=1")
+        save_every = positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
     else:
-        positive_int(cfg.training.save_every_updates, "training.save_every_updates")
+        save_every = positive_int(cfg.training.save_every_updates, "training.save_every_updates")
         positive_int(cfg.training.loop.total_train_steps, "training.loop.total_train_steps")
-        positive_int(cfg.training.loop.gradient_accumulation_steps, "training.loop.gradient_accumulation_steps")
+    positive_int(cfg.training.loop.gradient_accumulation_steps, "training.loop.gradient_accumulation_steps")
 
-    set_seed(cfg.training.seed + (checkpoint.global_step if resuming else 0))
+    set_seed(cfg.training.seed + step)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     dataset = hydra.utils.instantiate(cfg.dataset, _convert_="all")
-    if checkpoint is None:
+    if not resuming:
         record_training_data(cfg, dataset.episode_store, dataset.train_mask, dataset.val_mask)
         record_data_processing(cfg, dataset)
     else:
@@ -183,14 +174,11 @@ def train(method, model_class, argv=None):
     loader = build_train_loader(cfg, dataset)
     batches_per_epoch = len(loader)
     accumulation = cfg.training.loop.gradient_accumulation_steps
-    model: torch.nn.Module
-    if is_afro:
-        model = model_class(cfg.normalization)
-        if not resuming:
-            with open_dict(cfg.training.loop):
-                cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
-    else:
-        model = model_class(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model)
+    model = build_model(dataset)
+    updates_per_epoch = (batches_per_epoch + accumulation - 1) // accumulation
+    if epoch_schedule and not resuming:
+        with open_dict(cfg.training.loop):
+            cfg.training.loop.total_train_steps = cfg.training.num_epochs * updates_per_epoch
     if not resuming:
         fit_observation_normalizer(dataset, model.normalizer, cfg.normalization)
     device = torch.device(cfg.training.device)
@@ -203,19 +191,16 @@ def train(method, model_class, argv=None):
         [{"params": parameters, "param_names": list(names)}], **optimizer_options,
     )
     total = cfg.training.loop.total_train_steps
-    step = 0
     if resuming:
         # The optimizer already owns these Parameters; restore their values in place.
         model.load_state_dict(checkpoint.model_state, strict=True)
         model.normalizer.validate()
         restore_optimizer(optimizer, checkpoint.optimizer_state)
-        step = checkpoint.global_step
     scheduler = build_scheduler(
         optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total,
         state=checkpoint.scheduler_state if resuming else None,
     )
     del checkpoint
-    updates_per_epoch = (batches_per_epoch + accumulation - 1) // accumulation
     stop_step = total if max_updates is None else min(total, step + max_updates)
 
     def forward(batch):
@@ -247,9 +232,8 @@ def train(method, model_class, argv=None):
                         iterator, group_size, parameters, forward, device=device, log_metrics=record,
                     )
                     clip_gradients(parameters, finite_loss, step=step)
-                    if is_afro:
-                        # AFRO updates the independent teacher before the online optimizer step.
-                        model.update_teacher(current_epoch)
+                    if before_optimizer_step is not None:
+                        before_optimizer_step(model, current_epoch)
                     lr = optimizer.param_groups[0]["lr"]
                     optimizer.step()
                     scheduler.step()
@@ -265,8 +249,7 @@ def train(method, model_class, argv=None):
                         if metrics is not None:
                             logger.log(metrics, step)
                     periodic = (
-                        epoch_end and epoch % cfg.training.save_every_epochs == 0
-                        if is_afro else step % cfg.training.save_every_updates == 0
+                        epoch_end and epoch % save_every == 0 if epoch_schedule else step % save_every == 0
                     )
                     should_stop = stop.requested or step >= stop_step
                     if periodic or should_stop:

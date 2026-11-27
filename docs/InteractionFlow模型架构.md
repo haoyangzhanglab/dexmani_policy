@@ -52,7 +52,7 @@ flowchart TD
     velocity --> sampling["推理：Euler Sampling → 动作反归一化"]
 ```
 
-训练和推理共用同一 Action Backbone Forward。推理以噪声初始化动作，反复计算 Action Velocity 并做 Euler 积分。
+训练和推理共用 Action Backbone 的动作嵌入、Block 和输出计算。推理以噪声初始化动作，反复计算 Action Velocity 并做 Euler 积分。
 
 ## 单帧观测编码
 
@@ -116,7 +116,7 @@ EMA 默认开启，用于权重平均、checkpoint 保存恢复和 EMA Policy �
 
 `InteractionDiTX` 继承 `DiTX.forward()`，训练和推理均只返回动作速度。
 
-各 Block 通过 `prepare_context_kv()` 生成自身的单路或双路 K/V，InteractionDiTX 复用基类缓存准备入口。标准推理在 eval 模式下运行：观测编码一次，Scene、State 和 Interaction 各投影一次，每层 Global K/V 与 Interaction K/V 各缓存一次，每层直接缓存 `(global_kv, interaction_kv)`，不携带 State AdaLN 条件。10 次 Euler 迭代复用该请求内的缓存及分块预计算的12组 Time-only AdaLN 调制，每层 Action Query 在每步重新计算。缓存不保存为跨请求 Module State。每步调制形状为 `[1,L,12,D]`，直接广播到整个 Batch，不复制相同参数。单步采样沿用直接前向；训练仍使用各样本独立的 Flow Timestep。输出反归一化后仍从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
+InteractionFlow 自己准备多步推理所需的 Action Velocity，再用公共 Euler 更新函数积分。eval 模式下，观测编码一次，Scene、State 和 Interaction 各投影一次。每层的 `(global_kv, interaction_kv)` 与分块预计算的 12 组 Time-only AdaLN 调制在本次请求内复用，Action Query 每步重新计算。每步调制形状为 `[1,L,12,D]`，广播到整个 Batch。单步采样直接前向，训练使用每个样本自己的 Flow Timestep。输出反归一化后从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
 ## 运行与验证
 
@@ -149,7 +149,7 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 相关实现：[Policy 与损失](../dexmani_policy/agents/policies/interaction_flow.py)、[InteractionDiTX](../dexmani_policy/agents/action_decoders/backbones/interaction_ditx.py)、[Flow 采样](../dexmani_policy/agents/action_decoders/flow.py)、[Dataset](../dexmani_policy/datasets/demonstration.py)。
 
 ```bash
-python -m pytest dexmani_policy/test_tools/test_regression.py -q
+python -m pytest -q
 ```
 
 相关回归测试覆盖：

@@ -5,8 +5,8 @@ import numpy as np
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.inference import select_inference_weights
 from dexmani_policy.common.io_util import write_json
+from dexmani_policy.deployment import select_inference_weights
 from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy, resolve_rollout_options
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 

@@ -7,7 +7,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS
+from dexmani_policy.common.config import (
+    CALIBRATED_POINT_CLOUD_FIELDS, POINT_CLOUD_FIELDS, validate_nonempty_point_cloud,
+)
 from dexmani_policy.common.image_util import preprocess_rgb_train, validate_rgb_preprocessing
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.datasets.episode_store import EpisodeStore
@@ -58,7 +60,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.sensor_modalities = sensor_modalities
         self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys, pc_dim=pc_dim)
         self.build_augmentors(augmentation_cfg)
-        if {"point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"} <= set(sensor_modalities):
+        if CALIBRATED_POINT_CLOUD_FIELDS.issubset(sensor_modalities):
             if rgb_preprocess_size is not None:
                 raise ValueError(
                     "Pinhole RGB must retain its input resolution in Dataset; resize in ImageProcessor"
@@ -131,20 +133,26 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         if not indices:
             return []
         data = self._samples_to_data(indices, self.sampler.sample_batch(indices))
-        return [self._prepare_sample(sample) for sample in data]
+        return [self._prepare_sample(sample, index) for index, sample in zip(indices, data)]
 
     def _samples_to_data(self, indices, samples):
-        return [self.sample_to_data(sample) for sample in samples]
+        for sample in samples:
+            yield self.sample_to_data(sample)
 
-    def _prepare_sample(self, data):
+    def _prepare_sample(self, data, index):
+        obs = data["obs"]
+        if CALIBRATED_POINT_CLOUD_FIELDS.issubset(obs):
+            validate_nonempty_point_cloud(
+                obs["point_cloud"], source=f"{self.episode_store.path}, sample {index}",
+            )
         # Each sample has a separate writable row range for in-place augmentation.
         for modality, augmentors in self.augmentors.items():
-            values = data["obs"][modality]
+            values = obs[modality]
             for augmentor in augmentors:
                 if np.random.random() <= augmentor.prob:
                     augmentor.augment(values)
-        if "rgb" in data["obs"]:
-            rgb = data["obs"]["rgb"]
+        if "rgb" in obs:
+            rgb = obs["rgb"]
             if self.rgb_preprocess_size is not None:
                 rgb = preprocess_rgb_train(
                     rgb, resize_hw=self.rgb_preprocess_size,
@@ -152,7 +160,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 )
             else:
                 rgb = np.ascontiguousarray(rgb.transpose(0, 3, 1, 2))
-            data["obs"]["rgb"] = rgb
+            obs["rgb"] = rgb
 
         return dict_apply(data, torch.as_tensor)
 

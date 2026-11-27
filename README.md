@@ -52,6 +52,31 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 
 InteractionFlow 的观测字段与动作窗口见[方法说明](docs/InteractionFlow模型架构.md)，训练、续训和评测命令见[运行与验证](docs/InteractionFlow模型架构.md#运行与验证)。EMA 默认开启，用于权重平均与评测，也可通过 `training.use_ema=false` 关闭。
 
+## 修改与验证
+
+模块职责、训练与推理调用关系，以及新增策略和观测字段的入口见[项目架构](docs/项目架构.md)。各方法配方独立展开，方法间的参数差异直接在各自 YAML 中维护。
+
+在 `policy` 环境、仓库根目录运行回归测试。测试额外需要 `pytest` 和用于 contact label 用例的 `open3d`；也可以单独运行一个策略或公共模块的测试。
+
+```bash
+python -m pytest -q
+python -m pytest tests/test_inference.py -q
+python -m pytest tests/test_dp3.py -q
+```
+
+使用本地 `multi_grasp` 示教做短程 GPU 验证：
+
+```bash
+python scripts/smoke_test.py dp3 --device cuda:0 \
+  --override task_name=multi_grasp \
+  --override dataset.max_train_episodes=1 \
+  --override dataloader.batch_size=2 \
+  --override dataloader.num_workers=0 \
+  --override training.use_compile=false
+```
+
+smoke 默认完成 4 次训练更新和 2 次续训更新，检查 checkpoint 步数后清理临时目录；用 `--output-dir` 可保留运行产物。
+
 ## 文档
 
 - 了解项目和数据　[项目架构](docs/项目架构.md) · [示教数据格式](docs/仿真数据集格式.md)

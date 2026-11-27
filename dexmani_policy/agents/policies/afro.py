@@ -33,6 +33,18 @@ class AFRO(Policy):
     supports_rtc = True
     supported_action_keys = ("action",)
 
+    @classmethod
+    def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
+        from dexmani_policy.training.initialization import create_policy, initialize_policy, load_encoder_prior
+
+        model = create_policy(cfg, dataset, checkpoint=checkpoint)
+        state, fields = None, ()
+        if checkpoint is None and cfg.initialization.encoder is not None:
+            state, fields = load_encoder_prior(cfg, dataset, model.obs_encoder.pc_encoder, ("point_cloud",))
+        return initialize_policy(
+            model, cfg, dataset, field_dims, checkpoint=checkpoint, pretrained_state=state, inherited_fields=fields,
+        )
+
     def __init__(
         self,
         horizon: int = 16,

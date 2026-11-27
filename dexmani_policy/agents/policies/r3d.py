@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 
@@ -53,6 +55,25 @@ class R3D(Policy):
     joint_dim = 19
     ee_dim = 9
 
+    @classmethod
+    def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
+        from dexmani_policy.datasets.episode_store import check_finite
+        from dexmani_policy.training.data import record_prior_data
+        from dexmani_policy.training.initialization import create_policy, initialize_policy
+
+        model = create_policy(cfg, dataset, checkpoint=checkpoint)
+        if checkpoint is None:
+            source = cfg.initialization.uni3d
+            model.obs_encoder.pc_encoder.initialize_weights(source)
+            if source is not None:
+                record_prior_data(cfg, dataset, source, {"source": None})
+        elif not resuming:
+            store, key = dataset.episode_store, "point_cloud"
+            columns = dataset.consumed_fields[key]
+            for start, values in store.iter_chunks(key, columns=columns, episode_mask=dataset.train_mask):
+                check_finite(store, key, start, values, columns)
+        return initialize_policy(model, cfg, dataset, field_dims, checkpoint=checkpoint)
+
     def __init__(
         self,
         horizon: int,
@@ -76,8 +97,11 @@ class R3D(Policy):
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
     ) -> None:
-        if use_aux_ee and action_dim != self.joint_dim + self.ee_dim:
-            raise ValueError("R3D auxiliary prediction requires joint19 + ee9")
+        if use_aux_ee:
+            if action_dim != self.joint_dim + self.ee_dim:
+                raise ValueError("R3D auxiliary prediction requires joint19 + ee9")
+            if not math.isfinite(aux_loss_weight) or aux_loss_weight < 0:
+                raise ValueError("aux_loss_weight must be finite and nonnegative")
         self.use_aux_ee = use_aux_ee
 
         obs_encoder = R3DEncoder(

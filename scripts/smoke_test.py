@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.training.config import load_config
+from dexmani_policy.training.config import load_policy_config
 from dexmani_policy.training.resume import prepare_resume
 from dexmani_policy.training.trainer import run_trainer, run_training
 
@@ -43,7 +43,7 @@ def main(argv=None):
     output = nullcontext(args.output_dir) if args.output_dir is not None else tempfile.TemporaryDirectory(prefix="dexmani-smoke-")
     with output as directory:
         directory = Path(directory).expanduser().resolve()
-        cfg = load_config(args.config, args.override, config_dir=args.config_dir)
+        cfg = load_policy_config(args.config, args.override, config_dir=args.config_dir)
         if args.device is not None:
             cfg.training.device = args.device
         step, final = run_smoke(cfg, directory, max_updates=args.max_updates, resume_updates=args.resume_updates)

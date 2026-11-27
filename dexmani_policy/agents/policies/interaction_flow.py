@@ -6,8 +6,8 @@ import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.interaction_ditx import InteractionDiTX
-from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.obs_encoder.interaction import HandObjectInteractionEncoder
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow, integrate_euler
+from dexmani_policy.agents.obs_encoder.interaction.hand_object_interaction import HandObjectInteractionEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import Policy
 
@@ -38,6 +38,22 @@ class InteractionObservationEncoder(nn.Module):
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
         state = self.state_encoder(obs["joint_state"]).unflatten(0, (-1, self.n_obs_steps))
         return torch.cat((scene, state, interaction), dim=1)
+
+
+class InteractionRectifiedFlow(RectifiedFlow):
+    def _sample_euler(self, sample, cond, timesteps):
+        if self.training or self.model.training or len(timesteps) == 1:
+            return super()._sample_euler(sample, cond, timesteps)
+
+        context_kv = self.model.prepare_context_kv(cond)
+        modulations = self.model.sampling_modulations(timesteps, self.num_inference_steps)
+
+        def predict_velocity(sample, _index, _timestep):
+            return self.model.forward_with_modulations(
+                sample, cond, next(modulations), context_kv=context_kv,
+            )
+
+        return integrate_euler(sample, timesteps, predict_velocity)
 
 
 class InteractionFlow(Policy):
@@ -88,7 +104,7 @@ class InteractionFlow(Policy):
         )
         super().__init__(
             obs_encoder=obs_encoder,
-            action_decoder=RectifiedFlow(backbone, num_inference_steps, time_shift_alpha),
+            action_decoder=InteractionRectifiedFlow(backbone, num_inference_steps, time_shift_alpha),
             horizon=horizon, n_obs_steps=n_obs_steps, n_action_steps=n_action_steps,
             action_dim=action_dim,
         )

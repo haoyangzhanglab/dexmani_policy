@@ -49,6 +49,14 @@ class Policy(nn.Module):
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
     supports_rtc: bool = False
 
+    @classmethod
+    def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
+        """Build and initialize on CPU before the trainer binds optimizer/EMA parameters."""
+        from dexmani_policy.training.initialization import create_policy, initialize_policy
+
+        model = create_policy(cfg, dataset, checkpoint=checkpoint)
+        return initialize_policy(model, cfg, dataset, field_dims, checkpoint=checkpoint)
+
     def __init__(
         self,
         obs_encoder: nn.Module,

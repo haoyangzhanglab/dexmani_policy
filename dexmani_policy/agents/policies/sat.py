@@ -3,8 +3,6 @@ from __future__ import annotations
 from functools import partial
 from typing import Literal
 
-import torch
-
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.backbones.sat_action_io import SATActionIO
@@ -90,9 +88,3 @@ class SAT(Policy):
             n_action_steps=n_action_steps,
             action_dim=action_dim,
         )
-
-    def _encode_obs(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
-        obs_steps = obs_dict["point_cloud"].shape[1]
-        if obs_steps != self.n_obs_steps:
-            raise ValueError(f"SAT requires {self.n_obs_steps} observation frames, got {obs_steps}")
-        return super()._encode_obs(obs_dict)

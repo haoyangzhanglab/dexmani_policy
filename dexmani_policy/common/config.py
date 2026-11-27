@@ -13,6 +13,7 @@ FIXED_OBSERVATION_SHAPES: dict[str, tuple[int, ...]] = {
     "camera_extrinsic": (12,),
 }
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
+CALIBRATED_POINT_CLOUD_FIELDS = frozenset({"point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"})
 
 
 def validate_ddim_steps(steps: int, name: str, *, num_training_steps: int) -> int:
@@ -40,6 +41,12 @@ def validate_observation_shape(name: str, shape: tuple[int, ...], *, width: int 
         raise ValueError(f"proprio requires one vector per frame, got {shape}")
     elif width is not None and (not shape or shape[-1] != width):
         raise ValueError(f"{name} requires feature width {width}, got frame shape {shape}")
+
+
+def validate_nonempty_point_cloud(points, *, source: str) -> None:
+    empty = ~points[..., :3].any(axis=(-2, -1))
+    if empty.any():
+        raise ValueError(f"{source}: point_cloud contains an empty frame at index {empty.argmax()} (all XYZ are zero)")
 
 
 def positive_float(value: float, name: str) -> float:

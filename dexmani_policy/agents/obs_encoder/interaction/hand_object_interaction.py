@@ -63,11 +63,6 @@ class HandObjectInteractionEncoder(RGBPointSceneEncoder):
         scene_tokens, scene_points, _ = self.encode_scene(obs)
         return self.encode_interaction(obs, scene_tokens, scene_points)
 
-    def encode_scene(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if obs["point_cloud"][..., :3].eq(0).all(dim=(1, 2)).any():
-            raise ValueError("point_cloud contains an empty frame (all XYZ coordinates are zero)")
-        return super().encode_scene(obs)
-
     def encode_interaction(
         self, obs: dict[str, torch.Tensor], scene_tokens: torch.Tensor, scene_points: torch.Tensor,
     ) -> torch.Tensor:

@@ -28,6 +28,9 @@ dependencies = [
 dev = ["pytest"]
 preprocess = ["open3d"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["dexmani_policy*"]

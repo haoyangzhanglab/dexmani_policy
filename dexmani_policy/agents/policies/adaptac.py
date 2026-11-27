@@ -8,10 +8,7 @@ from torch import nn
 from dexmani_policy.agents.action_decoders.backbones.force_transformer import ForceTransformer
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
-from dexmani_policy.agents.obs_encoder.interaction import (
-    ForceGuidedFusion,
-    VisuoTactileAttention,
-)
+from dexmani_policy.agents.obs_encoder.interaction.future_tactile import ForceGuidedFusion, VisuoTactileAttention
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.point_transformer import PointTransformerEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
@@ -75,6 +72,14 @@ class AdapTac(Policy):
     required_identity_fields = frozenset({"point_cloud"})
     supports_rtc = True
     supported_action_keys = ("action",)
+
+    @classmethod
+    def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
+        if checkpoint is not None and not resuming:
+            saved_agent = checkpoint.effective_config["agent"]
+            if cfg.agent.tactile_encoder._target_ != saved_agent["tactile_encoder"]["_target_"]:
+                raise ValueError("Tactile encoder differs from initialization policy")
+        return super().build_for_training(cfg, dataset, field_dims, checkpoint=checkpoint, resuming=resuming)
 
     def __init__(
         self,

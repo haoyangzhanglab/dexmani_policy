@@ -164,10 +164,19 @@ class AFRO(nn.Module):
             target.mul_(momentum).add_(online, alpha=1 - momentum)
 
 
-def main():
-    from dexmani_policy.training.pretrain.obs.common import train
+def main(argv=None):
+    from dexmani_policy.training.data import use_policy_split
+    from dexmani_policy.training.pretrain.obs.common import load_run, train
 
-    train("afro", AFRO)
+    cfg, checkpoint, args = load_run("afro", argv)
+    if args.policy_config is not None:
+        use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
+    if cfg.training.loop.gradient_accumulation_steps != 1:
+        raise ValueError("AFRO VICReg requires accumulation=1")
+    train(
+        cfg, lambda _dataset: AFRO(cfg.normalization), checkpoint=checkpoint, max_updates=args.max_updates,
+        before_optimizer_step=AFRO.update_teacher,
+    )
 
 
 if __name__ == "__main__":

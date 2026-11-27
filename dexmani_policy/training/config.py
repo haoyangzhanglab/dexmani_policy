@@ -27,8 +27,11 @@ def load_config(config, overrides=(), *, config_dir=None):
     directory = CONFIG_ROOT if config_dir is None else Path(config_dir).expanduser().resolve()
     search = [] if config_dir is None else [f'hydra.searchpath=["file://{CONFIG_ROOT}"]']
     with hydra.initialize_config_dir(config_dir=str(directory), version_base=None):
-        cfg = hydra.compose(config_name=name, overrides=[*search, *overrides])
-    return assemble_policy_config(cfg) if "policy_name" in cfg else cfg
+        return hydra.compose(config_name=name, overrides=[*search, *overrides])
+
+
+def load_policy_config(config, overrides=(), *, config_dir=None):
+    return assemble_policy_config(load_config(config, overrides, config_dir=config_dir))
 
 
 def assemble_policy_config(cfg):

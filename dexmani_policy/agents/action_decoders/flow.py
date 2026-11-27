@@ -16,6 +16,13 @@ def interpolate_flow(noise, target, timestep):
     return (1.0 - timestep) * noise + timestep * target
 
 
+def integrate_euler(sample, timesteps, predict_velocity):
+    step_size = 1.0 / len(timesteps)
+    for index, timestep in enumerate(timesteps):
+        sample = sample + step_size * predict_velocity(sample, index, timestep)
+    return sample
+
+
 def _sample_flow(
     decoder, cond, action_shape, inference_steps, *,
     generator, rtc_prefix, delay_steps, history_offset, rtc_guidance_cap,
@@ -35,16 +42,17 @@ def _sample_flow(
         )
 
     sample = torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
+    timesteps = euler_time_grid(num_steps, sample)
+    return decoder._sample_euler(sample, cond, timesteps)
+
+
+def _sample_euler(decoder, sample, cond, timesteps, *, target_t_sample_mode=None):
+    num_steps = len(timesteps)
+    batch_size = sample.shape[0]
     step_size = 1.0 / num_steps
     context_kv = (
         decoder.model.prepare_context_kv(cond)
         if not decoder.training and num_steps > 1 else None
-    )
-    timesteps = euler_time_grid(num_steps, sample)
-    prepare_modulations = getattr(decoder.model, "sampling_modulations", None)
-    modulations = (
-        prepare_modulations(timesteps, decoder.num_inference_steps)
-        if context_kv is not None and prepare_modulations is not None else None
     )
     target_times = None
     if target_t_sample_mode is not None:
@@ -53,18 +61,16 @@ def _sample_flow(
             if target_t_sample_mode == "relative" else timesteps + step_size
         )
 
-    model_kwargs = {}
-    for index, timestep in enumerate(timesteps):
-        if modulations is not None:
-            model_kwargs["modulations"] = next(modulations)
+    def predict_velocity(sample, index, timestep):
+        model_kwargs = {}
         if target_times is not None:
-            model_kwargs["target_t"] = target_times[index].expand(action_shape[0])
-        velocity = decoder.model(
-            x=sample, timestep=timestep.expand(action_shape[0]), context=cond,
+            model_kwargs["target_t"] = target_times[index].expand(batch_size)
+        return decoder.model(
+            x=sample, timestep=timestep.expand(batch_size), context=cond,
             context_kv=context_kv, **model_kwargs,
         )
-        sample = sample + step_size * velocity
-    return sample
+
+    return integrate_euler(sample, timesteps, predict_velocity)
 
 
 class RectifiedFlow(nn.Module):
@@ -108,6 +114,9 @@ class RectifiedFlow(nn.Module):
         xt = interpolate_flow(noise, actions, t_view)
         target_v = actions - noise
         return xt, t, target_v
+
+    def _sample_euler(self, sample, cond, timesteps):
+        return _sample_euler(self, sample, cond, timesteps)
 
     @torch.no_grad()
     def predict_action(
@@ -278,6 +287,9 @@ class ConsistencyFlow(nn.Module):
             "loss_consistency": loss_consistency.detach(),
         }
         return loss, metrics
+
+    def _sample_euler(self, sample, cond, timesteps):
+        return _sample_euler(self, sample, cond, timesteps, target_t_sample_mode=self.target_t_sample_mode)
 
     @torch.no_grad()
     def predict_action(

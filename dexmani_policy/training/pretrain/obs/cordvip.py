@@ -7,7 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.modules import build_mlp
-from dexmani_policy.agents.obs_encoder.interaction import ContactCoordinationEncoder
+from dexmani_policy.agents.obs_encoder.interaction.correspondence import ContactCoordinationEncoder
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes
 
 
@@ -84,10 +84,20 @@ class CordViP(nn.Module):
         return loss, {"loss": loss.detach(), **metrics}
 
 
-def main():
-    from dexmani_policy.training.pretrain.obs.common import train
+def main(argv=None):
+    from dexmani_policy.datasets.preprocess.contact_map import contact_zarr_path
+    from dexmani_policy.training.data import use_policy_split
+    from dexmani_policy.training.pretrain.obs.common import load_run, train
 
-    train("cordvip", CordViP)
+    cfg, checkpoint, args = load_run("cordvip", argv)
+    if args.policy_config is not None:
+        source = use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
+        if args.zarr_path is None and cfg.model.contact_loss_weight > 0:
+            cfg.zarr_path = cfg.dataset.zarr_path = str(contact_zarr_path(source))
+    train(
+        cfg, lambda dataset: CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model),
+        checkpoint=checkpoint, max_updates=args.max_updates,
+    )
 
 
 if __name__ == "__main__":

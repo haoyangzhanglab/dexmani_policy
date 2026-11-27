@@ -40,7 +40,7 @@ agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.r3d.R3D
   use_aux_ee: ${use_aux_ee}
-  aux_loss_weight: 1.0
+  aux_loss_weight: 1.0  # 启用辅助预测时须为有限非负值，0 关闭辅助损失。
 
   state_dim: 19
   state_out_dim: 256

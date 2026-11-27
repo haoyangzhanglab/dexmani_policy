@@ -18,6 +18,34 @@ class DQRISE(Policy):
     hand_dim = 12
     decoder_action_dim = 8
 
+    @classmethod
+    def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
+        from omegaconf import open_dict
+
+        from dexmani_policy.agents.hand_prior.codebook import load_codebook
+        from dexmani_policy.training.data import iter_validated_actions, record_prior_data
+        from dexmani_policy.training.initialization import create_policy, initialize_policy
+
+        if checkpoint is not None:
+            if not resuming:
+                if cfg.agent.get("num_codes") is None:
+                    with open_dict(cfg.agent):
+                        cfg.agent.num_codes = checkpoint.effective_config["agent"]["num_codes"]
+                for _ in iter_validated_actions(dataset):
+                    pass
+            return super().build_for_training(cfg, dataset, field_dims, checkpoint=checkpoint, resuming=resuming)
+
+        source = cfg.initialization.codebook
+        if source is None:
+            raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
+        codebook, hand_affine, record = load_codebook(source)
+        record_prior_data(cfg, dataset, source, record)
+        with open_dict(cfg.agent):
+            cfg.agent.num_codes = codebook.num_codes
+        model = create_policy(cfg, dataset)
+        model.hand_codebook = codebook
+        return initialize_policy(model, cfg, dataset, field_dims, hand_affine=hand_affine)
+
     def __init__(
         self,
         *,
