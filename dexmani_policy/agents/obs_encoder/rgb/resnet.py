@@ -88,8 +88,8 @@ class ResNetEncoder(nn.Module):
         return self
 
     def forward(self, rgb: torch.Tensor) -> dict[str, torch.Tensor]:
-        flat_rgb = rgb.to(memory_format=torch.channels_last)
-        feature_map = self.backbone(flat_rgb)
+        # Match the convolution weights' layout for fused AdamW on CUDA.
+        feature_map = self.backbone(rgb.contiguous())
         feature_map = self.proj(feature_map)
 
         return {"global_token": feature_map.mean(dim=(-2, -1))}

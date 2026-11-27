@@ -1,8 +1,9 @@
+import pytest
 import torch
 from omegaconf import OmegaConf
 from torch import nn
 
-from dexmani_policy.agents.obs_encoder.rgb.resnet import convert_group_norm
+from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder, convert_group_norm
 
 
 def test_bn_to_gn_copies_learned_affines():
@@ -16,6 +17,21 @@ def test_bn_to_gn_copies_learned_affines():
     torch.testing.assert_close(model[0].weight, batch_norm.weight)
     torch.testing.assert_close(model[0].bias, batch_norm.bias)
     assert set(model[0].state_dict()) == {"weight", "bias"}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("norm_mode", ["batch_norm", "frozen_bn", "group_norm"])
+def test_resnet_fused_adamw_step(norm_mode):
+    encoder = ResNetEncoder(norm_mode=norm_mode).cuda()
+    optimizer = torch.optim.AdamW(encoder.parameters(), fused=True)
+    rgb = torch.randn(2, 3, 64, 64, device="cuda").to(memory_format=torch.channels_last)
+    weight = encoder.backbone[0].weight
+    previous = weight.detach().clone()
+
+    encoder(rgb)["global_token"].square().mean().backward()
+    assert torch.isfinite(weight.grad).all()
+    optimizer.step()
+    assert torch.isfinite(weight).all() and not torch.equal(weight, previous)
 
 
 def test_warm_start_inherits_rgb_architecture():

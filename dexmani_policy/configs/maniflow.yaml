@@ -3,8 +3,8 @@ defaults:
   - _self_
 
 # ManiFlow：结合 flow matching 与 EMA 一致性训练。
-# 本项目配方：窗口16、观测2、执行8；训练时间网格10，decoder 和评测默认10步 Euler。
-# 位置编码适配：动作使用可学习位置 embedding；观测同一帧的点共享时间 embedding，无点序号编码。
+# 本项目配方：窗口16、观测2、执行8；一致性起点均匀离散采样，decoder 和评测默认10步 Euler。
+# 位置编码适配：动作使用可学习位置 embedding；同一观测帧的点共享帧位置 embedding，无点序号编码。
 
 policy_name: maniflow
 
@@ -63,7 +63,7 @@ agent:
   timestep_embed_dim: 128
   target_t_embed_dim: 128
 
-  denoise_timesteps: 10  # 一致性训练的离散时间网格。
+  denoise_timesteps: 10  # 一致性起点均匀采样于{0, 0.1, ..., 0.9}，与batch大小无关。
   num_inference_steps: 10  # 默认 Euler 推理步数。
   flow_batch_ratio: 0.75
   t_sample_mode_for_flow: beta

@@ -12,6 +12,7 @@ from dexmani_policy.agents.action_decoders.backbones.modules import (
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, ForceDiffusion
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow, RectifiedFlow
+from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler
 
 from tests.helpers import check_context_cache
 
@@ -267,6 +268,26 @@ def test_flow_direction_and_rtc_against_reference():
         expected += 0.125
         expected[:, 1:] += 0.1 * weight * residual
     torch.testing.assert_close(guided, expected)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("num_steps,batch_size", [
+    (1, 3), (8, 8), (10, 1), (10, 3), (10, 10), (10, 32), (16, 7),
+])
+def test_maniflow_discrete_time_distribution(device, num_steps, batch_size):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    torch.manual_seed(37)
+    sampler = TimeSampler(num_steps)
+    times = torch.stack([sampler.sample(batch_size, "discrete", device) for _ in range(1024)])
+    assert times.shape == (1024, batch_size) and times.dtype == torch.float32
+    # Official policy.sample_t uses the entire uniform grid even for one sample.
+    grid = torch.arange(num_steps, device=device).float() / num_steps
+    torch.testing.assert_close(times.unique(), grid, rtol=0, atol=0)
+    counts = (times * num_steps).round().long().flatten().bincount(minlength=num_steps)
+    torch.testing.assert_close(
+        counts.float() / times.numel(), torch.full_like(grid, 1 / num_steps), rtol=0, atol=0.04,
+    )
 
 
 @pytest.mark.parametrize("mode", ["relative", "absolute"])

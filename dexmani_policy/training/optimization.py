@@ -1,4 +1,5 @@
 import torch
+from torch.nn.modules.batchnorm import _BatchNorm
 from torch.optim.swa_utils import get_ema_multi_avg_fn
 
 from dexmani_policy.training.logging import accumulate_metrics
@@ -72,7 +73,7 @@ def build_optimizer(
 
 
 class EMA:
-    """Exponential moving average with power-law warmup."""
+    """Exponential moving average with power-law warmup and direct BatchNorm sync."""
 
     def __init__(
         self,
@@ -86,10 +87,21 @@ class EMA:
     ) -> None:
         ema_model.eval()
         ema_model.requires_grad_(False)
+        self.batch_norm_state: list[tuple[torch.Tensor, torch.Tensor]] = []
+        batch_norm_parameters: set[torch.nn.Parameter] = set()
+        for module, ema_module in zip(model.modules(), ema_model.modules()):
+            if isinstance(module, _BatchNorm):
+                batch_norm_parameters.update(module.parameters(recurse=False))
+                self.batch_norm_state.extend(zip(
+                    ema_module.buffers(recurse=False), module.buffers(recurse=False),
+                ))
+
         self.parameters = []
         self.ema_parameters = []
         for param, ema_param in zip(model.parameters(), ema_model.parameters()):
-            if param.requires_grad:
+            if param in batch_norm_parameters:
+                self.batch_norm_state.append((ema_param, param))
+            elif param.requires_grad:
                 self.parameters.append(param)
                 self.ema_parameters.append(ema_param)
         self.update_after_step = update_after_step
@@ -107,9 +119,11 @@ class EMA:
 
     @torch.no_grad()
     def step(self, global_step: int) -> None:
-        decay = self.get_decay(global_step)
-        update = get_ema_multi_avg_fn(decay)
-        update(self.ema_parameters, self.parameters, global_step)
+        if self.parameters:
+            update = get_ema_multi_avg_fn(self.get_decay(global_step))
+            update(self.ema_parameters, self.parameters, global_step)
+        for ema_tensor, tensor in self.batch_norm_state:
+            ema_tensor.copy_(tensor)
 
 
 def build_scheduler(optimizer, name, num_warmup_steps, num_training_steps, *, state=None):

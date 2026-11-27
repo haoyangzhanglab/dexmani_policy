@@ -27,11 +27,18 @@ from dexmani_policy.training.pretrain.obs import common as obs_training
 from dexmani_policy.training.resume import prepare_resume
 from dexmani_policy.training.trainer import build_trainer, run_trainer
 
-from tests.helpers import MeanDecoder, training_config
+from tests.helpers import MeanDecoder, TinyPolicy, training_config
 
 
 class CustomDexJoCoRunner(DexJoCoRunner):
     pass
+
+
+class BatchNormPolicy(TinyPolicy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        linear = self.obs_encoder.linear
+        self.obs_encoder.linear = nn.Sequential(linear, nn.BatchNorm1d(linear.out_features))
 
 
 def test_dexjoco_subclass_requires_observation_metadata(tmp_path, small_policy_config):
@@ -57,6 +64,34 @@ def test_flow_decoder_ema_training_and_compile_routing(decoder_type):
         trainer.compile_models()
     student.assert_called_once_with(mode="default")
     assert teacher.call_count == int(requires_ema)
+
+
+def test_batch_norm_ema_fine_tuning_and_resume(tmp_path, small_policy_config):
+    cfg = small_policy_config(tmp_path, f"agent._target_={__name__}.BatchNormPolicy")
+    with closing(build_trainer(cfg)) as trainer:
+        bn = trainer.model.obs_encoder.linear[1]
+        ema_bn = trainer.ema_model.obs_encoder.linear[1]
+        initial_weight = bn.weight.detach().clone()
+        trainer.train(max_updates=2)
+        assert not torch.equal(bn.weight, initial_weight)
+        assert bn.num_batches_tracked.item() == 2
+        torch.testing.assert_close(ema_bn.state_dict(), bn.state_dict(), rtol=0, atol=0)
+
+    saved = load_checkpoint(tmp_path / "checkpoints/latest.pt")
+    with closing(prepare_resume(tmp_path)) as trainer:
+        linear, bn = trainer.model.obs_encoder.linear
+        ema_linear, ema_bn = trainer.ema_model.obs_encoder.linear
+        torch.testing.assert_close(trainer.ema_model.state_dict(), saved.ema_model_state)
+        previous = ema_linear.weight.detach().clone()
+        decay = trainer.ema_updater.get_decay(trainer.global_step)
+        assert 0 < decay < 1
+        trainer.train(max_updates=1)
+
+        assert bn.num_batches_tracked.item() == 3
+        assert not ema_bn.training
+        torch.testing.assert_close(ema_bn.state_dict(), bn.state_dict(), rtol=0, atol=0)
+        assert not torch.equal(ema_linear.weight, linear.weight)
+        torch.testing.assert_close(ema_linear.weight, previous.lerp(linear.weight, 1 - decay))
 
 
 def test_resume_and_warm_start_state_boundaries(tmp_path, small_policy_config, make_demo, monkeypatch):

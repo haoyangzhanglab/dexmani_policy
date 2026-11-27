@@ -9,7 +9,6 @@ import hydra
 import numpy as np
 import torch
 from omegaconf import OmegaConf, open_dict
-from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, policy_state_dict, save_checkpoint
@@ -119,19 +118,6 @@ class PolicyTrainer:
         if model.requires_ema_for_loss and not cfg.training.use_ema:
             raise ValueError(f"{type(model).__name__} requires training.use_ema=true")
 
-        if cfg.training.use_ema:
-            active_batchnorm = [
-                name or "<root>" for name, module in model.named_modules()
-                if isinstance(module, _BatchNorm) and (
-                    any(p.requires_grad for p in module.parameters(recurse=False))
-                    or (module.training and module.track_running_stats)
-                )
-            ]
-            if active_batchnorm:
-                raise ValueError(
-                    f"EMA requires frozen BatchNorm or GroupNorm; active modules: {active_batchnorm}"
-                )
-
         # Freeze before EMA selects the trainable parameters.
         obs_lr = cfg.optimizer.get("obs_lr")
         if (cfg.optimizer.lr if obs_lr is None else obs_lr) == 0:
@@ -147,7 +133,7 @@ class PolicyTrainer:
                 raise ValueError("Resume checkpoint is missing EMA state")
             ema_model.load_weights(checkpoint.ema_model_state, device)
         if ema_model is not None:
-            # Bind current Parameters only after assignment and device migration.
+            # Bind tensors after checkpoint assignment and device migration.
             ema_updater = hydra.utils.instantiate(cfg.ema, model=model, ema_model=ema_model)
 
         self.device = device
