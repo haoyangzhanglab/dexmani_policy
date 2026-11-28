@@ -58,15 +58,11 @@ class R3D(Policy):
     @classmethod
     def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
         from dexmani_policy.datasets.episode_store import check_finite
-        from dexmani_policy.training.data import record_prior_data
         from dexmani_policy.training.initialization import create_policy, initialize_policy
 
         model = create_policy(cfg, dataset, checkpoint=checkpoint)
         if checkpoint is None:
-            source = cfg.initialization.uni3d
-            model.obs_encoder.pc_encoder.initialize_weights(source)
-            if source is not None:
-                record_prior_data(cfg, dataset, source, {"source": None})
+            model.obs_encoder.pc_encoder.initialize_weights(cfg.initialization.uni3d)
         elif not resuming:
             store, key = dataset.episode_store, "point_cloud"
             columns = dataset.consumed_fields[key]

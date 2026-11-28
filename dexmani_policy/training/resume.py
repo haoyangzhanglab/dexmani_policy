@@ -7,6 +7,7 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.training.runtime import lock_run_directory
 
 
 def prepare_resume(
@@ -56,12 +57,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     options = vars(args)
     max_updates = options.pop("max_updates")
-    trainer = prepare_resume(**options)
-    if trainer is None:
-        return
-    from dexmani_policy.training.trainer import run_trainer
+    with lock_run_directory(args.run):
+        trainer = prepare_resume(**options)
+        if trainer is None:
+            return
+        from dexmani_policy.training.trainer import run_trainer
 
-    run_trainer(trainer, max_updates=max_updates)
+        run_trainer(trainer, max_updates=max_updates)
 
 
 if __name__ == "__main__":

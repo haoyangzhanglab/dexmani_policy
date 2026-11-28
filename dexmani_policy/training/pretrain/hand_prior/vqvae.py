@@ -21,9 +21,10 @@ from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.pretrain.hand import load_hand_array
 from dexmani_policy.datasets.split import format_split_summary, split_episodes
 from dexmani_policy.training.config import check_fresh_output, load_config, normalize_output_dir
-from dexmani_policy.training.data import record_training_data, use_policy_split
+from dexmani_policy.training.data import record_training_data
 from dexmani_policy.training.optimization import build_scheduler, clip_gradients
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
+from dexmani_policy.training.runtime import lock_run_directory
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +133,7 @@ def train(cfg):
         optimizer, "cosine", num_warmup_steps=recipe.warmup_steps, num_training_steps=total_steps
     )
 
-    logger.info("VQ export: %s", "validation lookup_mse best" if val_loader is not None else "last checkpoint")
-    best_lookup_mse = float("inf")
-
+    checkpoint_path = checkpoint_dir / "last.pt"
     for epoch in range(1, recipe.num_epochs + 1):
         vqvae.train()
         sums = torch.zeros(3, device=device, dtype=torch.float64)
@@ -183,43 +182,32 @@ def train(cfg):
         with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps({"epoch": epoch, **metrics}, allow_nan=False) + "\n")
 
-        checkpoint_paths = []
         if epoch % recipe.save_epochs == 0 or epoch == recipe.num_epochs:
-            checkpoint_paths.append(checkpoint_dir / "last.pt")
-        if val_loader is not None and metrics["val_lookup_mse"] < best_lookup_mse:
-            best_lookup_mse = metrics["val_lookup_mse"]
-            checkpoint_paths.append(checkpoint_dir / "best.pt")
-        if checkpoint_paths:
             payload = {
                 "epoch": int(epoch),
                 "model_state_dict": vqvae.state_dict(),
                 "normalizer_state_dict": normalizer.state_dict(),
                 "model_config": vqvae.model_config,
                 "metrics": metrics,
-                "training_data": OmegaConf.to_container(cfg.training_data),
             }
-            for checkpoint_path in checkpoint_paths:
-                with atomic_path(checkpoint_path) as temporary:
-                    torch.save(payload, temporary)
-                logger.info("checkpoint saved: %s", checkpoint_path)
+            with atomic_path(checkpoint_path) as temporary:
+                torch.save(payload, temporary)
+            logger.info("checkpoint saved: %s", checkpoint_path)
 
-    selected_path = checkpoint_dir / ("best.pt" if val_loader is not None else "last.pt")
     codebook_path = output_dir / "codebook.npz"
-    export_codebook(selected_path, codebook_path, device="cpu")
-    print(f"Saved selected runtime codebook: {codebook_path}")
+    export_codebook(checkpoint_path, codebook_path, device="cpu")
+    print(f"Saved final codebook: {codebook_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="pretrain/hand_prior/vqvae", help="Config name or relative path under dexmani_policy/configs")
-    parser.add_argument("--policy-config", help="Read the data split from a resolved policy YAML")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. vq_vae.device=cpu")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = load_config(args.config, args.overrides)
-    if args.policy_config is not None:
-        use_policy_split(cfg, args.policy_config)
-    train(cfg)
+    with lock_run_directory(cfg.workspace.output_dir, create=True):
+        train(cfg)
 
 
 if __name__ == "__main__":

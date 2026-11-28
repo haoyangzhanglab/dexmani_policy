@@ -98,10 +98,6 @@ class EpisodeStore:
     def n_episodes(self):
         return len(self.episode_ends)
 
-    @property
-    def source_path(self):
-        return self.attrs.get("source_zarr_path", self.path)
-
     def source_groups(self, episode_mask=None):
         return {
             source for index, source in enumerate(self.episode_groups)

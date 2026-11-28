@@ -20,7 +20,7 @@ from dexmani_policy.training import initialization
 from dexmani_policy.training.config import check_fresh_output, normalize_output_dir, validate_config
 from dexmani_policy.training.data import (
     build_dataset, build_train_loader, close_data_loader, record_data_processing,
-    record_prior_data, record_training_data, restore_data_records,
+    record_training_data, validate_resume_data,
 )
 from dexmani_policy.training.logging import (
     ExperimentLogger, print_param_count, print_training_recipe, to_log_scalars,
@@ -53,7 +53,7 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
         with open_dict(cfg):
             cfg.normalization = warm_config["normalization"]
             cfg.normalization_dims = warm_config["normalization_dims"]
-            cfg.initialization.policy = None
+            cfg.initialization.policy = str(warm_start)
         initialization.inherit_rgb_architecture(cfg.agent, warm_config["agent"])
     if checkpoint is None:
         check_fresh_output(output_dir)
@@ -69,13 +69,11 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
     dexjoco = issubclass(runner_class, DexJoCoRunner)
     record_data_processing(cfg, dataset, dexjoco=dexjoco)
     if checkpoint is None:
-        record_training_data(cfg, store, dataset.train_mask)
+        record_training_data(cfg, store, dataset.train_mask, dataset.val_mask)
         policy_dt = data_dt
-        if warm_start is not None:
-            record_prior_data(cfg, dataset, warm_start, warm_config["training_data"], from_policy=True)
     else:
         saved = checkpoint.effective_config
-        restore_data_records(cfg, store, dataset.train_mask, saved=saved)
+        validate_resume_data(store, dataset.train_mask, dataset.val_mask, saved=saved)
         if dexjoco and cfg.data_processing != saved["data_processing"]:
             raise ValueError(
                 f"Resume DexJoCo observation processing mismatch: "
@@ -94,22 +92,16 @@ def build_trainer(cfg, *, checkpoint: Checkpoint | None = None) -> "PolicyTraine
     )
     if checkpoint is None:
         with open_dict(cfg):
-            cfg.pop("max_updates", None)
             cfg.normalization_dims = model.normalization_dims
             cfg.agent.update(model.effective_config)
         OmegaConf.resolve(cfg)
     return PolicyTrainer(cfg, model, dataset, checkpoint=checkpoint)
 
 
-def run_trainer(trainer, *, max_updates=None):
+def run_trainer(trainer: "PolicyTrainer", *, max_updates: int | None = None) -> None:
     with cleanup_on_exit(trainer.close):
         trainer.compile_models()
         trainer.train(max_updates=max_updates)
-        return trainer.global_step
-
-
-def run_training(cfg, *, max_updates=None):
-    return run_trainer(build_trainer(cfg), max_updates=max_updates)
 
 
 class PolicyTrainer:
@@ -248,7 +240,7 @@ class PolicyTrainer:
         )
         self.logger.log(metrics, step=self.global_step)
 
-    def train(self, *, max_updates=None):
+    def train(self, *, max_updates: int | None = None) -> None:
         if max_updates is not None:
             positive_int(max_updates, "max_updates")
         torch.set_float32_matmul_precision("highest")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +16,6 @@ from dexmani_policy.common.io_util import atomic_path
 def build_hand_prototypes(model: HandVQVAE) -> torch.Tensor:
     """Decode and clamp the runtime prototype table."""
     embeddings = model.codebooks
-    weights = model.quantizer.layer_weights.softmax(0)
     combinations = torch.cartesian_prod(
         *[
             torch.arange(model.codebook_size, device=embeddings.device)
@@ -25,9 +23,9 @@ def build_hand_prototypes(model: HandVQVAE) -> torch.Tensor:
         ]
     ).reshape(-1, model.num_groups)
     latent = embeddings.new_zeros(len(combinations), model.latent_dim)
-    for group, weight in enumerate(weights):
-        latent = latent + weight * embeddings[group, combinations[:, group]]
-    decoded = model.decoder(latent).float()
+    for group in range(model.num_groups):
+        latent = latent + embeddings[group, combinations[:, group]]
+    decoded = model.decoder(latent / model.num_groups).float()
     if not torch.isfinite(decoded).all():
         raise ValueError("VQ decoder produced non-finite hand states")
     return decoded.clamp(-1, 1)
@@ -59,7 +57,7 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         with open(temporary, "wb") as file:
             np.savez(
                 file, sorted_hand_poses=poses, hand_normalizer_scale=scale.numpy(),
-                hand_normalizer_offset=offset.numpy(), training_data=json.dumps(checkpoint["training_data"]),
+                hand_normalizer_offset=offset.numpy(),
             )
     return len(poses)
 

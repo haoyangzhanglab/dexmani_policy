@@ -32,6 +32,10 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 
 新实验使用新的 `RUN` 目录。要沿用原数据和训练进度，在 `policy` 环境运行 `python -m dexmani_policy.training.resume --run "$RUN"`。
 
+每个运行目录同时只允许一个训练或续训进程。撞到正在使用的目录时，命令会立即退出。预训练也遵循同一约定。
+
+新训练可传入 `+max_updates=N`，续训可传入 `--max-updates N`，限制本次运行的更新步数。达到步数上限时会保存 checkpoint，后续可沿原训练预算继续。
+
 ### DexJoCo
 
 将导出的示教放在 `robot_data/dexjoco/<task>.zarr`。在 `dexmani_policy/configs/` 下新建配方，`defaults` 依次引用 `dp` 或 `dp3`、`eval/dexjoco` 和 `_self_`。训练时将配方名和 `task_name=<task>` 传给 `train.sh`。评测使用与数据导出相同的 DexJoCo 提交，并设置 `MUJOCO_GL=egl`。 [DexJoCo 示教导出与评测](https://github.com/haoyangzhanglab/dexjoco/blob/main/docs/dexmani_policy.md)
@@ -50,32 +54,11 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 | `afro` / `cordvip` | 分别从场景变化和手物交互学习观测表征 |
 | `adaptac` | 用未来接触力引导动作生成 |
 
-InteractionFlow 的观测字段与动作窗口见[方法说明](docs/InteractionFlow模型架构.md)，训练、续训和评测命令见[运行与验证](docs/InteractionFlow模型架构.md#运行与验证)。EMA 默认开启，用于权重平均与评测，也可通过 `training.use_ema=false` 关闭。
+InteractionFlow 的观测字段与动作窗口见[方法说明](docs/InteractionFlow模型架构.md)，训练、续训和评测命令见[运行](docs/InteractionFlow模型架构.md#运行)。EMA 默认开启，用于权重平均与评测，也可通过 `training.use_ema=false` 关闭。
 
-## 修改与验证
+## 修改实验
 
 模块职责、训练与推理调用关系，以及新增策略和观测字段的入口见[项目架构](docs/项目架构.md)。各方法配方独立展开，方法间的参数差异直接在各自 YAML 中维护。
-
-在 `policy` 环境、仓库根目录运行回归测试。测试额外需要 `pytest` 和用于 contact label 用例的 `open3d`；也可以单独运行一个策略或公共模块的测试。
-
-```bash
-python -m pytest -q
-python -m pytest tests/test_inference.py -q
-python -m pytest tests/test_dp3.py -q
-```
-
-使用本地 `multi_grasp` 示教做短程 GPU 验证：
-
-```bash
-python scripts/smoke_test.py dp3 --device cuda:0 \
-  --override task_name=multi_grasp \
-  --override dataset.max_train_episodes=1 \
-  --override dataloader.batch_size=2 \
-  --override dataloader.num_workers=0 \
-  --override training.use_compile=false
-```
-
-smoke 默认完成 4 次训练更新和 2 次续训更新，检查 checkpoint 步数后清理临时目录；用 `--output-dir` 可保留运行产物。
 
 ## 文档
 

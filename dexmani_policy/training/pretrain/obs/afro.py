@@ -165,18 +165,15 @@ class AFRO(nn.Module):
 
 
 def main(argv=None):
-    from dexmani_policy.training.data import use_policy_split
-    from dexmani_policy.training.pretrain.obs.common import load_run, train
+    from dexmani_policy.training.pretrain.obs.common import open_run, train
 
-    cfg, checkpoint, args = load_run("afro", argv)
-    if args.policy_config is not None:
-        use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
-    if cfg.training.loop.gradient_accumulation_steps != 1:
-        raise ValueError("AFRO VICReg requires accumulation=1")
-    train(
-        cfg, lambda _dataset: AFRO(cfg.normalization), checkpoint=checkpoint, max_updates=args.max_updates,
-        before_optimizer_step=AFRO.update_teacher,
-    )
+    with open_run("afro", argv) as (cfg, checkpoint, args):
+        if cfg.training.loop.gradient_accumulation_steps != 1:
+            raise ValueError("AFRO VICReg requires accumulation=1")
+        train(
+            cfg, lambda _dataset: AFRO(cfg.normalization), checkpoint=checkpoint, max_updates=args.max_updates,
+            before_optimizer_step=AFRO.update_teacher,
+        )
 
 
 if __name__ == "__main__":

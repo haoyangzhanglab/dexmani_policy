@@ -40,7 +40,7 @@ class CordViP(Policy):
         state, fields = None, ()
         if checkpoint is None and cfg.initialization.encoder is not None:
             state, fields = load_encoder_prior(
-                cfg, dataset, model.obs_encoder.interaction_encoder,
+                cfg, model.obs_encoder.interaction_encoder,
                 ("hand_pointcloud", "object_pointcloud", "joint_state"),
             )
         return initialize_policy(

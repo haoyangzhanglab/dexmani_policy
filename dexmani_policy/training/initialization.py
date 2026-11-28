@@ -8,7 +8,7 @@ from omegaconf import open_dict
 from dexmani_policy.common.checkpoint import Checkpoint
 from dexmani_policy.common.normalizer import normalization_feature_shapes
 from dexmani_policy.training.data import (
-    fit_action_normalizer, fit_observation_normalizer, record_prior_data,
+    fit_action_normalizer, fit_observation_normalizer,
 )
 
 if TYPE_CHECKING:
@@ -68,7 +68,6 @@ def create_policy(cfg, dataset, *, checkpoint=None):
     rgb_source = cfg.initialization.get("rgb")
     if rgb_source is not None:
         rgb_encoder.initialize_weights(rgb_source)
-        record_prior_data(cfg, dataset, rgb_source, {"source": None})
     elif getattr(rgb_encoder, "tune_mode", None) in {"freeze", "lora"}:
         raise ValueError(
             "Fresh RGB training with tune_mode=freeze or lora would freeze a random backbone; "
@@ -78,10 +77,9 @@ def create_policy(cfg, dataset, *, checkpoint=None):
     return model
 
 
-def load_encoder_prior(cfg, dataset, encoder, fields):
+def load_encoder_prior(cfg, encoder, fields):
     source = cfg.initialization.encoder
     payload = torch.load(Path(source).expanduser(), map_location="cpu", weights_only=True)
-    record_prior_data(cfg, dataset, source, payload["training_data"])
     encoder.load_state_dict(payload["encoder_state"], strict=True)
     with open_dict(cfg.normalization):
         for key in fields:

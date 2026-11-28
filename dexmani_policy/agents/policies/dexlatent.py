@@ -19,7 +19,7 @@ class DexLatent(Policy):
 
     @classmethod
     def build_for_training(cls, cfg, dataset, field_dims, *, checkpoint=None, resuming=False):
-        from dexmani_policy.training.data import iter_validated_actions, record_prior_data
+        from dexmani_policy.training.data import iter_validated_actions
         from dexmani_policy.training.initialization import create_policy, initialize_policy
 
         if checkpoint is not None:
@@ -31,7 +31,6 @@ class DexLatent(Policy):
         model = create_policy(cfg, dataset)
         source = cfg.initialization.dexlatent
         hand_affine = model.hand_prior.initialize_weights(source)
-        record_prior_data(cfg, dataset, source, {"source": None})
         initialize_policy(model, cfg, dataset, field_dims, hand_affine=hand_affine)
         # Latent limits depend on the hand affine inherited from its prior.
         latents = (model._encode_action_parts(chunk)[1] for chunk in dataset.iter_normalization_data("action"))

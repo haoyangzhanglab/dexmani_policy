@@ -23,7 +23,7 @@ class DQRISE(Policy):
         from omegaconf import open_dict
 
         from dexmani_policy.agents.hand_prior.codebook import load_codebook
-        from dexmani_policy.training.data import iter_validated_actions, record_prior_data
+        from dexmani_policy.training.data import iter_validated_actions
         from dexmani_policy.training.initialization import create_policy, initialize_policy
 
         if checkpoint is not None:
@@ -38,8 +38,7 @@ class DQRISE(Policy):
         source = cfg.initialization.codebook
         if source is None:
             raise ValueError("Fresh DQ-RISE training requires initialization.codebook")
-        codebook, hand_affine, record = load_codebook(source)
-        record_prior_data(cfg, dataset, source, record)
+        codebook, hand_affine = load_codebook(source)
         with open_dict(cfg.agent):
             cfg.agent.num_codes = codebook.num_codes
         model = create_policy(cfg, dataset)

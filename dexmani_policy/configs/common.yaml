@@ -2,6 +2,7 @@
 defaults:
   - eval/dexmani_sim@_here_
   - _self_
+  - override /hydra/job_logging: stdout
 
 task_name: pick_apple_messy
 zarr_path: robot_data/dexmani_sim/${task_name}.zarr
@@ -61,6 +62,7 @@ workspace:
     mode: offline
 
 hydra:
+  output_subdir: null
   run:
     dir: experiments/train/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

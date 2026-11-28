@@ -85,19 +85,13 @@ class CordViP(nn.Module):
 
 
 def main(argv=None):
-    from dexmani_policy.datasets.preprocess.contact_map import contact_zarr_path
-    from dexmani_policy.training.data import use_policy_split
-    from dexmani_policy.training.pretrain.obs.common import load_run, train
+    from dexmani_policy.training.pretrain.obs.common import open_run, train
 
-    cfg, checkpoint, args = load_run("cordvip", argv)
-    if args.policy_config is not None:
-        source = use_policy_split(cfg, args.policy_config, zarr_path=args.zarr_path)
-        if args.zarr_path is None and cfg.model.contact_loss_weight > 0:
-            cfg.zarr_path = cfg.dataset.zarr_path = str(contact_zarr_path(source))
-    train(
-        cfg, lambda dataset: CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model),
-        checkpoint=checkpoint, max_updates=args.max_updates,
-    )
+    with open_run("cordvip", argv) as (cfg, checkpoint, args):
+        train(
+            cfg, lambda dataset: CordViP(cfg.normalization, n_obs_steps=dataset.obs_horizon, **cfg.model),
+            checkpoint=checkpoint, max_updates=args.max_updates,
+        )
 
 
 if __name__ == "__main__":

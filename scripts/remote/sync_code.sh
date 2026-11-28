@@ -18,7 +18,7 @@ BASH
 rsync -azs --progress \
     --exclude='.git/' --exclude='__pycache__/' --exclude='*.py[cod]' --exclude='*.so' \
     --exclude='build/' --exclude='dist/' --exclude='*.egg-info/' --exclude='*.egg' \
-    --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.ruff_cache/' --exclude='.mypy_cache/' \
+    --exclude='.cache/' --exclude='.ruff_cache/' --exclude='.mypy_cache/' \
     --exclude='.ipynb_checkpoints/' --exclude='.DS_Store' \
     --exclude='/.agents/' --exclude='/.codex/' --exclude='/.claude/' --exclude='/.vscode/' \
     --exclude='/.aws/' --exclude='/.env*' \

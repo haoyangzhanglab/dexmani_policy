@@ -19,10 +19,6 @@ CUDA_FRAME_BATCH = 4
 CUDA_POINT_TILE = 1024
 
 
-def contact_zarr_path(source: Path) -> Path:
-    return source.parent / "cordvip" / source.name
-
-
 def estimate_normals(points):
     import open3d as o3d
 
@@ -95,20 +91,18 @@ def generate(zarr_path, output=None, num_workers=1, *, device="cpu"):
     if device.type not in {"cpu", "cuda"}:
         raise ValueError("Contact generation supports device=cpu or cuda")
     source = Path(zarr_path).expanduser().absolute()
-    output = contact_zarr_path(source) if output is None else Path(output).expanduser()
+    output = source.parent / "cordvip" / source.name if output is None else Path(output).expanduser()
     if output.exists():
         raise FileExistsError(f"Contact output already exists: {output}")
     fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None}
     buffer = EpisodeStore(source, keys=fields, pc_dim=3)
     rows = int(buffer.episode_ends[-1])
     point_count = buffer["object_pointcloud"].shape[1]
-    attrs = dict(buffer.attrs)
-    attrs["source_zarr_path"] = buffer.source_path
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".contact-", dir=output.parent) as directory:
         temporary = Path(directory) / "data.zarr"
         group = zarr.open_group(zarr.DirectoryStore(temporary), mode="w")
-        group.attrs.update(attrs)
+        group.attrs.update(buffer.attrs)
         zarr.copy(buffer.meta, group)
         data = group.create_group("data")
         for key, columns in fields.items():

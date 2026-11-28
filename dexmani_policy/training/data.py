@@ -1,9 +1,8 @@
 from math import isfinite, prod
-from pathlib import Path
 
 import hydra
 import torch
-from omegaconf import OmegaConf, open_dict
+from omegaconf import open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import (
@@ -12,22 +11,8 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.normalizer import FieldNormalizer, LinearNormalizer
 from dexmani_policy.common.pytorch_util import rebase_eef_rotvec
-from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
+from dexmani_policy.datasets.episode_store import check_finite
 from dexmani_policy.env_runner.dexjoco_runner import observation_processing
-
-
-def use_policy_split(cfg, policy_config, *, zarr_path=None) -> Path:
-    policy = OmegaConf.load(Path(policy_config).expanduser())
-    source_path = Path(policy.zarr_path).expanduser().absolute()
-    source = str(source_path.resolve())
-    cfg.task_name = policy.task_name
-    cfg.zarr_path = source if zarr_path is None else zarr_path
-    cfg.dataset.zarr_path = cfg.zarr_path
-    for key in ("seed", "val_episodes", "max_train_episodes"):
-        cfg.dataset[key] = policy.dataset[key]
-    with open_dict(cfg):
-        cfg.policy_zarr_path = source
-    return source_path
 
 
 def _episode_layout(store):
@@ -41,44 +26,24 @@ def _episode_layout(store):
     return layout
 
 
-def record_training_data(cfg, store, train, val=None):
+def record_training_data(cfg, store, train, val):
     layout = _episode_layout(store)
     train_groups = store.source_groups(train)
-    val_groups = store.source_groups(val) if val is not None else set()
-    record = {"source": store.source_path, "train_source_episodes": sorted(train_groups)}
-    if val_groups:
-        record["val_source_episodes"] = sorted(val_groups)
-    reference_path = cfg.get("policy_zarr_path")
-    if reference_path is not None:
-        if store.attrs.get("task_name") != cfg.task_name:
-            raise ValueError(f"{store.path}: pretraining task must match {cfg.task_name}")
-        if store.source_path != reference_path:
-            raise ValueError(f"{store.path}: pretraining data must share the original policy Zarr")
-        if reference_path != store.path:
-            reference = EpisodeStore(reference_path, keys=())
-            if layout != _episode_layout(reference):
-                raise ValueError(f"{store.path}: pretraining data must share the policy episode layout")
+    val_groups = store.source_groups(val)
+    record = {"train_source_episodes": sorted(train_groups), "val_source_episodes": sorted(val_groups)}
     with open_dict(cfg):
-        cfg.pop("policy_zarr_path", None)
-        cfg.pop("prior_data", None)
         cfg.zarr_path = cfg.dataset.zarr_path = store.path
         cfg.training_data = record
         cfg.episode_layout = layout
 
 
-def restore_data_records(cfg, store, train, val=None, *, saved: dict):
+def validate_resume_data(store, train, val, *, saved: dict):
     saved_path = saved["dataset"]["zarr_path"]
     if store.path != saved_path:
         raise ValueError(f"Resume Zarr path mismatch (dataset={store.path!r}, checkpoint={saved_path!r})")
     record = saved["training_data"]
-    if store.source_path != record["source"]:
-        raise ValueError(
-            f"Resume data source mismatch (dataset={store.source_path!r}, checkpoint={record['source']!r})"
-        )
-    splits = [("train", train, record["train_source_episodes"])]
-    if val is not None:
-        splits.append(("validation", val, record.get("val_source_episodes", [])))
-    for split, mask, expected in splits:
+    for split, mask in (("train", train), ("val", val)):
+        expected = record[f"{split}_source_episodes"]
         groups = store.source_groups(mask)
         if groups != set(expected):
             raise ValueError(
@@ -87,35 +52,6 @@ def restore_data_records(cfg, store, train, val=None, *, saved: dict):
     layout = saved["episode_layout"]
     if _episode_layout(store) != layout:
         raise ValueError(f"Resume episode layout mismatch for {store.path}")
-    with open_dict(cfg):
-        cfg.zarr_path = cfg.dataset.zarr_path = saved_path
-        cfg.training_data = record
-        cfg.episode_layout = layout
-        if "prior_data" in saved:
-            cfg.prior_data = saved["prior_data"]
-        else:
-            cfg.pop("prior_data", None)
-
-
-def record_prior_data(cfg, dataset, asset, record: dict, *, from_policy=False):
-    store = dataset.episode_store
-    source = record["source"]
-    same_source = source is not None and source == store.source_path
-    if same_source:
-        excess_train = set(record["train_source_episodes"]) - store.source_groups(dataset.train_mask)
-        excess_val = set(record.get("val_source_episodes", ())) - store.source_groups(dataset.val_mask)
-        if excess_train or excess_val:
-            raise ValueError(
-                f"{asset}: same-source prior exceeds the policy episode split: "
-                f"train={sorted(excess_train)}, validation={sorted(excess_val)}"
-            )
-    budget_verified = same_source and not from_policy
-    if not budget_verified:
-        print(f"[Dataset] Prior {asset} has an unverified training budget")
-    with open_dict(cfg):
-        if "prior_data" not in cfg:
-            cfg.prior_data = []
-        cfg.prior_data.append({**record, "artifact": str(asset), "budget_verified": budget_verified})
 
 
 def fit_observation_normalizer(

@@ -40,7 +40,6 @@ optimizer:
   obs_weight_decay: 1.0e-6
 training:
   use_compile: false
-  use_ema: false
   lr_warmup_steps: 0
   max_grad_norm: 0
 eval:

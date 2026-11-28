@@ -40,7 +40,7 @@ class AFRO(Policy):
         model = create_policy(cfg, dataset, checkpoint=checkpoint)
         state, fields = None, ()
         if checkpoint is None and cfg.initialization.encoder is not None:
-            state, fields = load_encoder_prior(cfg, dataset, model.obs_encoder.pc_encoder, ("point_cloud",))
+            state, fields = load_encoder_prior(cfg, model.obs_encoder.pc_encoder, ("point_cloud",))
         return initialize_policy(
             model, cfg, dataset, field_dims, checkpoint=checkpoint, pretrained_state=state, inherited_fields=fields,
         )

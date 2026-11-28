@@ -118,7 +118,7 @@ EMA 默认开启，用于权重平均、checkpoint 保存恢复和 EMA Policy �
 
 InteractionFlow 自己准备多步推理所需的 Action Velocity，再用公共 Euler 更新函数积分。eval 模式下，观测编码一次，Scene、State 和 Interaction 各投影一次。每层的 `(global_kv, interaction_kv)` 与分块预计算的 12 组 Time-only AdaLN 调制在本次请求内复用，Action Query 每步重新计算。每步调制形状为 `[1,L,12,D]`，广播到整个 Batch。单步采样直接前向，训练使用每个样本自己的 Flow Timestep。输出反归一化后从索引 1 起返回 15 个 `future_actions`，默认执行前 8 个，然后重新观测规划。
 
-## 运行与验证
+## 运行
 
 准备上述字段的示教数据及 [DINOv2-small 权重](../data/README.md#外部模型)。在 `policy` 环境、仓库根目录运行：
 
@@ -148,21 +148,6 @@ bash scripts/eval/evaluate.sh --checkpoint "$RUN/checkpoints/latest.pt" --episod
 
 相关实现：[Policy 与损失](../dexmani_policy/agents/policies/interaction_flow.py)、[InteractionDiTX](../dexmani_policy/agents/action_decoders/backbones/interaction_ditx.py)、[Flow 采样](../dexmani_policy/agents/action_decoders/flow.py)、[Dataset](../dexmani_policy/datasets/demonstration.py)。
 
-```bash
-python -m pytest -q
-```
-
-相关回归测试覆盖：
-
-- Condition Packing、串行 Cross-Attention、Context K/V 缓存的输出与梯度等价性。
-- FM 梯度传播、普通日志与不等长 microbatch 的梯度累积。
-- EMA 开关、训练保存恢复、raw/EMA 权重推理和动作输出形状。
-- Time-only AdaLN、Rectified Flow 采样和观测历史。
-
-单元测试不衡量机器人任务成功率。
-
-### Time-only AdaLN 验证
-
-回归测试覆盖真实 Encoder 的观测窗口1/2/3、逐帧 State 扰动隔离、完整 State 历史、共享 Frame Embedding、Time-only AdaLN、State 梯度，以及 EMA、梯度累积和保存恢复。采样覆盖 Batch Size 1及大于1、单步、5/10步及跨 Chunk 的 Euler，检查调制广播、顺序和 Cached/Uncached 输出及梯度等价性；缓存测试使用非零速度输出和 AdaLN 权重。
+### Time-only AdaLN 参数量
 
 默认 Action Backbone 参数量为152,693,011。每层双路 QK LayerNorm 共包含768个参数，8层合计6,144。含 S 个时间步的预计算调制形状为 `[S,1,L,12,D]`，计算不随 Batch Size 重复。此处不将参数量或缓存机制视为延迟、完整训练效果或机器人闭环成功率的实测结论。

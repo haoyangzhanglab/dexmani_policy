@@ -22,7 +22,6 @@ dist/
 
 # Local caches and editor files
 .cache/
-.pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .ipynb_checkpoints/
